@@ -7,7 +7,7 @@
 ## 当前进度
 
 - 已实现：无清单结果契约 v2.0、数据/引用校验、媒体探测、准确切片、真实文件 ASR、文本商品发现、本地 OCR 和可恢复的 Python 分析 CLI。
-- 尚未实现：Java 业务服务、Vue 审核工作台和正式审核版本导出。
+- Java 已实现视频上传、MySQL 来源注册、列表查询和 Range 播放；尚未实现持久任务调度、Vue 审核工作台和正式审核版本导出。
 - 合成示例用于接口开发，不代表真实视频分析效果；性能与质量数据均待测。
 - 真实文件 ASR 已接通：公开 10 分钟开发样本生成 97 条时间戳转写；这证明接口链路，不代表转写或商品定位精度已达标。
 - 真实识别仍按开发样本逐轮核验；结构合法和单元测试通过均不代表定位准确，详见 [真实验证记录](./docs/06-首轮真实视频验证.md)。
@@ -16,6 +16,7 @@
 
 - [方案总览](./docs/README.md)
 - [当前执行需求：无商品清单](./docs/05-无清单识别需求变更.md)
+- [Java 视频来源服务与启动](./docs/07-Java视频来源服务.md)
 - [PRD](./docs/01-PRD.md)
 - [技术路线](./docs/02-技术路线.md)
 - [AI 开发任务书](./docs/03-AI开发任务书.md)
@@ -82,6 +83,8 @@ uv run --extra ocr livecut analyze data/raw/sample.mp4 --output-dir data/runs/sa
 输出包括 `analysis-result.json`、`run-manifest.json`、`preview-report.json`、`preview-clips/`，OCR 证据保存在同级的 `<输出目录>-ocr/`。预览不是审核通过的正式成片，结果始终为 DRAFT。空结果、无匹配、预算耗尽和 Provider 失败均明确返回，不会改用假数据。`--visual-provider none` 可关闭 OCR；`api` 是可选视觉接口，本账号免费额度耗尽时会明确失败，不会更改计费设置。
 
 doctor 只报告凭证是否配置，不显示密钥；“已配置”不代表已验证有效。真实素材和模型输出保存在被 Git 忽略的 data 目录。
+
+Java 服务使用仓库内 Maven Wrapper，无需全局安装 Maven；在独立测试库配置完成后运行 `./scripts/java.ps1 -Task Verify`，开发服务运行 `./scripts/java.ps1 -Task Run`。API 及 MySQL 启动步骤见 [Java 服务说明](./docs/07-Java视频来源服务.md)。当前视频状态 `HEADER_CHECKED` 只代表基本上传校验，完整媒体可用性仍需计算 Worker 探测。
 
 ## 功能交付规则
 

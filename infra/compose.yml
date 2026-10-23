@@ -1,0 +1,24 @@
+name: livecut
+
+services:
+  mysql:
+    image: mysql:8.4.13@sha256:76f0358884cb92d9a086d24e5671c38048d3fef40f2588703d73eb55392d6b69
+    environment:
+      MYSQL_DATABASE: livecut
+      MYSQL_USER: livecut
+      MYSQL_PASSWORD: ${LIVECUT_DB_PASSWORD:?Set LIVECUT_DB_PASSWORD in your private env file}
+      MYSQL_ROOT_PASSWORD: ${LIVECUT_DB_ROOT_PASSWORD:?Set LIVECUT_DB_ROOT_PASSWORD in your private env file}
+    ports:
+      - "127.0.0.1:${LIVECUT_DB_PORT:-13306}:3306"
+    volumes:
+      - mysql-data:/var/lib/mysql
+      - ./mysql/001-test-database.sql:/docker-entrypoint-initdb.d/001-test-database.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "MYSQL_PWD=\"$$MYSQL_PASSWORD\" mysqladmin ping --host=127.0.0.1 --user=\"$$MYSQL_USER\" --silent"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 30s
+
+volumes:
+  mysql-data:
