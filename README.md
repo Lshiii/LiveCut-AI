@@ -6,7 +6,7 @@
 
 ## 当前进度
 
-- 已完成：设计文档、无清单结果契约 v2.0、Schema/业务引用校验、数据集来源及划分校验、开发 CLI。
+- 已完成：无清单结果契约 v2.0、数据/引用校验、开发 CLI、MP4 探测、音频提取、非关键帧准确转码切片。
 - 尚未实现：Java 业务服务、Python 计算流水线、Vue 工作台和真实模型端到端处理。
 - 合成示例用于接口开发，不代表真实视频分析效果；性能与质量数据均待测。
 
@@ -37,6 +37,16 @@ uv run livecut validate-result contracts/analysis-result.example.json
 uv run livecut validate-dataset fixtures/dataset.example.json --metadata-only
 uv run pytest
 ```
+
+媒体命令（时间单位为原视频毫秒）：
+
+```powershell
+uv run livecut probe data/raw/sample.mp4
+uv run livecut extract-audio data/raw/sample.mp4 --output data/runs/sample/audio.wav
+uv run livecut clip data/raw/sample.mp4 --start-ms 1250 --end-ms 2750 --output data/runs/sample/clip.mp4
+```
+
+需要 FFmpeg/ffprobe；可通过 LIVECUT_FFMPEG_PATH、LIVECUT_FFPROBE_PATH 或命令参数指定。首版媒体处理支持已验证的 H.264/AAC MP4，非零或无法确定的音视频起点会明确拒绝，避免静默切错时间。
 
 doctor 只报告凭证是否配置，不显示密钥；“已配置”不代表已验证有效。真实素材和模型输出保存在被 Git 忽略的 data 目录。
 

@@ -5,10 +5,12 @@ import json
 import os
 import shutil
 import sys
+from dataclasses import asdict
 from pathlib import Path
 
 from .contracts import ContractValidationError, validate_analysis_result
 from .inputs import DatasetValidationError, validate_dataset_manifest
+from .media import MediaError, export_clip, extract_audio, probe_media
 
 
 def _read_json(path: Path) -> dict:
@@ -19,7 +21,7 @@ def _read_json(path: Path) -> dict:
 
 
 def _emit(value: dict) -> None:
-    print(json.dumps(value, ensure_ascii=False))
+    print(json.dumps(value, ensure_ascii=False, default=str))
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -32,6 +34,19 @@ def main(argv: list[str] | None = None) -> int:
     dataset.add_argument("path", type=Path)
     dataset.add_argument("--metadata-only", action="store_true", help="Do not check local video files")
     sub.add_parser("doctor", help="Report tools and credential presence, never secret values")
+    for name, description in (("probe", "Inspect supported MP4 media"),
+                              ("extract-audio", "Extract 16kHz mono PCM audio"),
+                              ("clip", "Transcode a millisecond interval accurately")):
+        media = sub.add_parser(name, help=description)
+        media.add_argument("source", type=Path)
+        media.add_argument("--ffprobe", default=os.environ.get("LIVECUT_FFPROBE_PATH", "ffprobe"))
+        media.add_argument("--ffmpeg", default=os.environ.get("LIVECUT_FFMPEG_PATH", "ffmpeg"))
+        media.add_argument("--timeout", type=float, default=30 if name == "probe" else 300)
+        if name != "probe":
+            media.add_argument("--output", type=Path, required=True)
+        if name == "clip":
+            media.add_argument("--start-ms", type=int, required=True)
+            media.add_argument("--end-ms", type=int, required=True)
     args = parser.parse_args(argv)
     try:
         if args.command == "validate-result":
@@ -45,6 +60,20 @@ def main(argv: list[str] | None = None) -> int:
                                       check_files=not args.metadata_only)
             _emit({"status": "valid", "videos": len(data["videos"]),
                    "file_existence_checked": not args.metadata_only})
+        elif args.command == "probe":
+            info = probe_media(args.source, ffprobe_path=args.ffprobe, timeout_seconds=args.timeout)
+            _emit({"status": "ok", "media": asdict(info)})
+        elif args.command == "extract-audio":
+            args.output.parent.mkdir(parents=True, exist_ok=True)
+            output = extract_audio(args.source, args.output, ffmpeg_path=args.ffmpeg,
+                                   ffprobe_path=args.ffprobe, timeout_seconds=args.timeout)
+            _emit({"status": "ok", "audio_path": str(output)})
+        elif args.command == "clip":
+            args.output.parent.mkdir(parents=True, exist_ok=True)
+            info = export_clip(args.source, args.output, args.start_ms, args.end_ms,
+                               ffmpeg_path=args.ffmpeg, ffprobe_path=args.ffprobe,
+                               timeout_seconds=args.timeout)
+            _emit({"status": "ok", "media": asdict(info)})
         else:
             tools = {}
             for tool in ("ffmpeg", "ffprobe"):
@@ -54,6 +83,9 @@ def main(argv: list[str] | None = None) -> int:
                    "dashscope_key_configured": bool(os.environ.get("DASHSCOPE_API_KEY")),
                    "credentials_verified": False})
         return 0
+    except MediaError as exc:
+        _emit({"status": "error", "error_code": exc.code, "message": str(exc)})
+        return 2
     except (ContractValidationError, DatasetValidationError, ValueError, OSError) as exc:
         _emit({"status": "error", "error_type": type(exc).__name__, "message": str(exc)})
         return 2
