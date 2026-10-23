@@ -1,0 +1,9 @@
+{
+  "schema_version": "2.0",
+  "data_kind": "annotation_template",
+  "video_id": "example_dev_001",
+  "annotation_status": "not_annotated",
+  "identity_granularity": "category",
+  "segments": [],
+  "notes": "Manually annotate actual product talk intervals. Empty template is not an all-negative gold label. Do not pass gold labels to models."
+}

@@ -1,121 +1,460 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:livecut:analysis-result:1.0",
-  "title": "LiveCut initial analysis result",
+  "$id": "urn:livecut:analysis-result:2.0",
+  "title": "LiveCut catalog-free product analysis result",
   "description": "Initial machine prediction bundle. Human timeline revisions are stored separately. Cross-reference and time-order checks require a business validator.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "data_kind", "job_id", "video_id", "analysis_generation", "duration_ms", "catalog_version", "transcript_version", "pipeline_version", "review_status", "provenance", "catalog", "utterances", "frames", "segments"],
+  "required": [
+    "schema_version",
+    "data_kind",
+    "job_id",
+    "video_id",
+    "analysis_generation",
+    "duration_ms",
+    "transcript_version",
+    "pipeline_version",
+    "review_status",
+    "provenance",
+    "products",
+    "utterances",
+    "frames",
+    "segments",
+    "product_discovery_version"
+  ],
   "properties": {
-    "schema_version": {"const": "1.0"},
-    "data_kind": {"enum": ["synthetic_fixture", "model_result"]},
-    "job_id": {"$ref": "#/$defs/id"},
-    "video_id": {"$ref": "#/$defs/id"},
-    "analysis_generation": {"type": "integer", "minimum": 1},
-    "duration_ms": {"type": "integer", "minimum": 1},
-    "catalog_version": {"$ref": "#/$defs/id"},
-    "transcript_version": {"$ref": "#/$defs/id"},
-    "pipeline_version": {"$ref": "#/$defs/id"},
-    "review_status": {"const": "DRAFT"},
+    "schema_version": {
+      "const": "2.0"
+    },
+    "data_kind": {
+      "enum": [
+        "synthetic_fixture",
+        "model_result"
+      ]
+    },
+    "job_id": {
+      "$ref": "#/$defs/id"
+    },
+    "video_id": {
+      "$ref": "#/$defs/id"
+    },
+    "analysis_generation": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "duration_ms": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "transcript_version": {
+      "$ref": "#/$defs/id"
+    },
+    "pipeline_version": {
+      "$ref": "#/$defs/id"
+    },
+    "review_status": {
+      "const": "DRAFT"
+    },
     "provenance": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["asr_model_id", "text_model_id", "vision_model_id", "prompt_version", "config_hash"],
+      "required": [
+        "asr_model_id",
+        "text_model_id",
+        "vision_model_id",
+        "prompt_version",
+        "config_hash"
+      ],
       "properties": {
-        "asr_model_id": {"$ref": "#/$defs/id"},
-        "text_model_id": {"$ref": "#/$defs/id"},
-        "vision_model_id": {"type": ["string", "null"], "minLength": 1},
-        "prompt_version": {"$ref": "#/$defs/id"},
-        "config_hash": {"$ref": "#/$defs/id"}
+        "asr_model_id": {
+          "$ref": "#/$defs/id"
+        },
+        "text_model_id": {
+          "$ref": "#/$defs/id"
+        },
+        "vision_model_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "prompt_version": {
+          "$ref": "#/$defs/id"
+        },
+        "config_hash": {
+          "$ref": "#/$defs/id"
+        }
       }
     },
-    "catalog": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/product"}},
-    "utterances": {"type": "array", "items": {"$ref": "#/$defs/utterance"}},
-    "frames": {"type": "array", "items": {"$ref": "#/$defs/frame"}},
-    "segments": {"type": "array", "items": {"$ref": "#/$defs/segment"}}
+    "utterances": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/utterance"
+      }
+    },
+    "frames": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/frame"
+      }
+    },
+    "segments": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/segment"
+      }
+    },
+    "product_discovery_version": {
+      "$ref": "#/$defs/id"
+    },
+    "products": {
+      "type": "array",
+      "minItems": 0,
+      "items": {
+        "$ref": "#/$defs/product"
+      }
+    }
   },
   "$defs": {
-    "id": {"type": "string", "minLength": 1},
-    "milliseconds": {"type": "integer", "minimum": 0},
-    "id_list": {"type": "array", "uniqueItems": true, "items": {"$ref": "#/$defs/id"}},
+    "id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "milliseconds": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "id_list": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/id"
+      }
+    },
     "product": {
-      "type": "object", "additionalProperties": false,
-      "required": ["sku_id", "name", "aliases", "attributes"],
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "product_id",
+        "name",
+        "aliases",
+        "attributes",
+        "identity_granularity"
+      ],
       "properties": {
-        "sku_id": {"$ref": "#/$defs/id"},
-        "name": {"$ref": "#/$defs/id"},
-        "aliases": {"$ref": "#/$defs/id_list"},
-        "attributes": {"type": "object", "additionalProperties": {"type": "string"}},
-        "reference_image_keys": {"$ref": "#/$defs/id_list"}
+        "product_id": {
+          "$ref": "#/$defs/id"
+        },
+        "name": {
+          "$ref": "#/$defs/id"
+        },
+        "aliases": {
+          "$ref": "#/$defs/id_list"
+        },
+        "attributes": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "identity_granularity": {
+          "enum": [
+            "category",
+            "observable_variant"
+          ]
+        }
       }
     },
     "utterance": {
-      "type": "object", "additionalProperties": false,
-      "required": ["utterance_id", "start_ms", "end_ms", "text", "source_chunk_id"],
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "utterance_id",
+        "start_ms",
+        "end_ms",
+        "text",
+        "source_chunk_id"
+      ],
       "properties": {
-        "utterance_id": {"$ref": "#/$defs/id"},
-        "start_ms": {"$ref": "#/$defs/milliseconds"},
-        "end_ms": {"$ref": "#/$defs/milliseconds"},
-        "text": {"$ref": "#/$defs/id"},
-        "source_chunk_id": {"$ref": "#/$defs/id"}
+        "utterance_id": {
+          "$ref": "#/$defs/id"
+        },
+        "start_ms": {
+          "$ref": "#/$defs/milliseconds"
+        },
+        "end_ms": {
+          "$ref": "#/$defs/milliseconds"
+        },
+        "text": {
+          "$ref": "#/$defs/id"
+        },
+        "source_chunk_id": {
+          "$ref": "#/$defs/id"
+        }
       }
     },
     "frame": {
-      "type": "object", "additionalProperties": false,
-      "required": ["frame_id", "timestamp_ms", "object_key"],
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "frame_id",
+        "timestamp_ms",
+        "object_key"
+      ],
       "properties": {
-        "frame_id": {"$ref": "#/$defs/id"},
-        "timestamp_ms": {"$ref": "#/$defs/milliseconds"},
-        "object_key": {"$ref": "#/$defs/id"}
+        "frame_id": {
+          "$ref": "#/$defs/id"
+        },
+        "timestamp_ms": {
+          "$ref": "#/$defs/milliseconds"
+        },
+        "object_key": {
+          "$ref": "#/$defs/id"
+        }
       }
     },
     "identity": {
-      "type": "object", "additionalProperties": false,
-      "required": ["status", "sku_id", "candidate_sku_ids"],
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "product_id",
+        "candidate_product_ids"
+      ],
       "properties": {
-        "status": {"enum": ["matched", "unlisted", "ambiguous", "not_applicable"]},
-        "sku_id": {"type": ["string", "null"], "minLength": 1},
-        "candidate_sku_ids": {"$ref": "#/$defs/id_list"}
-      },
-      "allOf": [
-        {"if": {"properties": {"status": {"const": "matched"}}}, "then": {"properties": {"sku_id": {"$ref": "#/$defs/id"}, "candidate_sku_ids": {"minItems": 1}}}, "else": {"properties": {"sku_id": {"type": "null"}}}},
-        {"if": {"properties": {"status": {"enum": ["unlisted", "not_applicable"]}}}, "then": {"properties": {"candidate_sku_ids": {"maxItems": 0}}}}
-      ]
-    },
-    "visual_observation": {
-      "type": "object", "additionalProperties": false,
-      "required": ["frame_id", "visibility", "candidate_sku_ids", "observed_attributes"],
-      "properties": {
-        "frame_id": {"$ref": "#/$defs/id"},
-        "visibility": {"enum": ["clear", "blurred", "not_visible"]},
-        "candidate_sku_ids": {"$ref": "#/$defs/id_list"},
-        "observed_attributes": {"type": "object", "additionalProperties": {"type": "string"}}
-      }
-    },
-    "segment": {
-      "type": "object", "additionalProperties": false,
-      "required": ["segment_id", "start_ms", "end_ms", "start_utterance_id", "end_utterance_id", "content_kind", "identity", "audio_evidence_utterance_ids", "visual_status", "visual_observations", "risk_score", "review_required", "review_reasons"],
-      "properties": {
-        "segment_id": {"$ref": "#/$defs/id"},
-        "start_ms": {"$ref": "#/$defs/milliseconds"},
-        "end_ms": {"$ref": "#/$defs/milliseconds"},
-        "start_utterance_id": {"$ref": "#/$defs/id"},
-        "end_utterance_id": {"$ref": "#/$defs/id"},
-        "content_kind": {"enum": ["product_talk", "non_product", "mixed", "uncertain"]},
-        "identity": {"$ref": "#/$defs/identity"},
-        "audio_evidence_utterance_ids": {"$ref": "#/$defs/id_list", "minItems": 1},
-        "visual_status": {"enum": ["not_checked", "supported", "conflict", "insufficient"]},
-        "visual_observations": {"type": "array", "items": {"$ref": "#/$defs/visual_observation"}},
-        "risk_score": {"type": ["number", "null"], "minimum": 0, "maximum": 1, "description": "Heuristic ordering score; not a calibrated correctness probability."},
-        "review_required": {"type": "boolean", "description": "High-priority review flag. All initial results still require human approval before export."},
-        "review_reasons": {
-          "type": "array", "uniqueItems": true,
-          "items": {"enum": ["IDENTITY_AMBIGUOUS", "UNLISTED_PRODUCT", "AUDIO_VISUAL_CONFLICT", "WINDOW_DISAGREEMENT", "BOUNDARY_UNCERTAIN", "INSUFFICIENT_VISUAL", "BUDGET_EXHAUSTED", "ASR_LOW_QUALITY", "MIXED_PRODUCTS"]}
+        "status": {
+          "enum": [
+            "identified",
+            "unknown",
+            "ambiguous",
+            "not_applicable"
+          ]
+        },
+        "product_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "candidate_product_ids": {
+          "$ref": "#/$defs/id_list"
         }
       },
       "allOf": [
-        {"if": {"properties": {"review_required": {"const": true}}}, "then": {"properties": {"review_reasons": {"minItems": 1}}}},
-        {"if": {"properties": {"visual_status": {"const": "not_checked"}}}, "then": {"properties": {"visual_observations": {"maxItems": 0}}}, "else": {"properties": {"visual_observations": {"minItems": 1}}}}
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "identified"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "product_id": {
+                "$ref": "#/$defs/id"
+              },
+              "candidate_product_ids": {
+                "minItems": 1
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "product_id": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "enum": [
+                  "unknown",
+                  "not_applicable"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "candidate_product_ids": {
+                "maxItems": 0
+              }
+            }
+          }
+        }
+      ]
+    },
+    "visual_observation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "frame_id",
+        "visibility",
+        "candidate_product_ids",
+        "observed_attributes"
+      ],
+      "properties": {
+        "frame_id": {
+          "$ref": "#/$defs/id"
+        },
+        "visibility": {
+          "enum": [
+            "clear",
+            "blurred",
+            "not_visible"
+          ]
+        },
+        "candidate_product_ids": {
+          "$ref": "#/$defs/id_list"
+        },
+        "observed_attributes": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "segment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "segment_id",
+        "start_ms",
+        "end_ms",
+        "start_utterance_id",
+        "end_utterance_id",
+        "content_kind",
+        "identity",
+        "audio_evidence_utterance_ids",
+        "visual_status",
+        "visual_observations",
+        "risk_score",
+        "review_required",
+        "review_reasons"
+      ],
+      "properties": {
+        "segment_id": {
+          "$ref": "#/$defs/id"
+        },
+        "start_ms": {
+          "$ref": "#/$defs/milliseconds"
+        },
+        "end_ms": {
+          "$ref": "#/$defs/milliseconds"
+        },
+        "start_utterance_id": {
+          "$ref": "#/$defs/id"
+        },
+        "end_utterance_id": {
+          "$ref": "#/$defs/id"
+        },
+        "content_kind": {
+          "enum": [
+            "product_talk",
+            "non_product",
+            "mixed",
+            "uncertain"
+          ]
+        },
+        "identity": {
+          "$ref": "#/$defs/identity"
+        },
+        "audio_evidence_utterance_ids": {
+          "$ref": "#/$defs/id_list",
+          "minItems": 1
+        },
+        "visual_status": {
+          "enum": [
+            "not_checked",
+            "supported",
+            "conflict",
+            "insufficient"
+          ]
+        },
+        "visual_observations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/visual_observation"
+          }
+        },
+        "risk_score": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 1,
+          "description": "Heuristic ordering score; not a calibrated correctness probability."
+        },
+        "review_required": {
+          "type": "boolean",
+          "description": "High-priority review flag. All initial results still require human approval before export."
+        },
+        "review_reasons": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "IDENTITY_AMBIGUOUS",
+              "UNKNOWN_PRODUCT",
+              "AUDIO_VISUAL_CONFLICT",
+              "WINDOW_DISAGREEMENT",
+              "BOUNDARY_UNCERTAIN",
+              "INSUFFICIENT_VISUAL",
+              "BUDGET_EXHAUSTED",
+              "ASR_LOW_QUALITY",
+              "MIXED_PRODUCTS"
+            ]
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "review_required": {
+                "const": true
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "review_reasons": {
+                "minItems": 1
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "visual_status": {
+                "const": "not_checked"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "visual_observations": {
+                "maxItems": 0
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "visual_observations": {
+                "minItems": 1
+              }
+            }
+          }
+        }
       ]
     }
   }
