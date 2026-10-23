@@ -1,6 +1,6 @@
 # Java 视频来源服务
 
-本功能提供持久化视频来源、上传与 Range 播放，为后续分析任务和审核工作台准备输入。任务调度与模型执行仍在后续阶段。
+本功能提供持久化视频来源、上传与 Range 播放，为分析任务和审核工作台准备输入。后续的任务协议见 [持久任务与调用预算](./08-持久任务与调用预算.md)。
 
 ## 环境与启动
 
@@ -40,7 +40,7 @@ LIVECUT_STORAGE_ROOT=../storage
 
 另外使用首轮真实 600 秒录像上传：返回 201、25329992 字节，SHA256 与原视频一致。从开头、20000000 字节偏移、文件尾各请求 1024 字节，均返回 206 并与源文件逐字节一致；HEAD 返回正确完整长度，无效 Range 返回 416。证据保存于本地忽略目录 `data/runs/java-video-smoke/`。
 
-本机 Docker Desktop 启动出错，因此本机未运行 Compose/MySQL 8.4.13；Compose 结构已验证，8.4.13 的实际兼容性由 GitHub CI 单独检验，不将本机 8.0.44 的结果写成 8.4 测试结果。
+本机 Docker Desktop 启动出错，因此本机未运行 Compose/MySQL 8.4.13；GitHub CI 已在 MySQL 8.4.13 上通过本功能的 20 项测试，见 [Java checks](https://github.com/Lshiii/LiveCut-AI/actions/runs/39968407763)。本机与 CI 分别验证，不将本机 8.0.44 的结果写成 8.4 测试结果。
 
 ## API
 

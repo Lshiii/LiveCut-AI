@@ -65,8 +65,9 @@ jobs:
           reports = list(Path('target').glob('**/TEST-*.xml'))
           if not reports:
               raise SystemExit('No Maven test reports were generated')
-          if not any(path.name.endswith('VideoApiIntegrationTests.xml') for path in reports):
-              raise SystemExit('The real MySQL video API integration suite did not execute')
+          for suite in ('VideoApiIntegrationTests', 'JobProtocolIntegrationTests', 'ModelCallIntegrationTests'):
+              if not any(path.name.endswith(f'{suite}.xml') for path in reports):
+                  raise SystemExit(f'The real MySQL integration suite did not execute: {suite}')
           test_count = 0
           for path in reports:
               report = ET.parse(path)

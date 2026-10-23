@@ -3,12 +3,15 @@ package io.livecut.video;
 import java.util.UUID;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
+import io.livecut.jobs.JobException;
 import org.springframework.dao.DataAccessException;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.transaction.TransactionException;
 import org.springframework.web.HttpMediaTypeNotSupportedException;
+import org.springframework.web.HttpRequestMethodNotSupportedException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.multipart.MaxUploadSizeExceededException;
@@ -20,6 +23,21 @@ import org.springframework.web.servlet.resource.NoResourceFoundException;
 public class ApiErrorHandler {
     public record ApiError(@JsonProperty("error_code") String errorCode, String message, boolean retryable,
                            @JsonProperty("request_id") String requestId) {}
+
+    @ExceptionHandler(JobException.class)
+    ResponseEntity<ApiError> job(JobException failure) {
+        return error(ResponseEntity.status(failure.getStatus()), failure.getCode(), failure.getMessage(), false);
+    }
+
+    @ExceptionHandler(HttpMessageNotReadableException.class)
+    ResponseEntity<ApiError> invalidJson() {
+        return error(ResponseEntity.badRequest(), "INVALID_JSON", "Provide a valid JSON request with the required field types", false);
+    }
+
+    @ExceptionHandler(HttpRequestMethodNotSupportedException.class)
+    ResponseEntity<ApiError> methodNotAllowed() {
+        return error(ResponseEntity.status(HttpStatus.METHOD_NOT_ALLOWED), "METHOD_NOT_ALLOWED", "HTTP method is not supported for this resource", false);
+    }
 
     @ExceptionHandler(VideoApiException.class)
     ResponseEntity<ApiError> video(VideoApiException failure) {
@@ -42,12 +60,12 @@ public class ApiErrorHandler {
 
     @ExceptionHandler(HttpMediaTypeNotSupportedException.class)
     ResponseEntity<ApiError> unsupportedType() {
-        return error(ResponseEntity.status(HttpStatus.UNSUPPORTED_MEDIA_TYPE), "UNSUPPORTED_CONTENT_TYPE", "Use multipart/form-data for video upload", false);
+        return error(ResponseEntity.status(HttpStatus.UNSUPPORTED_MEDIA_TYPE), "UNSUPPORTED_CONTENT_TYPE", "Request content type is not supported by this resource", false);
     }
 
     @ExceptionHandler({DataAccessException.class, TransactionException.class})
     ResponseEntity<ApiError> database() {
-        return error(ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE), "DATABASE_UNAVAILABLE", "Video registration is temporarily unavailable", true);
+        return error(ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE), "DATABASE_UNAVAILABLE", "Persistent business state is temporarily unavailable", true);
     }
 
     @ExceptionHandler(NoResourceFoundException.class)
