@@ -10,6 +10,7 @@
 - 尚未实现：Java 业务服务、Python 计算流水线、Vue 工作台和真实模型端到端处理。
 - 合成示例用于接口开发，不代表真实视频分析效果；性能与质量数据均待测。
 - 真实文件 ASR 已接通：公开 10 分钟开发样本生成 97 条时间戳转写；这证明接口链路，不代表转写或商品定位精度已达标。
+- 无清单文本分段已接通；首轮真实样本漏掉保湿霜，正在补基础视觉，详见 [真实验证记录](./docs/06-首轮真实视频验证.md)。
 
 ## 设计文档
 
@@ -56,6 +57,14 @@ uv run livecut transcribe data/runs/sample/audio.wav --output-dir data/runs/samp
 ```
 
 重复同一输入/输出目录会恢复既有 provider task_id 或读取已完成响应；提交结果未知时不会自动重提付费任务。临时上传仅用于 POC，稳定部署需配置持久对象存储。原始响应、转写和检查点不可提交到公开仓库。
+
+无清单商品发现：
+
+```powershell
+uv run livecut discover data/runs/sample/asr/transcript.json --duration-ms 600000 --output-dir data/runs/sample --grouping category
+```
+
+默认按类别归组，不区分同类的包装颜色。结果为 DRAFT，文本基线仍可能在代词、ASR 错词和商品切换时漏检，须审核。
 
 doctor 只报告凭证是否配置，不显示密钥；“已配置”不代表已验证有效。真实素材和模型输出保存在被 Git 忽略的 data 目录。
 

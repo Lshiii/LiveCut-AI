@@ -12,6 +12,7 @@ from .asr import ASRError, transcribe_file
 from .contracts import ContractValidationError, validate_analysis_result
 from .inputs import DatasetValidationError, validate_dataset_manifest
 from .media import MediaError, export_clip, extract_audio, probe_media
+from .segmentation import SegmentationError, discover_products
 
 
 def _read_json(path: Path) -> dict:
@@ -41,6 +42,14 @@ def main(argv: list[str] | None = None) -> int:
     asr.add_argument("--model", default=os.environ.get("LIVECUT_ASR_MODEL", "paraformer-v2"))
     asr.add_argument("--base-url")
     asr.add_argument("--timeout", type=float, default=600)
+    discover = sub.add_parser("discover", help="Discover products from ASR, without a catalog")
+    discover.add_argument("transcript", type=Path)
+    discover.add_argument("--duration-ms", type=int, required=True)
+    discover.add_argument("--output-dir", type=Path, required=True)
+    discover.add_argument("--model", default=os.environ.get("LIVECUT_TEXT_MODEL", "qwen-plus"))
+    discover.add_argument("--base-url")
+    discover.add_argument("--grouping", choices=("category", "observable_variant"), default="category")
+    discover.add_argument("--max-calls", type=int, default=8)
     for name, description in (("probe", "Inspect supported MP4 media"),
                               ("extract-audio", "Extract 16kHz mono PCM audio"),
                               ("clip", "Transcode a millisecond interval accurately")):
@@ -67,6 +76,13 @@ def main(argv: list[str] | None = None) -> int:
                                       check_files=not args.metadata_only)
             _emit({"status": "valid", "videos": len(data["videos"]),
                    "file_existence_checked": not args.metadata_only})
+        elif args.command == "discover":
+            utterances = json.loads(args.transcript.read_text(encoding="utf-8-sig"))
+            result = discover_products(utterances, args.duration_ms, args.output_dir,
+                                       model=args.model, base_url=args.base_url,
+                                       grouping=args.grouping, max_calls=args.max_calls)
+            _emit({"status": "ok", "products": [p["name"] for p in result["products"]],
+                   "segments": len(result["segments"]), "review_status": "DRAFT"})
         elif args.command == "transcribe":
             utterances = transcribe_file(args.source, args.output_dir, model=args.model,
                                         base_url=args.base_url, timeout_seconds=args.timeout)
@@ -95,7 +111,7 @@ def main(argv: list[str] | None = None) -> int:
                    "dashscope_key_configured": bool(os.environ.get("DASHSCOPE_API_KEY")),
                    "credentials_verified": False})
         return 0
-    except (MediaError, ASRError) as exc:
+    except (MediaError, ASRError, SegmentationError) as exc:
         _emit({"status": "error", "error_code": exc.code, "message": str(exc)})
         return 2
     except (ContractValidationError, DatasetValidationError, ValueError, OSError) as exc:
