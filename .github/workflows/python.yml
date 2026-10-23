@@ -1,0 +1,52 @@
+name: Python checks
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: python-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      UV_PYTHON_DOWNLOADS: never
+      LIVECUT_FFMPEG_PATH: /usr/bin/ffmpeg
+      LIVECUT_FFPROBE_PATH: /usr/bin/ffprobe
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-python@v7.1.0
+        with:
+          python-version: '3.11'
+      - uses: astral-sh/setup-uv@v10.3.2
+        with:
+          version: '0.13.5'
+          enable-cache: true
+      - name: Install FFmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends ffmpeg
+          "$LIVECUT_FFMPEG_PATH" -version
+          "$LIVECUT_FFPROBE_PATH" -version
+      - name: Install locked dependencies
+        run: uv sync --locked --dev --python 3.11
+      - name: Lint
+        run: uv run --frozen --no-sync ruff check worker-python
+      - name: Test, including real media integration
+        run: |
+          uv run --frozen --no-sync pytest -q -ra --junitxml="$RUNNER_TEMP/pytest-results.xml"
+          uv run --frozen --no-sync python - "$RUNNER_TEMP/pytest-results.xml" <<'PY'
+          import sys
+          import xml.etree.ElementTree as ET
+
+          report = ET.parse(sys.argv[1])
+          skipped = report.findall('.//testcase/skipped')
+          if skipped:
+              raise SystemExit(f'CI requires every test to run; found {len(skipped)} skipped tests')
+          PY
