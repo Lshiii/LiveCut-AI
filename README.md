@@ -9,6 +9,7 @@
 - 已完成：无清单结果契约 v2.0、数据/引用校验、开发 CLI、MP4 探测、音频提取、非关键帧准确转码切片。
 - 尚未实现：Java 业务服务、Python 计算流水线、Vue 工作台和真实模型端到端处理。
 - 合成示例用于接口开发，不代表真实视频分析效果；性能与质量数据均待测。
+- 真实文件 ASR 已接通：公开 10 分钟开发样本生成 97 条时间戳转写；这证明接口链路，不代表转写或商品定位精度已达标。
 
 ## 设计文档
 
@@ -47,6 +48,14 @@ uv run livecut clip data/raw/sample.mp4 --start-ms 1250 --end-ms 2750 --output d
 ```
 
 需要 FFmpeg/ffprobe；可通过 LIVECUT_FFMPEG_PATH、LIVECUT_FFPROBE_PATH 或命令参数指定。首版媒体处理支持已验证的 H.264/AAC MP4，非零或无法确定的音视频起点会明确拒绝，避免静默切错时间。
+
+真实 ASR（后端环境配置 DASHSCOPE_API_KEY，结果留在本地 data）：
+
+```powershell
+uv run livecut transcribe data/runs/sample/audio.wav --output-dir data/runs/sample/asr
+```
+
+重复同一输入/输出目录会恢复既有 provider task_id 或读取已完成响应；提交结果未知时不会自动重提付费任务。临时上传仅用于 POC，稳定部署需配置持久对象存储。原始响应、转写和检查点不可提交到公开仓库。
 
 doctor 只报告凭证是否配置，不显示密钥；“已配置”不代表已验证有效。真实素材和模型输出保存在被 Git 忽略的 data 目录。
 

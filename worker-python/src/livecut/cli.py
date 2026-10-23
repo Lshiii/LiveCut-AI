@@ -8,6 +8,7 @@ import sys
 from dataclasses import asdict
 from pathlib import Path
 
+from .asr import ASRError, transcribe_file
 from .contracts import ContractValidationError, validate_analysis_result
 from .inputs import DatasetValidationError, validate_dataset_manifest
 from .media import MediaError, export_clip, extract_audio, probe_media
@@ -34,6 +35,12 @@ def main(argv: list[str] | None = None) -> int:
     dataset.add_argument("path", type=Path)
     dataset.add_argument("--metadata-only", action="store_true", help="Do not check local video files")
     sub.add_parser("doctor", help="Report tools and credential presence, never secret values")
+    asr = sub.add_parser("transcribe", help="Run or resume real file ASR; never silently mock")
+    asr.add_argument("source", type=Path, help="16kHz mono PCM WAV")
+    asr.add_argument("--output-dir", type=Path, required=True)
+    asr.add_argument("--model", default=os.environ.get("LIVECUT_ASR_MODEL", "paraformer-v2"))
+    asr.add_argument("--base-url")
+    asr.add_argument("--timeout", type=float, default=600)
     for name, description in (("probe", "Inspect supported MP4 media"),
                               ("extract-audio", "Extract 16kHz mono PCM audio"),
                               ("clip", "Transcode a millisecond interval accurately")):
@@ -60,6 +67,11 @@ def main(argv: list[str] | None = None) -> int:
                                       check_files=not args.metadata_only)
             _emit({"status": "valid", "videos": len(data["videos"]),
                    "file_existence_checked": not args.metadata_only})
+        elif args.command == "transcribe":
+            utterances = transcribe_file(args.source, args.output_dir, model=args.model,
+                                        base_url=args.base_url, timeout_seconds=args.timeout)
+            _emit({"status": "ok", "utterances": len(utterances),
+                   "transcript_path": str(args.output_dir / "transcript.json")})
         elif args.command == "probe":
             info = probe_media(args.source, ffprobe_path=args.ffprobe, timeout_seconds=args.timeout)
             _emit({"status": "ok", "media": asdict(info)})
@@ -83,7 +95,7 @@ def main(argv: list[str] | None = None) -> int:
                    "dashscope_key_configured": bool(os.environ.get("DASHSCOPE_API_KEY")),
                    "credentials_verified": False})
         return 0
-    except MediaError as exc:
+    except (MediaError, ASRError) as exc:
         _emit({"status": "error", "error_code": exc.code, "message": str(exc)})
         return 2
     except (ContractValidationError, DatasetValidationError, ValueError, OSError) as exc:
