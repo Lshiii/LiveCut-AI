@@ -12,7 +12,10 @@ from .asr import ASRError, transcribe_file
 from .contracts import ContractValidationError, validate_analysis_result
 from .inputs import DatasetValidationError, validate_dataset_manifest
 from .media import MediaError, export_clip, extract_audio, probe_media
+from .ocr import observe_video_ocr, ocr_model_id
+from .pipeline import PipelineError, analyze_video
 from .segmentation import SegmentationError, discover_products
+from .vision import VisionError, observe_video
 
 
 def _read_json(path: Path) -> dict:
@@ -50,6 +53,24 @@ def main(argv: list[str] | None = None) -> int:
     discover.add_argument("--base-url")
     discover.add_argument("--grouping", choices=("category", "observable_variant"), default="category")
     discover.add_argument("--max-calls", type=int, default=8)
+    analyze = sub.add_parser("analyze", help="Video-only real analysis and DRAFT preview clips")
+    analyze.add_argument("source", type=Path)
+    analyze.add_argument("--output-dir", type=Path, required=True)
+    analyze.add_argument("--product", help="Optional discovered product name/alias filter")
+    analyze.add_argument("--visual-provider", choices=("ocr", "api", "none"), default="ocr")
+    analyze.add_argument("--vision-model", default=os.environ.get("LIVECUT_VISION_MODEL", "qwen3-vl-plus"))
+    analyze.add_argument("--asr-model", default=os.environ.get("LIVECUT_ASR_MODEL", "paraformer-v2"))
+    analyze.add_argument("--text-model", default=os.environ.get("LIVECUT_TEXT_MODEL", "qwen-plus"))
+    analyze.add_argument("--asr-base-url")
+    analyze.add_argument("--text-base-url")
+    analyze.add_argument("--vision-base-url")
+    analyze.add_argument("--asr-cache-dir", type=Path)
+    analyze.add_argument("--max-calls", type=int, default=8)
+    analyze.add_argument("--max-preview-clips", type=int, default=6)
+    analyze.add_argument("--interval-ms", type=int, default=45000)
+    analyze.add_argument("--max-frames", type=int, default=16)
+    analyze.add_argument("--ffprobe", default=os.environ.get("LIVECUT_FFPROBE_PATH", "ffprobe"))
+    analyze.add_argument("--ffmpeg", default=os.environ.get("LIVECUT_FFMPEG_PATH", "ffmpeg"))
     for name, description in (("probe", "Inspect supported MP4 media"),
                               ("extract-audio", "Extract 16kHz mono PCM audio"),
                               ("clip", "Transcode a millisecond interval accurately")):
@@ -76,6 +97,33 @@ def main(argv: list[str] | None = None) -> int:
                                       check_files=not args.metadata_only)
             _emit({"status": "valid", "videos": len(data["videos"]),
                    "file_existence_checked": not args.metadata_only})
+        elif args.command == "analyze":
+            observations = None
+            observer_id = "unspecified-observer"
+            if args.visual_provider != "none":
+                info = probe_media(args.source, ffprobe_path=args.ffprobe)
+                visual_dir = args.output_dir.with_name(args.output_dir.name + "-" + args.visual_provider)
+                sampling = {"duration_ms": info.duration_ms, "ffmpeg_path": args.ffmpeg,
+                            "interval_ms": args.interval_ms, "max_frames": args.max_frames}
+                if args.visual_provider == "ocr":
+                    observer_id = ocr_model_id()
+                    observations = observe_video_ocr(args.source, visual_dir, **sampling)
+                else:
+                    observer_id = args.vision_model
+                    observations = observe_video(args.source, visual_dir, **sampling,
+                                                 model=args.vision_model, base_url=args.vision_base_url)
+                observations = [dict(item, object_key=str((visual_dir / item["object_key"]).resolve()))
+                                for item in observations]
+            report = analyze_video(
+                args.source, args.output_dir, ffmpeg_path=args.ffmpeg, ffprobe_path=args.ffprobe,
+                asr_base_url=args.asr_base_url, text_base_url=args.text_base_url,
+                asr_model=args.asr_model, text_model=args.text_model, product_query=args.product,
+                max_model_calls=args.max_calls, max_preview_clips=args.max_preview_clips,
+                visual_observations=observations, visual_model_id=observer_id,
+                asr_output_dir=args.asr_cache_dir,
+            )
+            _emit(report)
+            return 0 if report["status"] in {"ok", "no_match", "no_identified_segments", "preview_disabled"} else 1
         elif args.command == "discover":
             utterances = json.loads(args.transcript.read_text(encoding="utf-8-sig"))
             result = discover_products(utterances, args.duration_ms, args.output_dir,
@@ -111,7 +159,7 @@ def main(argv: list[str] | None = None) -> int:
                    "dashscope_key_configured": bool(os.environ.get("DASHSCOPE_API_KEY")),
                    "credentials_verified": False})
         return 0
-    except (MediaError, ASRError, SegmentationError) as exc:
+    except (MediaError, ASRError, SegmentationError, PipelineError, VisionError) as exc:
         _emit({"status": "error", "error_code": exc.code, "message": str(exc)})
         return 2
     except (ContractValidationError, DatasetValidationError, ValueError, OSError) as exc:

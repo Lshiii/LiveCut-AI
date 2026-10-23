@@ -3,13 +3,26 @@
 from __future__ import annotations
 
 import copy
+import inspect
 import json
+import os
+import queue
+import signal
+import subprocess
+import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import httpx
 import pytest
 from livecut.contracts import validate_analysis_result
-from livecut.segmentation import SegmentationError, discover_products
+from livecut.segmentation import (
+    PROMPT_VERSION,
+    SegmentationError,
+    _discovery_directory_lock,
+    discover_products,
+)
 
 
 def utterance(uid: str, start: int, end: int, text: str = "商品讲解") -> dict:
@@ -137,7 +150,7 @@ def test_default_category_groups_all_mask_colours_without_false_unknown(tmp_path
     system_prompt = requests[0]["input"]["messages"][0]["content"]
     assert "grouping=category" in system_prompt
     assert "同类不同颜色一起讲也不是 mixed" in system_prompt
-    assert "catalog-free-anchors-v2" == result["provenance"]["prompt_version"]
+    assert PROMPT_VERSION == result["provenance"]["prompt_version"]
 
 
 @pytest.mark.parametrize("products,expected", [
@@ -423,3 +436,279 @@ def test_invalid_asr_times_ids_or_overlap_fail_before_network(tmp_path: Path, it
         run(items, 2000, tmp_path, client)
     assert caught.value.code == "INVALID_INPUT"
     assert requests == []
+
+
+
+def test_timestamped_visual_evidence_reaches_text_and_is_preserved(tmp_path: Path) -> None:
+    items = [utterance("u1", 0, 2000), utterance("u2", 2000, 4000)]
+    response = {"products": [product("mask", "面膜"), product("cream", "保湿霜")], "segments": [
+        segment(["u1"], ["mask"]), segment(["u2"], ["cream"])]}
+    observations = [
+        {"frame_id": "f1", "timestamp_ms": 1000, "object_key": "frames/f1.jpg",
+         "presented_category": "面膜", "observed_text": "面膜", "visibility": "clear"},
+        {"frame_id": "f2", "timestamp_ms": 3000, "object_key": "frames/f2.jpg",
+         "presented_category": "保湿霜", "observed_text": "舒芙蕾", "visibility": "clear"},
+    ]
+    client, requests = mock_client(response)
+    with client:
+        result = run(items, 4000, tmp_path, client, visual_observations=observations)
+    assert [s["visual_status"] for s in result["segments"]] == ["supported", "supported"]
+    assert len(result["frames"]) == 2
+    payload = json.loads(requests[0]["input"]["messages"][1]["content"])
+    assert payload["visual_observations"][1]["near_utterance_id"] == "u2"
+    assert payload["visual_observations"][1]["observed_text"] == "舒芙蕾"
+    validate_analysis_result(result)
+
+
+def test_conflicting_clear_frame_requests_review_instead_of_overwriting_audio(tmp_path: Path) -> None:
+    items = [utterance("u1", 0, 2000), utterance("u2", 2000, 4000)]
+    response = {"products": [product("mask", "面膜"), product("cream", "保湿霜")], "segments": [
+        segment(["u1"], ["mask"]), segment(["u2"], ["cream"])]}
+    obs = [{"frame_id": "f1", "timestamp_ms": 1000, "object_key": "frames/f1.jpg",
+            "presented_category": "保湿霜", "observed_text": "", "visibility": "clear"}]
+    client, _ = mock_client(response)
+    with client:
+        result = run(items, 4000, tmp_path, client, visual_observations=obs)
+    first = result["segments"][0]
+    assert first["identity"]["product_id"] == result["products"][0]["product_id"]
+    assert first["visual_status"] == "conflict"
+    assert first["review_required"]
+    assert "AUDIO_VISUAL_CONFLICT" in first["review_reasons"]
+
+
+def test_cross_window_utterance_owned_by_midpoint_once(tmp_path: Path) -> None:
+    items = [utterance("u1", 0, 1000), utterance("cross", 1500, 2500),
+             utterance("u2", 3000, 3900)]
+    response1 = {"products": [product("mask", "面膜")], "segments": [segment(["u1"], ["mask"])]}
+    response2 = {"products": [product("mask", "面膜")], "segments": [segment(["cross", "u2"], ["mask"])]}
+    client, requests = mock_client(response1, response2)
+    with client:
+        run(items, 4000, tmp_path, client, window_ms=2000, context_ms=1000)
+    payloads = [json.loads(request["input"]["messages"][1]["content"]) for request in requests]
+    assert payloads[0]["core_utterance_ids"] == ["u1"]
+    assert payloads[1]["core_utterance_ids"] == ["cross", "u2"]
+
+
+def test_independent_discovery_precedes_assignment_and_resumes_without_new_calls(tmp_path: Path) -> None:
+    items = [utterance("u1", 0, 1000, "这一款面膜"),
+             utterance("u2", 1000, 2000, "接着讲乳霜")]
+    discovery = {"products": [{"category": "面膜", "evidence_utterance_ids": ["u1"]},
+                              {"category": "保湿霜", "evidence_utterance_ids": ["u2"]}]}
+    assigned = {"products": [product("a", "面膜"), product("b", "保湿霜")],
+                "segments": [segment(["u1"], ["a"]), segment(["u2"], ["b"])]}
+    client, requests = mock_client(discovery, assigned)
+    with client:
+        result = run(items, 2000, tmp_path, client, two_pass=True, max_calls=2)
+        assert run(items, 2000, tmp_path, client, two_pass=True, max_calls=2) == result
+    assert len(requests) == 2
+    payloads = [json.loads(request["input"]["messages"][1]["content"]) for request in requests]
+    assert "known_products" not in payloads[0]
+    assert payloads[1]["independently_discovered_candidates"] == discovery["products"]
+    assert [p["name"] for p in result["products"]] == ["面膜", "保湿霜"]
+    assert [(s["start_ms"], s["end_ms"]) for s in result["segments"]] == [(0, 1000), (1000, 2000)]
+
+
+def test_discovery_unknown_evidence_does_not_reach_assignment(tmp_path: Path) -> None:
+    client, requests = mock_client({"products": [
+        {"category": "保湿霜", "evidence_utterance_ids": ["invented-id"]}]})
+    with client:
+        with pytest.raises(SegmentationError) as caught:
+            run([utterance("u1", 0, 1000)], 1000, tmp_path, client, two_pass=True)
+    assert caught.value.code == "INVALID_DISCOVERY_OUTPUT"
+    assert len(requests) == 1
+    assert not (tmp_path / "analysis-result.json").exists()
+
+
+def test_discovery_counts_towards_preflight_and_repair_budget(tmp_path: Path) -> None:
+    items = [utterance("u1", 0, 1000)]
+    client, requests = mock_client({"products": []}, "invalid assignment")
+    with client:
+        with pytest.raises(SegmentationError) as preflight:
+            run(items, 1000, tmp_path / "preflight", client, two_pass=True, max_calls=1)
+        assert preflight.value.code == "BUDGET_EXHAUSTED"
+        assert requests == []
+        with pytest.raises(SegmentationError) as repair:
+            run(items, 1000, tmp_path / "repair", client, two_pass=True, max_calls=2)
+    assert repair.value.code == "BUDGET_EXHAUSTED"
+    assert len(requests) == 2
+
+
+def test_compact_range_expands_all_input_ids_and_keeps_return_separate(tmp_path: Path) -> None:
+    items = [utterance(f"u{i}", i * 1000, (i + 1) * 1000) for i in range(5)]
+    response = {"products": [product("mask", "面膜"), product("cream", "面霜")], "segments": [
+        {"start_utterance_id": "u0", "end_utterance_id": "u1", "content_kind": "product_talk",
+         "identity_status": "identified", "product_labels": ["mask"]},
+        {"start_utterance_id": "u2", "end_utterance_id": "u3", "content_kind": "product_talk",
+         "identity_status": "identified", "product_labels": ["cream"]},
+        {"start_utterance_id": "u4", "end_utterance_id": "u4", "content_kind": "product_talk",
+         "identity_status": "identified", "product_labels": ["mask"]}]}
+    client, _ = mock_client(response)
+    with client:
+        result = run(items, 5000, tmp_path, client)
+    assert [s["audio_evidence_utterance_ids"] for s in result["segments"]] == [
+        ["u0", "u1"], ["u2", "u3"], ["u4"]]
+    assert result["segments"][0]["identity"] == result["segments"][2]["identity"]
+
+
+@pytest.mark.parametrize("start,end", [("u2", "u1"), ("fake", "u1"), (True, "u1")])
+def test_compact_range_rejects_unknown_or_reversed_anchors(tmp_path: Path, start, end) -> None:
+    response = {"products": [product("mask", "面膜")], "segments": [
+        {"start_utterance_id": start, "end_utterance_id": end, "content_kind": "product_talk",
+         "identity_status": "identified", "product_labels": ["mask"]}]}
+    client, _ = mock_client(response)
+    with client, pytest.raises(SegmentationError, match="range anchors"):
+        run([utterance("u1", 0, 1000), utterance("u2", 1000, 2000)], 2000, tmp_path, client,
+            allow_format_repair=False)
+
+
+def test_unmapped_clear_visual_category_cannot_be_hidden_by_supporting_frame(tmp_path: Path) -> None:
+    response = {"products": [product("mask", "面膜")], "segments": [segment(["u1"], ["mask"])]}
+    observations = [
+        {"frame_id": "f1", "timestamp_ms": 1000, "object_key": "frames/f1.jpg",
+         "presented_category": "面膜", "observed_text": "", "visibility": "clear"},
+        {"frame_id": "f2", "timestamp_ms": 3000, "object_key": "frames/f2.jpg",
+         "presented_category": "保湿霜", "observed_text": "", "visibility": "clear"}]
+    client, _ = mock_client(response)
+    with client:
+        result = run([utterance("u1", 0, 4000)], 4000, tmp_path, client,
+                     visual_observations=observations)
+    assert result["segments"][0]["visual_status"] == "insufficient"
+    assert result["segments"][0]["review_required"]
+    assert "INSUFFICIENT_VISUAL" in result["segments"][0]["review_reasons"]
+
+
+def test_concurrent_discovery_rejects_duplicate_without_provider_request(tmp_path: Path) -> None:
+    items = [utterance("u1", 0, 1000)]
+    discovery = {"products": [{"category": "面膜", "evidence_utterance_ids": ["u1"]}]}
+    assignment = {"products": [product("p", "面膜")], "segments": [segment(["u1"], ["p"])]}
+    entered, release = threading.Event(), threading.Event()
+    owner_requests = []
+
+    def owner_handler(request: httpx.Request) -> httpx.Response:
+        owner_requests.append(json.loads(request.content))
+        if len(owner_requests) == 1:
+            entered.set()
+            assert release.wait(5), "test did not release the mocked provider"
+            return httpx.Response(200, json=provider(discovery))
+        return httpx.Response(200, json=provider(assignment))
+
+    intruder_client, intruder_requests = mock_client()
+    with httpx.Client(transport=httpx.MockTransport(owner_handler)) as owner_client, intruder_client:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(run, items, 1000, tmp_path, owner_client,
+                                     two_pass=True, max_calls=2)
+            try:
+                assert entered.wait(5), "owner did not reach its first mocked provider request"
+                with pytest.raises(SegmentationError) as conflict:
+                    run(items, 1000, tmp_path, intruder_client, two_pass=True, max_calls=2)
+                assert conflict.value.code == "DISCOVERY_BUSY"
+                assert intruder_requests == []
+            finally:
+                release.set()
+            result = future.result(timeout=5)
+        assert run(items, 1000, tmp_path, intruder_client, two_pass=True, max_calls=2) == result
+    assert len(owner_requests) == 2 and intruder_requests == []
+    ledger = json.loads((tmp_path / "segmentation/state.json").read_text(encoding="utf-8"))
+    assert len(ledger["calls"]) == 2
+
+
+def test_reentrant_discovery_fails_immediately_and_preserves_signature(tmp_path: Path) -> None:
+    items = [utterance("u1", 0, 1000)]
+    response = {"products": [product("p", "面膜")], "segments": [segment(["u1"], ["p"])]}
+    intruder_client, intruder_requests = mock_client()
+    blocked = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        with pytest.raises(SegmentationError) as conflict:
+            run(items, 1000, tmp_path, intruder_client)
+        blocked.append(conflict.value.code)
+        return httpx.Response(200, json=provider(response))
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as owner_client, intruder_client:
+        run(items, 1000, tmp_path, owner_client)
+    assert blocked == ["DISCOVERY_BUSY"] and intruder_requests == []
+    signature = inspect.signature(discover_products)
+    assert signature.parameters["two_pass"].default is False
+    assert signature.parameters["model"].kind is inspect.Parameter.KEYWORD_ONLY
+    assert signature == inspect.signature(discover_products.__wrapped__)
+
+
+def test_exception_releases_lock_without_retrying_uncertain_call(tmp_path: Path) -> None:
+    items = [utterance("u1", 0, 1000)]
+    client, requests = mock_client(httpx.ReadTimeout("mocked transport outcome unknown"))
+    with client, pytest.raises(SegmentationError) as failure:
+        run(items, 1000, tmp_path, client)
+    assert failure.value.code == "PROVIDER_ERROR" and len(requests) == 1
+    resume_client, resume_requests = mock_client()
+    with resume_client, pytest.raises(SegmentationError) as resumed:
+        run(items, 1000, tmp_path, resume_client)
+    assert resumed.value.code == "CALL_STATE_UNCERTAIN"
+    assert resume_requests == []
+
+
+def test_os_releases_discovery_lock_after_owner_process_is_killed(tmp_path: Path) -> None:
+    directory = tmp_path / "segmentation"
+    script = (
+        "import os, sys\n"
+        "from pathlib import Path\n"
+        "from livecut.segmentation import _discovery_directory_lock\n"
+        "with _discovery_directory_lock(Path(sys.argv[1])):\n"
+        "    print('LOCKED', os.getpid(), flush=True)\n"
+        "    sys.stdin.read()\n"
+    )
+    process = subprocess.Popen([sys.executable, "-c", script, str(directory)],
+                               stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                               stderr=subprocess.PIPE, text=True)
+    ready = queue.Queue()
+    reader = threading.Thread(target=lambda: ready.put(process.stdout.readline()), daemon=True)
+    reader.start()
+    owner_pid = None
+    owner_stopped = False
+    try:
+        marker, owner_pid_text = ready.get(timeout=5).split()
+        assert marker == "LOCKED"
+        owner_pid = int(owner_pid_text)
+        with pytest.raises(SegmentationError) as conflict:
+            with _discovery_directory_lock(directory):
+                pytest.fail("second process obtained an owned lock")
+        assert conflict.value.code == "DISCOVERY_BUSY"
+        # A Windows venv python.exe may be a redirecting launcher. Terminate
+        # the actual lock owner rather than leaving its child alive behind it.
+        os.kill(owner_pid, signal.SIGTERM)
+        owner_stopped = True
+        process.wait(timeout=5)
+        # The marker remains but is not ownership; no stale-lock deletion or
+        # timestamp heuristic is needed after an abrupt process death.
+        assert (directory / ".discovery.lock").is_file()
+        with _discovery_directory_lock(directory):
+            pass
+    finally:
+        if owner_pid is not None and not owner_stopped:
+            try:
+                os.kill(owner_pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=5)
+        process.communicate(timeout=5)
+        reader.join(timeout=5)
+
+
+def test_missing_transition_ids_are_reported_in_format_repair(tmp_path: Path) -> None:
+    items = [utterance("u1", 0, 1000, "这款面膜"),
+             utterance("u2", 1000, 2000, "好，我们接下来看另一款"),
+             utterance("u3", 2000, 3000, "现在是面霜")]
+    products = [product("mask", "面膜"), product("cream", "面霜")]
+    incomplete = {"products": products, "segments": [
+        segment(["u1"], ["mask"]), segment(["u3"], ["cream"])]}
+    repaired = {"products": products, "segments": [
+        segment(["u1"], ["mask"]), segment(["u2"], kind="non_product", status="not_applicable"),
+        segment(["u3"], ["cream"])]}
+    client, requests = mock_client(incomplete, repaired)
+    with client:
+        result = run(items, 3000, tmp_path, client)
+    repair_prompt = requests[1]["input"]["messages"][-1]["content"]
+    assert 'missing IDs: ["u2"]' in repair_prompt
+    assert [s["start_utterance_id"] for s in result["segments"]] == ["u1", "u2", "u3"]
+    assert "过渡句" in requests[0]["input"]["messages"][0]["content"]

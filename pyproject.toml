@@ -12,6 +12,12 @@ dependencies = ["jsonschema>=4.23,<5", "httpx>=0.28,<1"]
 [project.scripts]
 livecut = "livecut.cli:main"
 
+[project.optional-dependencies]
+ocr = [
+    "onnxruntime>=1.20,<2",
+    "rapidocr>=3,<4",
+]
+
 [dependency-groups]
 dev = ["pytest>=8.3,<10", "ruff>=0.9,<1"]
 
