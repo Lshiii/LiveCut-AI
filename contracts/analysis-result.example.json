@@ -1,0 +1,69 @@
+{
+  "schema_version": "1.0",
+  "data_kind": "synthetic_fixture",
+  "job_id": "fixture_job_001",
+  "video_id": "fixture_video_001",
+  "analysis_generation": 1,
+  "duration_ms": 90000,
+  "catalog_version": "fixture_catalog_v1",
+  "transcript_version": "fixture_transcript_v1",
+  "pipeline_version": "fixture_pipeline_v1",
+  "review_status": "DRAFT",
+  "provenance": {
+    "asr_model_id": "synthetic-no-real-asr",
+    "text_model_id": "synthetic-no-real-llm",
+    "vision_model_id": "synthetic-no-real-vlm",
+    "prompt_version": "fixture_prompt_v1",
+    "config_hash": "fixture-not-a-real-content-hash"
+  },
+  "catalog": [
+    {"sku_id": "bag_100", "name": "加厚抽绳垃圾袋100只装", "aliases": ["抽绳袋100只装"], "attributes": {"count": "100", "closure": "抽绳"}},
+    {"sku_id": "bag_50", "name": "加厚抽绳垃圾袋50只装", "aliases": ["抽绳袋50只装"], "attributes": {"count": "50", "closure": "抽绳"}}
+  ],
+  "utterances": [
+    {"utterance_id": "u_001", "start_ms": 5000, "end_ms": 15000, "text": "合成示例：先看这款100只装抽绳垃圾袋。", "source_chunk_id": "c_001"},
+    {"utterance_id": "u_002", "start_ms": 15000, "end_ms": 25000, "text": "合成示例：这一包可以用很久。", "source_chunk_id": "c_001"},
+    {"utterance_id": "u_003", "start_ms": 35000, "end_ms": 45000, "text": "合成示例：再看看这个抽绳款。", "source_chunk_id": "c_001"},
+    {"utterance_id": "u_004", "start_ms": 45000, "end_ms": 50000, "text": "合成示例：包装上有数量，大家看一下。", "source_chunk_id": "c_001"},
+    {"utterance_id": "u_005", "start_ms": 65000, "end_ms": 75000, "text": "合成示例：回到刚才的100只装，补充一下优惠。", "source_chunk_id": "c_001"},
+    {"utterance_id": "u_006", "start_ms": 75000, "end_ms": 85000, "text": "合成示例：100只这款今天可以一起带走。", "source_chunk_id": "c_001"}
+  ],
+  "frames": [
+    {"frame_id": "f_010", "timestamp_ms": 10000, "object_key": "synthetic-fixture/frames/f_010.jpg"},
+    {"frame_id": "f_040", "timestamp_ms": 40000, "object_key": "synthetic-fixture/frames/f_040.jpg"},
+    {"frame_id": "f_070", "timestamp_ms": 70000, "object_key": "synthetic-fixture/frames/f_070.jpg"}
+  ],
+  "segments": [
+    {
+      "segment_id": "s_001", "start_ms": 5000, "end_ms": 25000,
+      "start_utterance_id": "u_001", "end_utterance_id": "u_002",
+      "content_kind": "product_talk",
+      "identity": {"status": "matched", "sku_id": "bag_100", "candidate_sku_ids": ["bag_100"]},
+      "audio_evidence_utterance_ids": ["u_001", "u_002"],
+      "visual_status": "supported",
+      "visual_observations": [{"frame_id": "f_010", "visibility": "clear", "candidate_sku_ids": ["bag_100"], "observed_attributes": {"count": "100"}}],
+      "risk_score": 0.1, "review_required": false, "review_reasons": []
+    },
+    {
+      "segment_id": "s_002", "start_ms": 35000, "end_ms": 50000,
+      "start_utterance_id": "u_003", "end_utterance_id": "u_004",
+      "content_kind": "product_talk",
+      "identity": {"status": "ambiguous", "sku_id": null, "candidate_sku_ids": ["bag_100", "bag_50"]},
+      "audio_evidence_utterance_ids": ["u_003", "u_004"],
+      "visual_status": "insufficient",
+      "visual_observations": [{"frame_id": "f_040", "visibility": "blurred", "candidate_sku_ids": [], "observed_attributes": {}}],
+      "risk_score": 0.9, "review_required": true,
+      "review_reasons": ["IDENTITY_AMBIGUOUS", "INSUFFICIENT_VISUAL"]
+    },
+    {
+      "segment_id": "s_003", "start_ms": 65000, "end_ms": 85000,
+      "start_utterance_id": "u_005", "end_utterance_id": "u_006",
+      "content_kind": "product_talk",
+      "identity": {"status": "matched", "sku_id": "bag_100", "candidate_sku_ids": ["bag_100"]},
+      "audio_evidence_utterance_ids": ["u_005", "u_006"],
+      "visual_status": "supported",
+      "visual_observations": [{"frame_id": "f_070", "visibility": "clear", "candidate_sku_ids": ["bag_100"], "observed_attributes": {"count": "100"}}],
+      "risk_score": 0.1, "review_required": false, "review_reasons": []
+    }
+  ]
+}

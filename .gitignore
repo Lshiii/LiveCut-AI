@@ -1,0 +1,57 @@
+# Credentials and local configuration
+.env
+.env.*
+!.env.example
+!.env.*.example
+*.pem
+*.key
+*.p12
+*.pfx
+
+# IDE and operating system
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Java
+target/
+*.class
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Frontend
+node_modules/
+dist/
+.vite/
+coverage/
+
+# Local data and generated artifacts
+data/
+storage/
+tmp/
+logs/
+*.log
+*.db
+*.sqlite*
+*.mp4
+*.mov
+*.mkv
+*.avi
+*.wav
+*.mp3
+*.flac
+*.safetensors
+*.pt
+*.pth
+*.zip
+
+# Small synthetic source fixtures belong in fixtures/ and remain trackable.
