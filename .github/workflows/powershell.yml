@@ -1,0 +1,38 @@
+name: PowerShell syntax
+
+on:
+  push:
+    paths:
+      - 'scripts/**'
+      - '.github/workflows/powershell.yml'
+  pull_request:
+    paths:
+      - 'scripts/**'
+      - '.github/workflows/powershell.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: powershell-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  parse:
+    runs-on: windows-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: Parse launch helpers without executing them
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $scriptFiles = @(Get-ChildItem -LiteralPath scripts -Recurse -Filter '*.ps1' -File)
+          if ($scriptFiles.Count -eq 0) { throw 'No PowerShell helpers found.' }
+          foreach ($scriptFile in $scriptFiles) {
+            $parseTokens = $null
+            $parseErrors = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile($scriptFile.FullName, [ref]$parseTokens, [ref]$parseErrors)
+            if (@($parseErrors).Count -ne 0) { throw "Syntax error in $($scriptFile.Name)." }
+          }
+          Write-Output "Parsed $($scriptFiles.Count) PowerShell files. Native MySQL execution is covered by the separate opt-in local scratch test."

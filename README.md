@@ -22,6 +22,7 @@
 - [人工审核 API 与修订协议](./docs/10-review-api.md)
 - [Vue 工作台与浏览器验证](./docs/11-审核工作台.md)
 - [正式导出、版本冻结与下载](./docs/12-正式导出与下载.md)
+- [MVP 本机启动、环境模板与集成验收](./docs/13-MVP集成与验收.md)
 - [PRD](./docs/01-PRD.md)
 - [技术路线](./docs/02-技术路线.md)
 - [AI 开发任务书](./docs/03-AI开发任务书.md)
@@ -92,6 +93,8 @@ doctor 只报告凭证是否配置，不显示密钥；“已配置”不代表�
 Java 服务使用仓库内 Maven Wrapper，无需全局安装 Maven；在独立测试库配置完成后运行 `./scripts/java.ps1 -Task Verify`，开发服务运行 `./scripts/java.ps1 -Task Run`。API 及 MySQL 启动步骤见 [Java 服务说明](./docs/07-Java视频来源服务.md)。当前视频状态 `HEADER_CHECKED` 只代表基本上传校验，完整媒体可用性仍需计算 Worker 探测。
 
 工作台在 frontend 目录执行 `npm ci` 和 `npm run dev`，打开 `http://127.0.0.1:5173`。Java API 使用 8080 端口，Worker 在另一终端执行 `./scripts/worker.ps1`。模型密钥仅由 Worker 读取，前端不保存凭证。完整本机操作见 [工作台说明](./docs/11-审核工作台.md)。
+
+首次配置与重启步骤见 [本机集成说明](./docs/13-MVP集成与验收.md)。仓库提供 `.env.java.example`、`.env.java-test.example` 与 `.env.mysql-local.example`；已有私有配置应保留。Docker 不可用的 Windows 环境可用 `./scripts/mysql-local.ps1 -Task Status` 检查已准备好的本项目独立 MySQL 实例，按需改用 Start 或 Stop；该辅助脚本不会初始化或强杀数据库，真实隔离启停检查 15 项通过。
 
 ## 功能交付规则
 
