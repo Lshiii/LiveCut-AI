@@ -185,4 +185,6 @@ def test_real_ffmpeg_worker_media_supports_deep_attempt_directory(tmp_path):
         assert artifact["sha256"] == sha256(root / artifact["key"])
     with wave.open(str(_native_path(directory / "audio.wav")), "rb") as audio:
         assert audio.getframerate() == 16000 and audio.getnchannels() == 1
-        assert audio.getnframes() == 16000
+        # AAC decoding in FFmpeg builds can retain trailing packet padding.
+        # The one-second signal must remain, with at most one 1024-sample frame.
+        assert 16000 <= audio.getnframes() <= 16000 + 1024
