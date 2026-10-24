@@ -7,7 +7,7 @@
 ## 当前进度
 
 - 已实现：无清单结果契约 v2.0、数据/引用校验、媒体探测、准确切片、真实文件 ASR、文本商品发现、本地 OCR 和可恢复的 Python 分析 CLI。
-- Java 已实现视频上传、MySQL 来源注册、Range 播放、持久阶段调度和模型调用次数预算；Python Worker 已用真实 10 分钟录像跑通四阶段。审核工作台接入中，正式审核版本导出待实现。
+- Java 已实现视频上传、MySQL 来源注册、Range 播放、持久阶段调度和模型调用次数预算；Python Worker 已用真实 10 分钟录像跑通四阶段。Vue 工作台支持任务管理、时间轴定位、语音证据、商品与边界编辑、并发修订及确认；正式审核版本导出待实现。
 - 合成示例用于接口开发，不代表真实视频分析效果；性能与质量数据均待测。
 - 真实文件 ASR 已接通：公开 10 分钟开发样本生成 97 条时间戳转写；这证明接口链路，不代表转写或商品定位精度已达标。
 - 真实识别仍按开发样本逐轮核验；结构合法和单元测试通过均不代表定位准确，详见 [真实验证记录](./docs/06-首轮真实视频验证.md)。
@@ -19,6 +19,8 @@
 - [Java 视频来源服务与启动](./docs/07-Java视频来源服务.md)
 - [持久任务与调用预算协议](./docs/08-持久任务与调用预算.md)
 - [Python 计算 Worker 与真实接入记录](./docs/09-Python计算Worker.md)
+- [人工审核 API 与修订协议](./docs/10-review-api.md)
+- [Vue 工作台与浏览器验证](./docs/11-审核工作台.md)
 - [PRD](./docs/01-PRD.md)
 - [技术路线](./docs/02-技术路线.md)
 - [AI 开发任务书](./docs/03-AI开发任务书.md)
@@ -87,6 +89,8 @@ uv run --extra ocr livecut analyze data/raw/sample.mp4 --output-dir data/runs/sa
 doctor 只报告凭证是否配置，不显示密钥；“已配置”不代表已验证有效。真实素材和模型输出保存在被 Git 忽略的 data 目录。
 
 Java 服务使用仓库内 Maven Wrapper，无需全局安装 Maven；在独立测试库配置完成后运行 `./scripts/java.ps1 -Task Verify`，开发服务运行 `./scripts/java.ps1 -Task Run`。API 及 MySQL 启动步骤见 [Java 服务说明](./docs/07-Java视频来源服务.md)。当前视频状态 `HEADER_CHECKED` 只代表基本上传校验，完整媒体可用性仍需计算 Worker 探测。
+
+工作台在 frontend 目录执行 `npm ci` 和 `npm run dev`，打开 `http://127.0.0.1:5173`。Java API 使用 8080 端口，Worker 在另一终端执行 `./scripts/worker.ps1`。模型密钥仅由 Worker 读取，前端不保存凭证。完整本机操作见 [工作台说明](./docs/11-审核工作台.md)。
 
 ## 功能交付规则
 
