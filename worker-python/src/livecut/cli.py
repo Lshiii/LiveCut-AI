@@ -12,10 +12,13 @@ from .asr import ASRError, transcribe_file
 from .contracts import ContractValidationError, validate_analysis_result
 from .inputs import DatasetValidationError, validate_dataset_manifest
 from .media import MediaError, export_clip, extract_audio, probe_media
+from .model_budget import ModelBudgetError
 from .ocr import observe_video_ocr, ocr_model_id
 from .pipeline import PipelineError, analyze_video
 from .segmentation import SegmentationError, discover_products
 from .vision import VisionError, observe_video
+from .worker import WorkerError
+from .worker_client import WorkerClientError
 
 
 def _read_json(path: Path) -> dict:
@@ -39,6 +42,17 @@ def main(argv: list[str] | None = None) -> int:
     dataset.add_argument("path", type=Path)
     dataset.add_argument("--metadata-only", action="store_true", help="Do not check local video files")
     sub.add_parser("doctor", help="Report tools and credential presence, never secret values")
+    worker = sub.add_parser("worker", help="Execute leased Java stages with durable model budgets")
+    worker.add_argument("--java-url", default=os.environ.get("LIVECUT_JAVA_URL", "http://127.0.0.1:8080"))
+    worker.add_argument("--worker-id", default=os.environ.get("LIVECUT_WORKER_ID", "worker-local"))
+    worker.add_argument("--storage-root", type=Path, required=True)
+    worker.add_argument("--journal-dir", type=Path, required=True)
+    worker.add_argument("--once", action="store_true", help="Handle one stage or pending callback")
+    worker.add_argument("--stage-type", choices=("MEDIA", "ASR", "SEGMENT", "TIMELINE"),
+                        help="Only claim this stage type; useful for a media-only smoke check")
+    worker.add_argument("--poll-seconds", type=float, default=3)
+    worker.add_argument("--ffprobe", default=os.environ.get("LIVECUT_FFPROBE_PATH", "ffprobe"))
+    worker.add_argument("--ffmpeg", default=os.environ.get("LIVECUT_FFMPEG_PATH", "ffmpeg"))
     asr = sub.add_parser("transcribe", help="Run or resume real file ASR; never silently mock")
     asr.add_argument("source", type=Path, help="16kHz mono PCM WAV")
     asr.add_argument("--output-dir", type=Path, required=True)
@@ -86,7 +100,29 @@ def main(argv: list[str] | None = None) -> int:
             media.add_argument("--end-ms", type=int, required=True)
     args = parser.parse_args(argv)
     try:
-        if args.command == "validate-result":
+        if args.command == "worker":
+            from .model_budget import transport_factory
+            from .worker import AnalysisStageExecutor, StageWorker
+            from .worker_client import WorkerClient
+
+            worker_key = os.environ.get("LIVECUT_WORKER_API_KEY") or os.environ.get("LIVECUT_WORKER_KEY", "")
+            client = WorkerClient(args.java_url, worker_key)
+            executor = AnalysisStageExecutor(transport_factory=transport_factory(client),
+                                             ffmpeg_path=args.ffmpeg, ffprobe_path=args.ffprobe)
+            runner = StageWorker(client, args.storage_root, args.journal_dir, args.worker_id, executor)
+            try:
+                if args.once:
+                    status = runner.run_once(stage_type=args.stage_type)
+                    _emit({"status": status, "worker_id": args.worker_id})
+                    return 1 if status == "failed" else 0
+                else:
+                    runner.run(poll_seconds=args.poll_seconds, stage_type=args.stage_type)
+            except KeyboardInterrupt:
+                runner.stop.set()
+                _emit({"status": "stopped", "worker_id": args.worker_id})
+            finally:
+                client.close()
+        elif args.command == "validate-result":
             data = _read_json(args.path)
             validate_analysis_result(data, schema_path=args.schema)
             _emit({"status": "valid", "schema_version": data["schema_version"],
@@ -159,7 +195,8 @@ def main(argv: list[str] | None = None) -> int:
                    "dashscope_key_configured": bool(os.environ.get("DASHSCOPE_API_KEY")),
                    "credentials_verified": False})
         return 0
-    except (MediaError, ASRError, SegmentationError, PipelineError, VisionError) as exc:
+    except (MediaError, ASRError, SegmentationError, PipelineError, VisionError,
+            WorkerError, WorkerClientError, ModelBudgetError) as exc:
         _emit({"status": "error", "error_code": exc.code, "message": str(exc)})
         return 2
     except (ContractValidationError, DatasetValidationError, ValueError, OSError) as exc:

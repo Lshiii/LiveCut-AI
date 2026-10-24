@@ -38,6 +38,7 @@ public class ModelCallService {
     private final TransactionTemplate transactions;
     private final JobService jobs;
     private final ObjectMapper json;
+    private final ArtifactVerifier artifactVerifier;
 
     private record CallRow(String requestId, String jobId, String stageId, String operationKey,
                            String inputHash, String modelId, String kind, String status,
@@ -53,12 +54,14 @@ public class ModelCallService {
             row.getString("dispatch_token_hash"), row.getString("provider_task_id"), row.getString("usage_json"),
             row.getString("response_key"), row.getString("response_hash"));
 
-    public ModelCallService(JdbcTemplate jdbc, PlatformTransactionManager manager, JobService jobs, ObjectMapper json) {
+    public ModelCallService(JdbcTemplate jdbc, PlatformTransactionManager manager, JobService jobs, ObjectMapper json,
+                            ArtifactVerifier artifactVerifier) {
         this.jdbc = jdbc;
         this.transactions = new TransactionTemplate(manager);
         this.transactions.setIsolationLevel(TransactionDefinition.ISOLATION_READ_COMMITTED);
         this.jobs = jobs;
         this.json = json;
+        this.artifactVerifier = artifactVerifier;
     }
 
     public CallResponse reserve(ReserveRequest request) {
@@ -147,6 +150,8 @@ public class ModelCallService {
                 if (responseKey != null && (!responseKey.equals(request.responseKey()) || !responseHash.equals(request.responseHash()))) {
                     throw error(HttpStatus.CONFLICT, "MODEL_RESPONSE_CONFLICT", "Recorded provider response is immutable");
                 }
+                artifactVerifier.verifyProviderResponse(request.responseKey(), request.responseHash(),
+                        prefix.substring(0, prefix.length() - "provider-responses/".length()));
                 responseKey = request.responseKey();
                 responseHash = request.responseHash();
             }

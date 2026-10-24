@@ -5,10 +5,13 @@ import static org.junit.jupiter.api.Assertions.*;
 
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.nio.file.Path;
+import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.HexFormat;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.Callable;
@@ -233,6 +236,43 @@ class ModelCallIntegrationTests {
         assertEquals(0, reserved(fixture));
     }
 
+    @Test
+    void providerResponseBytesAreCheckedBeforeSettlementAndRemainRecoverableAcrossAttempts() throws Exception {
+        Fixture fixture = fixture("SEGMENT", 2);
+        String requestId = "response-" + UUID.randomUUID();
+        calls.reserve(reserve(fixture, requestId, "response-op", "TEXT"));
+        update(fixture, requestId, "DISPATCHING", null, Map.of());
+        String key = "jobs/" + fixture.jobId() + "/stages/" + fixture.stageId()
+                + "/attempts/1/" + TOKEN + "/provider-responses/" + requestId + ".json";
+        var missing = new UpdateRequest(fixture.stageId(), 1, TOKEN, "SUCCEEDED", null, Map.of(), key, INPUT_HASH);
+        assertCode("ARTIFACT_NOT_FOUND", () -> calls.update(requestId, missing));
+        assertEquals("DISPATCHING", jdbc.queryForObject("SELECT status FROM model_call WHERE request_id=?", String.class, requestId));
+        assertNull(jdbc.queryForObject("SELECT response_key FROM model_call WHERE request_id=?", String.class, requestId));
+
+        // This intentionally opaque binary body proves byte integrity only.
+        byte[] raw = new byte[] {0, -1, 7, 31};
+        Path response = storageRoot.resolve(key);
+        Files.createDirectories(response.getParent());
+        Files.write(response, raw);
+        String digest = HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(raw));
+        var corrupt = new UpdateRequest(fixture.stageId(), 1, TOKEN, "SUCCEEDED", null, Map.of(), key, INPUT_HASH);
+        assertCode("ARTIFACT_HASH_MISMATCH", () -> calls.update(requestId, corrupt));
+        String otherAttempt = key.replace("/attempts/1/", "/attempts/2/");
+        var misplaced = new UpdateRequest(fixture.stageId(), 1, TOKEN, "SUCCEEDED", null, Map.of(), otherAttempt, digest);
+        assertCode("INVALID_RESPONSE_REFERENCE", () -> calls.update(requestId, misplaced));
+
+        var valid = new UpdateRequest(fixture.stageId(), 1, TOKEN, "SUCCEEDED", null, Map.of("input_tokens", 2), key, digest);
+        assertEquals("UPDATED", calls.update(requestId, valid).outcome());
+        reclaim(fixture);
+        var resumed = new ReserveRequest(fixture.stageId(), 2, NEXT_TOKEN, requestId, INPUT_HASH, "response-op", "qwen-plus", "TEXT");
+        var saved = calls.reserve(resumed);
+        assertEquals("EXISTING", saved.outcome());
+        assertEquals(key, saved.call().responseKey());
+        assertEquals(digest, saved.call().responseHash());
+        assertEquals(1, reserved(fixture));
+        assertEquals("ALREADY_APPLIED", calls.update(requestId, valid).outcome());
+    }
+
     private Fixture fixture(String stageType, int textLimit) {
         byte[] header = ByteBuffer.allocate(32).putInt(24).put("ftypisom".getBytes(StandardCharsets.US_ASCII))
                 .putInt(0).put("isomiso2".getBytes(StandardCharsets.US_ASCII)).putInt(8)
@@ -293,7 +333,7 @@ class ModelCallIntegrationTests {
             }
         };
         return new ModelCallService(overlapping, context.getBean(PlatformTransactionManager.class),
-                context.getBean(JobService.class), context.getBean(ObjectMapper.class));
+                context.getBean(JobService.class), context.getBean(ObjectMapper.class), context.getBean(ArtifactVerifier.class));
     }
     private void reclaim(Fixture fixture) {
         jdbc.update("UPDATE job_stage SET attempt = 2, run_token = ? WHERE id = ?", NEXT_TOKEN, fixture.stageId());

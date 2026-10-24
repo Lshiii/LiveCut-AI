@@ -8,11 +8,14 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.nio.file.Path;
+import java.security.MessageDigest;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -41,7 +44,7 @@ import tools.jackson.databind.ObjectMapper;
 
 /**
  * Real MySQL + real HTTP tests of the execution protocol. FakeWorker manifests
- * are synthetic references, not proof of media/model output or its quality.
+ * contain real hashed synthetic files, not proof of media/model output quality.
  * Cleanup deletes this class's UUID rows only, never truncates a shared table.
  */
 @EnabledIfEnvironmentVariable(named = "LIVECUT_DB_URL", matches = "jdbc:mysql:.*")
@@ -134,9 +137,7 @@ class JobProtocolIntegrationTests {
         JsonNode claim = claim(stageId, "auth-worker", UUID.randomUUID().toString());
         String token = claim.path("run_token").asText();
         assertFalse(token.isBlank());
-        String prefix = attemptPrefix(claim);
-        assertEquals(200, worker("POST", stagePath(claim, "checkpoint"), withCredential(claim,
-                "checkpoint_key", prefix + "checkpoint.json", "checkpoint_hash", HASH)).statusCode());
+        assertEquals(200, worker("POST", stagePath(claim, "checkpoint"), checkpoint(claim, "checkpoint.json")).statusCode());
         var snapshot = send("GET", "/api/jobs/" + jobId, null, null, null);
         assertFalse(text(snapshot).contains(token));
         assertFalse(text(snapshot).contains(WORKER_KEY));
@@ -175,8 +176,8 @@ class JobProtocolIntegrationTests {
         String request = UUID.randomUUID().toString();
         JsonNode old = claim(id, "resume-worker", request);
         String checkpointKey = attemptPrefix(old) + "asr/checkpoint.json";
-        assertEquals(200, worker("POST", stagePath(old, "checkpoint"), withCredential(old,
-                "checkpoint_key", checkpointKey, "checkpoint_hash", HASH)).statusCode());
+        Map<String, Object> checkpoint = checkpoint(old, "asr/checkpoint.json");
+        assertEquals(200, worker("POST", stagePath(old, "checkpoint"), checkpoint).statusCode());
         expireAndRecover(id);
         JsonNode staleRequest = claim(id, "resume-worker", request);
         assertEquals("EXPIRED", staleRequest.path("outcome").asText());
@@ -187,9 +188,9 @@ class JobProtocolIntegrationTests {
         assertEquals(2, next.path("attempt").asInt());
         assertNotEquals(old.path("run_token"), next.path("run_token"));
         assertEquals(checkpointKey, next.path("checkpoint_key").asText());
-        assertEquals(HASH, next.path("checkpoint_hash").asText());
+        assertEquals(checkpoint.get("checkpoint_hash"), next.path("checkpoint_hash").asText());
         error(worker("POST", stagePath(old, "heartbeat"), credentials(old)), 409, "STALE_ATTEMPT");
-        error(worker("POST", stagePath(old, "complete"), completion(old, HASH)), 409, "STALE_ATTEMPT");
+        error(worker("POST", stagePath(old, "complete"), completion(old)), 409, "STALE_ATTEMPT");
     }
 
     @Test
@@ -210,19 +211,30 @@ class JobProtocolIntegrationTests {
     }
 
     @Test
-    void completionAndCheckpointAreIdempotentButDifferentHashesCannotOverwrite() {
+    void completionAndCheckpointAreIdempotentButDifferentHashesCannotOverwrite() throws Exception {
         JsonNode job = create();
         JsonNode claimed = claim(stage(job, "MEDIA").path("id").asText(), "complete-worker", UUID.randomUUID().toString());
-        Map<String, Object> checkpoint = withCredential(claimed, "checkpoint_key", attemptPrefix(claimed) + "checkpoint.json", "checkpoint_hash", HASH);
+        Map<String, Object> checkpoint = checkpoint(claimed, "checkpoint.json");
         assertEquals("ACCEPTED", json(worker("POST", stagePath(claimed, "checkpoint"), checkpoint)).path("outcome").asText());
         assertEquals("ALREADY_APPLIED", json(worker("POST", stagePath(claimed, "checkpoint"), checkpoint)).path("outcome").asText());
+        Path checkpointPath = storageRoot.resolve((String) checkpoint.get("checkpoint_key"));
+        byte[] savedCheckpoint = Files.readAllBytes(checkpointPath);
+        Files.writeString(checkpointPath, "tampered synthetic checkpoint", StandardCharsets.UTF_8);
+        error(worker("POST", stagePath(claimed, "checkpoint"), checkpoint), 409, "ARTIFACT_HASH_MISMATCH");
+        Files.write(checkpointPath, savedCheckpoint);
         error(worker("POST", stagePath(claimed, "checkpoint"), withCredential(claimed,
                 "checkpoint_key", attemptPrefix(claimed) + "checkpoint.json", "checkpoint_hash", OTHER_HASH)), 409, "CHECKPOINT_CONFLICT");
         error(worker("POST", stagePath(claimed, "complete"), withCredential(claimed,
                 "manifest_key", "../../outside.json", "manifest_hash", HASH)), 400, "INVALID_MANIFEST_KEY");
         error(worker("POST", stagePath(claimed, "complete"), completion(claimed, "not-a-hash")), 400, "INVALID_MANIFEST_HASH");
-        assertEquals("ACCEPTED", json(worker("POST", stagePath(claimed, "complete"), completion(claimed, HASH))).path("outcome").asText());
-        assertEquals("ALREADY_APPLIED", json(worker("POST", stagePath(claimed, "complete"), completion(claimed, HASH))).path("outcome").asText());
+        Map<String, Object> complete = completion(claimed);
+        assertEquals("ACCEPTED", json(worker("POST", stagePath(claimed, "complete"), complete)).path("outcome").asText());
+        Path manifestPath = storageRoot.resolve((String) complete.get("manifest_key"));
+        byte[] savedManifest = Files.readAllBytes(manifestPath);
+        Files.writeString(manifestPath, "tampered synthetic manifest", StandardCharsets.UTF_8);
+        error(worker("POST", stagePath(claimed, "complete"), complete), 409, "ARTIFACT_HASH_MISMATCH");
+        Files.write(manifestPath, savedManifest);
+        assertEquals("ALREADY_APPLIED", json(worker("POST", stagePath(claimed, "complete"), complete)).path("outcome").asText());
         error(worker("POST", stagePath(claimed, "complete"), completion(claimed, OTHER_HASH)), 409, "RESULT_CONFLICT");
         JsonNode snapshot = get(job.path("id").asText());
         assertEquals("SUCCEEDED", stage(snapshot, "MEDIA").path("status").asText());
@@ -261,6 +273,47 @@ class JobProtocolIntegrationTests {
     }
 
     @Test
+    void completionRejectsMissingTamperedOrWrongIdentityFilesWithoutAdvancingState() throws Exception {
+        JsonNode job = create();
+        String jobId = job.path("id").asText();
+        JsonNode claimed = claim(stage(job, "MEDIA").path("id").asText(), "integrity-worker", UUID.randomUUID().toString());
+        String manifestKey = attemptPrefix(claimed) + "manifest.json";
+        error(worker("POST", stagePath(claimed, "complete"), completion(claimed, HASH)), 409, "ARTIFACT_NOT_FOUND");
+
+        Map<String, Object> payload = completion(claimed);
+        Path manifestPath = storageRoot.resolve(manifestKey);
+        byte[] originalManifest = Files.readAllBytes(manifestPath);
+        JsonNode parsed = JSON.readTree(originalManifest);
+        Path artifact = storageRoot.resolve(parsed.path("artifacts").get(0).path("key").asText());
+        byte[] originalArtifact = Files.readAllBytes(artifact);
+        Files.writeString(artifact, "tampered synthetic artifact", StandardCharsets.UTF_8);
+        error(worker("POST", stagePath(claimed, "complete"), payload), 409, "ARTIFACT_HASH_MISMATCH");
+        Files.write(artifact, originalArtifact);
+
+        var wrongIdentity = (tools.jackson.databind.node.ObjectNode) JSON.readTree(originalManifest);
+        wrongIdentity.put("analysis_generation", claimed.path("generation").asInt() + 1);
+        Files.write(manifestPath, JSON.writeValueAsBytes(wrongIdentity));
+        error(worker("POST", stagePath(claimed, "complete"), completion(claimed, fileHash(manifestPath))),
+                409, "ARTIFACT_IDENTITY_MISMATCH");
+
+        String missingCheckpoint = attemptPrefix(claimed) + "missing-checkpoint.bin";
+        error(worker("POST", stagePath(claimed, "checkpoint"), withCredential(claimed,
+                "checkpoint_key", missingCheckpoint, "checkpoint_hash", HASH)), 409, "ARTIFACT_NOT_FOUND");
+        var checkpoint = checkpoint(claimed, "checkpoint.bin");
+        error(worker("POST", stagePath(claimed, "checkpoint"), withCredential(claimed,
+                "checkpoint_key", checkpoint.get("checkpoint_key"), "checkpoint_hash", OTHER_HASH)), 409, "ARTIFACT_HASH_MISMATCH");
+
+        JsonNode afterFailures = get(jobId);
+        assertEquals("RUNNING", stage(afterFailures, "MEDIA").path("status").asText());
+        assertEquals("BLOCKED", stage(afterFailures, "ASR").path("status").asText());
+        assertTrue(stage(afterFailures, "MEDIA").path("manifest_hash").isNull());
+        assertNull(jdbc().queryForObject("SELECT checkpoint_key FROM job_stage WHERE id=?", String.class,
+                claimed.path("stage_id").asText()));
+        Files.write(manifestPath, originalManifest);
+        assertEquals(200, worker("POST", stagePath(claimed, "complete"), payload).statusCode());
+    }
+
+    @Test
     void completionAndLeaseReaperRaceCannotProduceAnOldSuccessOrDuplicateActivation() throws Exception {
         for (int index = 0; index < 4; index++) {
             JsonNode job = create();
@@ -269,7 +322,7 @@ class JobProtocolIntegrationTests {
             String id = claimed.path("stage_id").asText();
             jdbc().update("UPDATE job_stage SET lease_until = DATE_SUB(UTC_TIMESTAMP(6), INTERVAL 1 SECOND) WHERE id = ?", id);
             var results = concurrently(
-                    () -> worker("POST", stagePath(claimed, "complete"), completion(claimed, HASH)),
+                    () -> worker("POST", stagePath(claimed, "complete"), completion(claimed)),
                     () -> { context.getBean(JobService.class).recoverExpired(); return send("GET", "/api/jobs/" + jobId, null, null, null); });
             int completeStatus = results.get(0).statusCode();
             assertTrue(completeStatus == 200 || completeStatus == 409, text(results.get(0)));
@@ -281,7 +334,7 @@ class JobProtocolIntegrationTests {
             } else {
                 assertTrue(Set.of("RETRY_WAIT", "READY").contains(finalStatus));
                 assertEquals("BLOCKED", stage(snapshot, "ASR").path("status").asText());
-                error(worker("POST", stagePath(claimed, "complete"), completion(claimed, HASH)), 409, "STALE_ATTEMPT");
+                error(worker("POST", stagePath(claimed, "complete"), completion(claimed)), 409, "STALE_ATTEMPT");
             }
             assertEquals(1, jdbc().queryForObject("SELECT COUNT(*) FROM job_stage WHERE job_id = ? AND stage_type = 'ASR'", Integer.class, jobId));
         }
@@ -292,7 +345,7 @@ class JobProtocolIntegrationTests {
         JsonNode job = create();
         String jobId = job.path("id").asText();
         JsonNode media = claim(stage(job, "MEDIA").path("id").asText(), "fan-in-media", UUID.randomUUID().toString());
-        assertEquals(200, worker("POST", stagePath(media, "complete"), completion(media, HASH)).statusCode());
+        assertEquals(200, worker("POST", stagePath(media, "complete"), completion(media)).statusCode());
         String firstId = stage(get(jobId), "ASR").path("id").asText();
         String secondId = UUID.randomUUID().toString();
         // Inject only this test job's second shard to exercise the fan-in gate;
@@ -305,8 +358,8 @@ class JobProtocolIntegrationTests {
         assertEquals("CLAIMED", first.path("outcome").asText());
         assertEquals("CLAIMED", second.path("outcome").asText());
         var responses = concurrently(
-                () -> worker("POST", stagePath(first, "complete"), completion(first, HASH)),
-                () -> worker("POST", stagePath(second, "complete"), completion(second, HASH)));
+                () -> worker("POST", stagePath(first, "complete"), completion(first)),
+                () -> worker("POST", stagePath(second, "complete"), completion(second)));
         assertEquals(List.of(200, 200), responses.stream().map(HttpResponse::statusCode).toList());
         assertEquals(2, jdbc().queryForObject("SELECT COUNT(*) FROM job_stage WHERE job_id = ? AND stage_type = 'ASR' AND status = 'SUCCEEDED'", Integer.class, jobId));
         assertEquals(1, jdbc().queryForObject("SELECT COUNT(*) FROM job_stage WHERE job_id = ? AND stage_type = 'SEGMENT' AND status = 'READY'", Integer.class, jobId));
@@ -317,9 +370,9 @@ class JobProtocolIntegrationTests {
             if ("ASR".equals(artifact.path("stage_type").asText())) { asrArtifacts++; }
         }
         assertEquals(2, asrArtifacts, "Both ASR shard outputs must be supplied to the next worker");
-        assertEquals(200, worker("POST", stagePath(segment, "complete"), completion(segment, HASH)).statusCode());
+        assertEquals(200, worker("POST", stagePath(segment, "complete"), completion(segment)).statusCode());
         JsonNode timeline = claim(stage(get(jobId), "TIMELINE").path("id").asText(), "fan-in-timeline", UUID.randomUUID().toString());
-        assertEquals(200, worker("POST", stagePath(timeline, "complete"), completion(timeline, HASH)).statusCode());
+        assertEquals(200, worker("POST", stagePath(timeline, "complete"), completion(timeline)).statusCode());
         assertEquals("REVIEW_READY", get(jobId).path("status").asText());
     }
 
@@ -331,8 +384,7 @@ class JobProtocolIntegrationTests {
         String request = UUID.randomUUID().toString();
         JsonNode claimed = claim(stageId, "restart-worker", request);
         String checkpoint = attemptPrefix(claimed) + "checkpoint.json";
-        assertEquals(200, worker("POST", stagePath(claimed, "checkpoint"), withCredential(claimed,
-                "checkpoint_key", checkpoint, "checkpoint_hash", HASH)).statusCode());
+        assertEquals(200, worker("POST", stagePath(claimed, "checkpoint"), checkpoint(claimed, "checkpoint.json")).statusCode());
         context.close();
         startContext();
         JsonNode restored = claim(stageId, "restart-worker", request);
@@ -341,7 +393,7 @@ class JobProtocolIntegrationTests {
         assertEquals(claimed.path("hard_deadline_at"), restored.path("hard_deadline_at"));
         assertEquals(checkpoint, restored.path("checkpoint_key").asText());
         assertEquals("RUNNING", stage(get(jobId), "MEDIA").path("status").asText());
-        assertEquals(200, worker("POST", stagePath(restored, "complete"), completion(restored, HASH)).statusCode());
+        assertEquals(200, worker("POST", stagePath(restored, "complete"), completion(restored)).statusCode());
     }
 
     @Test
@@ -425,6 +477,58 @@ class JobProtocolIntegrationTests {
 
     private static Map<String, Object> completion(JsonNode claim, String hash) {
         return withCredential(claim, "manifest_key", attemptPrefix(claim) + "manifest.json", "manifest_hash", hash);
+    }
+
+    private static Map<String, Object> checkpoint(JsonNode claim, String suffix) {
+        try {
+            String key = attemptPrefix(claim) + suffix;
+            Path path = storageRoot.resolve(key);
+            Files.createDirectories(path.getParent());
+            if (!Files.exists(path)) { Files.writeString(path, "{\"synthetic_fixture\":true}", StandardCharsets.UTF_8); }
+            return withCredential(claim, "checkpoint_key", key, "checkpoint_hash", fileHash(path));
+        } catch (Exception failure) { throw new RuntimeException(failure); }
+    }
+
+    /** Real local bytes for protocol integrity only; these do not simulate model accuracy. */
+    private static Map<String, Object> completion(JsonNode claim) {
+        try {
+            String prefix = attemptPrefix(claim);
+            Path manifestPath = storageRoot.resolve(prefix + "manifest.json");
+            if (!Files.exists(manifestPath)) {
+                Files.createDirectories(manifestPath.getParent());
+                List<String> kinds = switch (claim.path("stage_type").asText()) {
+                    case "MEDIA" -> List.of("media_info", "audio");
+                    case "ASR" -> List.of("transcript");
+                    default -> List.of("analysis_result");
+                };
+                var artifacts = new ArrayList<Map<String, Object>>();
+                for (String kind : kinds) {
+                    String key = prefix + "synthetic-" + kind + ".bin";
+                    Path artifact = storageRoot.resolve(key);
+                    Files.writeString(artifact, "synthetic protocol fixture: " + kind, StandardCharsets.UTF_8);
+                    artifacts.add(Map.of("kind", kind, "key", key, "sha256", fileHash(artifact)));
+                }
+                var manifest = new java.util.LinkedHashMap<String, Object>();
+                manifest.put("schema_version", 1);
+                manifest.put("job_id", claim.path("job_id").asText());
+                manifest.put("video_id", claim.path("video_id").asText());
+                manifest.put("analysis_generation", claim.path("generation").asInt());
+                manifest.put("stage_id", claim.path("stage_id").asText());
+                manifest.put("stage_type", claim.path("stage_type").asText());
+                manifest.put("attempt", claim.path("attempt").asInt());
+                manifest.put("run_token", claim.path("run_token").asText());
+                manifest.put("input_sha256", claim.path("source_hash").asText());
+                manifest.put("data_kind", "model_result");
+                manifest.put("review_status", "DRAFT");
+                manifest.put("artifacts", artifacts);
+                Files.write(manifestPath, JSON.writeValueAsBytes(manifest));
+            }
+            return completion(claim, fileHash(manifestPath));
+        } catch (Exception failure) { throw new RuntimeException(failure); }
+    }
+
+    private static String fileHash(Path path) throws Exception {
+        return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(Files.readAllBytes(path)));
     }
 
     private static String stagePath(JsonNode claim, String action) { return "/internal/stages/" + claim.path("stage_id").asText() + "/" + action; }

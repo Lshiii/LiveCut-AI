@@ -46,6 +46,7 @@ public class JobService {
             row.getString("manifest_key"), row.getString("manifest_hash"), row.getString("error_code"));
     private final JdbcTemplate jdbc;
     private final TransactionTemplate transaction;
+    private final ArtifactVerifier artifactVerifier;
     private final int leaseSeconds;
     private final int hardDeadlineSeconds;
     private final int maxAttempts;
@@ -57,12 +58,14 @@ public class JobService {
                       @Value("${livecut.jobs.hard-deadline-seconds:1800}") int hardDeadlineSeconds,
                       @Value("${livecut.jobs.max-attempts:3}") int maxAttempts,
                       @Value("${livecut.jobs.retry-delay-seconds:2}") int retryDelaySeconds,
-                      @Value("${livecut.jobs.scan-enabled:true}") boolean scanEnabled) {
+                      @Value("${livecut.jobs.scan-enabled:true}") boolean scanEnabled,
+                      ArtifactVerifier artifactVerifier) {
         if (leaseSeconds < 1 || leaseSeconds > 3600 || hardDeadlineSeconds < 1 || hardDeadlineSeconds > 86400
                 || maxAttempts < 1 || maxAttempts > 10 || retryDelaySeconds < 0 || retryDelaySeconds > 3600) {
             throw new IllegalArgumentException("Invalid scheduler lease, deadline, attempt or retry settings");
         }
         this.jdbc = jdbc;
+        this.artifactVerifier = artifactVerifier;
         this.transaction = new TransactionTemplate(manager);
         this.transaction.setIsolationLevel(TransactionDefinition.ISOLATION_READ_COMMITTED);
         this.leaseSeconds = leaseSeconds;
@@ -230,8 +233,12 @@ public class JobService {
             hash(request.checkpointHash(), "INVALID_MANIFEST_HASH");
             if (request.checkpointKey().equals(locked.stage().checkpointKey())) {
                 if (!request.checkpointHash().equals(locked.stage().checkpointHash())) { throw conflict("CHECKPOINT_CONFLICT", "An immutable checkpoint has a different hash"); }
+                artifactVerifier.verifyCheckpoint(request.checkpointKey(), request.checkpointHash(),
+                        artifactIdentity(locked.stage(), job(locked.jobId(), false)));
                 return action("ALREADY_APPLIED", locked.stage().id());
             }
+            artifactVerifier.verifyCheckpoint(request.checkpointKey(), request.checkpointHash(),
+                    artifactIdentity(locked.stage(), job(locked.jobId(), false)));
             jdbc.update("UPDATE job_stage SET checkpoint_key=?,checkpoint_hash=?,updated_at=CURRENT_TIMESTAMP(6) WHERE id=?", request.checkpointKey(), request.checkpointHash(), locked.stage().id());
             touch(locked.jobId(), null);
             return action("ACCEPTED", locked.stage().id());
@@ -253,11 +260,13 @@ public class JobService {
                 if (!request.manifestHash().equals(stage.manifestHash()) || !request.manifestKey().equals(stage.manifestKey())) {
                     throw conflict("RESULT_CONFLICT", "This completed attempt already has a different immutable result");
                 }
+                artifactVerifier.verifyManifest(request.manifestKey(), request.manifestHash(), artifactIdentity(stage, job));
                 return new StageActionResult("ALREADY_APPLIED", stageSnapshot(stage, false));
             }
             requireActive(stage, job, request.credential());
             artifactKey(stage, request.manifestKey(), true);
             hash(request.manifestHash(), "INVALID_MANIFEST_HASH");
+            artifactVerifier.verifyManifest(request.manifestKey(), request.manifestHash(), artifactIdentity(stage, job));
             jdbc.update("UPDATE job_stage SET status='SUCCEEDED',lease_until=NULL,manifest_key=?,manifest_hash=?,error_code=NULL,updated_at=CURRENT_TIMESTAMP(6) WHERE id=?", request.manifestKey(), request.manifestHash(), id);
             advance(jobId, stage.stageType());
             touch(jobId, null);
@@ -403,6 +412,13 @@ public class JobService {
     }
 
     private StageActionResult action(String outcome, String stageId) { return new StageActionResult(outcome, stageSnapshot(stage(stageId, true), false)); }
+
+    private ArtifactVerifier.ManifestIdentity artifactIdentity(StageRow stage, Map<String, Object> job) {
+        String sourceHash = jdbc.queryForObject("SELECT content_hash FROM video_asset WHERE id=?", String.class, job.get("video_id"));
+        return new ArtifactVerifier.ManifestIdentity(stage.jobId(), String.valueOf(job.get("video_id")),
+                ((Number) job.get("generation")).intValue(), stage.id(), stage.stageType(),
+                stage.attempt(), stage.runToken(), sourceHash);
+    }
 
     private ClaimResult claimed(String outcome, StageRow stage, Map<String, Object> job) {
         Map<String, Object> video = jdbc.queryForMap("SELECT source_key,content_hash FROM video_asset WHERE id=?", job.get("video_id"));
