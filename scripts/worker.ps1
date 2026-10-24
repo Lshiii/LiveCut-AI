@@ -2,7 +2,7 @@ param(
     [string]$EnvFile = '.env.java',
     [string]$JavaUrl = 'http://127.0.0.1:8080',
     [string]$WorkerId = 'worker-local',
-    [ValidateSet('', 'MEDIA', 'ASR', 'SEGMENT', 'TIMELINE')]
+    [ValidateSet('', 'MEDIA', 'ASR', 'SEGMENT', 'TIMELINE', 'EXPORT_CLIP')]
     [string]$StageType = '',
     [switch]$Once
 )

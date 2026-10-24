@@ -80,6 +80,6 @@ public final class JobModels {
                            int attempt, String runToken, String workerId, Instant leaseUntil,
                            Instant hardDeadlineAt, Instant nextRunAt, String inputHash,
                            String checkpointKey, String checkpointHash, String manifestKey,
-                           String manifestHash, String errorCode) {}
+                           String manifestHash, String errorCode, String ownerType, String ownerId) {}
     public record LockedStage(String jobId, StageRow stage, Instant dbNow) {}
 }

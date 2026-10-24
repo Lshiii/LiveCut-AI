@@ -69,6 +69,9 @@ public class ModelCallService {
         return transactions.execute(transaction -> {
             // The same parent lock serializes every reservation and stage write.
             var active = jobs.lockActiveStage(request.stageId(), new JobModels.Credential(request.attempt(), request.runToken()));
+            if (!"ANALYSIS".equals(active.stage().ownerType())) {
+                throw error(HttpStatus.CONFLICT, "MODEL_KIND_CONFLICT", "Export stages do not permit provider requests");
+            }
             String expectedStage = "TEXT".equals(request.kind()) ? "SEGMENT" : "ASR";
             if (!expectedStage.equals(active.stage().stageType())) {
                 throw error(HttpStatus.CONFLICT, "MODEL_KIND_CONFLICT", "Model operation is not allowed in this stage");
@@ -111,6 +114,8 @@ public class ModelCallService {
             if (!hint.stageId().equals(request.stageId())) {
                 throw error(HttpStatus.CONFLICT, "MODEL_CALL_INPUT_CONFLICT", "Model request belongs to a different stage");
             }
+            String ownerType = jdbc.queryForObject("SELECT owner_type FROM job_stage WHERE id=?", String.class, hint.stageId());
+            if (!"ANALYSIS".equals(ownerType)) { throw error(HttpStatus.CONFLICT, "MODEL_KIND_CONFLICT", "Export stages do not permit provider requests"); }
             // Accounting callbacks may arrive after a stage has been reclaimed.
             // Lock in the same job -> stage -> call order without granting stage ownership.
             jdbc.queryForObject("SELECT id FROM analysis_job WHERE id = ? FOR UPDATE", String.class, hint.jobId());

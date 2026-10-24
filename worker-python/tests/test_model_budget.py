@@ -39,10 +39,10 @@ class BudgetClient:
         return {"outcome": "UPDATED", "call": payload}
 
 
-def setup_transport(tmp_path, handler):
+def setup_transport(tmp_path, handler, *, stage_type="SEGMENT"):
     events = []
     api = BudgetClient(events)
-    lease = Lease.parse(claim(stage_type="SEGMENT"))
+    lease = Lease.parse(claim(stage_type=stage_type))
     stop = threading.Event()
     context = StageContext(lease, tmp_path, tmp_path / "attempt", LeaseGuard(lease, stop))
 
@@ -90,7 +90,7 @@ def test_existing_unsafe_call_is_not_reissued(tmp_path, status):
 
 
 def test_submitted_asr_recovers_recorded_task_without_resubmission(tmp_path):
-    client, api, events, _ = setup_transport(tmp_path, lambda request: httpx.Response(200, json={}))
+    client, api, events, _ = setup_transport(tmp_path, lambda request: httpx.Response(200, json={}), stage_type="ASR")
     api.status, api.task_id = "SUBMITTED", "existing-provider-task"
     api.response_key, api.response_hash = client._transport._record("b" * 64, httpx.Response(
         200, json={"output": {"task_id": "existing-provider-task", "task_status": "PENDING"}}))
@@ -102,7 +102,7 @@ def test_submitted_asr_recovers_recorded_task_without_resubmission(tmp_path):
 
 def test_asr_temporary_url_does_not_change_billable_identity(tmp_path):
     client, api, _, _ = setup_transport(tmp_path, lambda request: httpx.Response(200, json={
-        "output": {"task_id": "task-1"}}))
+        "output": {"task_id": "task-1"}}), stage_type="ASR")
     for temporary in ("oss://temp-a", "oss://temp-b"):
         client.post("https://provider.example/services/audio/asr/transcription", json={
             "model": "paraformer-v2", "input": {"file_urls": [temporary]}})
@@ -136,7 +136,7 @@ def test_asr_poll_settles_recorded_submission_and_reopens_recovery_state(tmp_pat
             return httpx.Response(200, json={"output": {"task_status": "SUCCEEDED"}})
         return httpx.Response(200, json={"output": {"task_id": "task-1"}})
 
-    client, api, events, _ = setup_transport(tmp_path, provider)
+    client, api, events, _ = setup_transport(tmp_path, provider, stage_type="ASR")
     client.post("https://provider.example/services/audio/asr/transcription", json={
         "model": "paraformer-v2", "input": {"file_urls": ["oss://temp-a"]}})
     assert api.status == "SUBMITTED"
@@ -213,7 +213,7 @@ def test_real_segmentation_adapter_reads_recorded_raw_response_after_attempt_cha
 
 def test_endpoint_and_actual_audio_hash_bind_asr_identity_without_url_secret(tmp_path):
     client, api, _, _ = setup_transport(tmp_path, lambda request: httpx.Response(200, json={
-        "output": {"task_id": "task-1"}}))
+        "output": {"task_id": "task-1"}}), stage_type="ASR")
     body = {"model": "paraformer-v2", "input": {"file_urls": ["oss://private-temporary-url"]}}
     client._transport.context.provider_input_hash = "b" * 64
     client.post("https://one.example/services/audio/asr/transcription?secret=do-not-record", json=body)
@@ -244,7 +244,7 @@ def test_provider_response_persistence_supports_long_windows_storage_path(tmp_pa
 
 
 def test_failed_recording_preflight_prevents_dispatch_and_provider(tmp_path, monkeypatch):
-    client, _, events, _ = setup_transport(tmp_path, lambda request: httpx.Response(200, json={}))
+    client, _, events, _ = setup_transport(tmp_path, lambda request: httpx.Response(200, json={}), stage_type="ASR")
 
     def fail(*args, **kwargs):
         raise FileNotFoundError("simulated filesystem failure")
@@ -260,7 +260,7 @@ def test_asr_ack_recording_failure_preserves_real_task_and_blocks_resubmission(t
     from livecut.worker import _read
 
     client, api, events, _ = setup_transport(tmp_path, lambda request: httpx.Response(
-        200, json={"output": {"task_id": "genuine-test-task", "task_status": "PENDING"}}))
+        200, json={"output": {"task_id": "genuine-test-task", "task_status": "PENDING"}}), stage_type="ASR")
 
     def fail(*args):
         raise FileNotFoundError("simulated publish failure after actual HTTP response")

@@ -37,7 +37,8 @@ public class ArtifactVerifier {
             + "/attempts/[1-9][0-9]*/[A-Za-z0-9_-]{16,64}/";
     private static final Map<String, Set<String>> REQUIRED_KINDS = Map.of(
             "MEDIA", Set.of("media_info", "audio"), "ASR", Set.of("transcript"),
-            "SEGMENT", Set.of("analysis_result"), "TIMELINE", Set.of("analysis_result"));
+            "SEGMENT", Set.of("analysis_result"), "TIMELINE", Set.of("analysis_result"),
+            "EXPORT_CLIP", Set.of("clip", "media_info"));
     private static final JsonMapper JSON = JsonMapper.builder()
             .enable(StreamReadFeature.STRICT_DUPLICATE_DETECTION)
             .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS).build();
@@ -69,7 +70,42 @@ public class ArtifactVerifier {
         public VerifiedManifest { artifacts = List.copyOf(artifacts); }
     }
 
+    public record ExportIdentity(String exportId, String clipId, long approvedRevision, String snapshotHash,
+                                 String segmentId, long startMs, long endMs, String encodingProfile,
+                                 String stageInputHash) {}
+
     public VerifiedManifest verifyManifest(String key, String expectedHash, ManifestIdentity expected) {
+        return verifyManifest(key, expectedHash, expected, null);
+    }
+
+    public VerifiedManifest verifyExportManifest(String key, String expectedHash, ManifestIdentity expected,
+                                                  ExportIdentity export) {
+        if (expected == null || !"EXPORT_CLIP".equals(expected.stageType()) || export == null) { throw invalidReference(); }
+        VerifiedManifest verified = verifyManifest(key, expectedHash, expected, export);
+        VerifiedArtifact clip = verified.artifacts().stream().filter(item -> item.kind().equals("clip")).findFirst().orElseThrow(ArtifactVerifier::invalidManifest);
+        if (clip.sizeBytes() <= 0) { throw invalidManifest(); }
+        VerifiedArtifact info = verified.artifacts().stream().filter(item -> item.kind().equals("media_info")).findFirst().orElseThrow(ArtifactVerifier::invalidManifest);
+        JsonNode metadata;
+        try { metadata = JSON.readTree(verifiedBytes(info.key(), info.sha256(), expected.attemptPrefix(), MAX_MANIFEST_BYTES)); }
+        catch (JobException failure) { throw failure; }
+        catch (RuntimeException failure) { throw invalidManifest(); }
+        // This is only a safety/type check of worker-reported metadata. Python
+        // performs real ffprobe/decode validation; Java makes no quality claim.
+        if (metadata == null || !metadata.isObject() || metadata.has("path")
+                || !metadata.path("duration_ms").isIntegralNumber() || !metadata.path("duration_ms").canConvertToLong()
+                || metadata.path("duration_ms").longValue() <= 0 || !text(metadata, "video_codec", "h264")) { throw invalidManifest(); }
+        JsonNode audio = metadata.path("audio_codec");
+        if (!audio.isNull() && !audio.isMissingNode() && !(audio.isString() && "aac".equals(audio.stringValue()))) { throw invalidManifest(); }
+        JsonNode fps = metadata.path("frame_rate");
+        double frameRate = fps.isNull() || fps.isMissingNode() ? 0 : fps.isNumber() ? fps.doubleValue() : Double.NaN;
+        if (!Double.isFinite(frameRate) || frameRate < 0 || (!fps.isNull() && !fps.isMissingNode() && frameRate == 0)) { throw invalidManifest(); }
+        double tolerance = frameRate > 0 ? Math.max(100, Math.ceil(2000 / frameRate)) : 100;
+        if (Math.abs(metadata.path("duration_ms").longValue() - (export.endMs() - export.startMs())) > tolerance) { throw invalidManifest(); }
+        return verified;
+    }
+
+    private VerifiedManifest verifyManifest(String key, String expectedHash, ManifestIdentity expected,
+                                             ExportIdentity export) {
         if (expected == null || !expected.attemptPrefix().concat("manifest.json").equals(key)) { throw invalidReference(); }
         byte[] bytes = verifiedBytes(key, expectedHash, expected.attemptPrefix(), MAX_MANIFEST_BYTES);
         JsonNode manifest;
@@ -86,7 +122,17 @@ public class ArtifactVerifier {
                 || !text(manifest, "input_sha256", expected.sourceHash())) {
             throw error(HttpStatus.CONFLICT, "ARTIFACT_IDENTITY_MISMATCH", "Artifact identity does not match this execution");
         }
-        if (!text(manifest, "data_kind", "model_result") || !text(manifest, "review_status", "DRAFT")) { throw invalidManifest(); }
+        if ("EXPORT_CLIP".equals(expected.stageType())) {
+            if (export == null || !text(manifest, "data_kind", "reviewed_export") || !text(manifest, "review_status", "CONFIRMED")) { throw invalidManifest(); }
+            if (!text(manifest, "export_id", export.exportId()) || !text(manifest, "clip_id", export.clipId())
+                    || !longInteger(manifest, "approved_revision", export.approvedRevision())
+                    || !text(manifest, "snapshot_hash", export.snapshotHash()) || !text(manifest, "segment_id", export.segmentId())
+                    || !longInteger(manifest, "start_ms", export.startMs()) || !longInteger(manifest, "end_ms", export.endMs())
+                    || !text(manifest, "encoding_profile", export.encodingProfile())
+                    || !text(manifest, "stage_input_hash", export.stageInputHash())) {
+                throw error(HttpStatus.CONFLICT, "ARTIFACT_IDENTITY_MISMATCH", "Artifact identity does not match this frozen export");
+            }
+        } else if (!text(manifest, "data_kind", "model_result") || !text(manifest, "review_status", "DRAFT")) { throw invalidManifest(); }
         JsonNode artifacts = manifest.path("artifacts");
         if (!artifacts.isArray() || artifacts.isEmpty() || artifacts.size() > 64) { throw invalidManifest(); }
         Set<String> kinds = new HashSet<>();
@@ -111,6 +157,12 @@ public class ArtifactVerifier {
     public void verifyCheckpoint(String key, String expectedHash, ManifestIdentity expected) {
         if (expected == null) { throw invalidReference(); }
         verifyFile(key, expectedHash, expected.attemptPrefix(), MAX_CHECKPOINT_BYTES);
+    }
+
+    public Path verifiedArtifactPath(String key, String expectedHash, ManifestIdentity expected) {
+        if (expected == null) { throw invalidReference(); }
+        verifyFile(key, expectedHash, expected.attemptPrefix(), Long.MAX_VALUE);
+        return confinedFile(key, expected.attemptPrefix());
     }
 
     /** A response may settle its original dispatched attempt after that lease is revoked. */
@@ -207,6 +259,10 @@ public class ArtifactVerifier {
     private static boolean integer(JsonNode node, String field, int expected) {
         JsonNode value = node.path(field);
         return value.isIntegralNumber() && value.canConvertToInt() && value.intValue() == expected;
+    }
+    private static boolean longInteger(JsonNode node, String field, long expected) {
+        JsonNode value = node.path(field);
+        return value.isIntegralNumber() && value.canConvertToLong() && value.longValue() == expected;
     }
     private static void requireHash(String value) {
         if (value == null || !value.matches("[0-9a-f]{64}")) { throw invalidReference(); }

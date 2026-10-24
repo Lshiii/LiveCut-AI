@@ -48,7 +48,7 @@ def main(argv: list[str] | None = None) -> int:
     worker.add_argument("--storage-root", type=Path, required=True)
     worker.add_argument("--journal-dir", type=Path, required=True)
     worker.add_argument("--once", action="store_true", help="Handle one stage or pending callback")
-    worker.add_argument("--stage-type", choices=("MEDIA", "ASR", "SEGMENT", "TIMELINE"),
+    worker.add_argument("--stage-type", choices=("MEDIA", "ASR", "SEGMENT", "TIMELINE", "EXPORT_CLIP"),
                         help="Only claim this stage type; useful for a media-only smoke check")
     worker.add_argument("--poll-seconds", type=float, default=3)
     worker.add_argument("--ffprobe", default=os.environ.get("LIVECUT_FFPROBE_PATH", "ffprobe"))

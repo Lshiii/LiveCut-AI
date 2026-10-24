@@ -109,7 +109,7 @@ public class ReviewService {
             return new Document(job, (String) stored.get("source_hash"), source(JSON.readTree(String.valueOf(stored.get("source_json"))), job),
                     ((Number) stored.get("latest_revision")).longValue());
         }
-        List<Map<String, Object>> stages = jdbc.queryForList("SELECT id,attempt,run_token,manifest_key,manifest_hash FROM job_stage WHERE job_id=? AND stage_type='TIMELINE' AND status='SUCCEEDED' ORDER BY shard_key FOR UPDATE", jobId);
+        List<Map<String, Object>> stages = jdbc.queryForList("SELECT id,attempt,run_token,manifest_key,manifest_hash FROM job_stage WHERE job_id=? AND owner_type='ANALYSIS' AND stage_type='TIMELINE' AND status='SUCCEEDED' ORDER BY shard_key FOR UPDATE", jobId);
         if (stages.size() != 1) { throw conflict("REVIEW_SOURCE_UNAVAILABLE", "A single completed timeline is required for review"); }
         Map<String, Object> stage = stages.getFirst();
         ArtifactVerifier.ManifestIdentity identity = new ArtifactVerifier.ManifestIdentity(jobId, job.videoId(), job.generation(),

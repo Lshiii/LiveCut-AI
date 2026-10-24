@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { api, ApiError, post } from './api'
+import ExportPanel from './ExportPanel.vue'
 
 interface Product { id: string; name: string; identity_source?: string }
 interface Segment { id: string; start_ms: number; end_ms: number; product_id: string | null; enabled: boolean; origin?: string; boundary_source?: string; identity_source?: string }
@@ -16,13 +17,13 @@ const review = ref<Review | null>(null), products = ref<Product[]>([]), segments
 const baseline = ref(''), pending = ref(false), error = ref(''), notice = ref('')
 const selectedId = ref(''), productFilter = ref(''), player = ref<HTMLVideoElement | null>(null)
 const playhead = ref(0)
-let loadVersion = 0
+let loadVersion = 0, stopped = false
 const payload = computed(() => ({
   products: products.value.map(({ id, name }) => ({ id, name })),
   segments: segments.value.map(({ id, start_ms, end_ms, product_id, enabled }) => ({ id, start_ms, end_ms, product_id, enabled })),
 }))
 const dirty = computed(() => !!review.value && JSON.stringify(payload.value) !== baseline.value)
-defineExpose({ dirty })
+defineExpose({ dirty, pending })
 const selected = computed(() => segments.value.find(s => s.id === selectedId.value))
 const visible = computed(() => segments.value.filter(s => !productFilter.value || s.product_id === productFilter.value))
 const evidence = computed(() => review.value?.utterances.filter(u => selected.value && u.end_ms > selected.value.start_ms && u.start_ms < selected.value.end_ms) ?? [])
@@ -43,34 +44,39 @@ function apply(value: Review) {
   if (!segments.value.some(s => s.id === selectedId.value)) selectedId.value = segments.value[0]?.id ?? ''
 }
 async function load() {
-  const version = ++loadVersion
+  const version = ++loadVersion, jobId = props.jobId
   pending.value = true; error.value = ''; notice.value = ''
   try {
-    const result = await api<Review>(`/api/jobs/${props.jobId}/review`)
-    if (version === loadVersion) apply(result)
-  } catch (value) { if (version === loadVersion) fail(value) }
-  finally { if (version === loadVersion) pending.value = false }
+    const result = await api<Review>(`/api/jobs/${jobId}/review`)
+    if (active(jobId, version) && result.job_id === jobId) apply(result)
+  } catch (value) { if (active(jobId, version)) fail(value) }
+  finally { if (active(jobId, version)) pending.value = false }
 }
+function active(jobId: string, version: number) { return !stopped && props.jobId === jobId && version === loadVersion }
 async function save() {
   if (!review.value || pending.value || !dirty.value) return
+  const jobId = props.jobId, version = loadVersion
   pending.value = true; error.value = ''; notice.value = ''
   try {
-    const result = await api<Review>(`/api/jobs/${props.jobId}/review`, {
+    const result = await api<Review>(`/api/jobs/${jobId}/review`, {
       method: 'PUT', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ base_revision: review.value.revision, ...payload.value }),
     })
+    if (!active(jobId, version) || result.job_id !== jobId) return
     apply(result); notice.value = `已保存修订 r${result.revision}。原模型结果保持留档。`
-  } catch (value) { fail(value) }
-  finally { pending.value = false }
+  } catch (value) { if (active(jobId, version)) fail(value) }
+  finally { if (active(jobId, version)) pending.value = false }
 }
 async function confirm() {
   if (!review.value || dirty.value || pending.value) return
+  const jobId = props.jobId, version = loadVersion
   pending.value = true; error.value = ''; notice.value = ''
   try {
-    const result = await post<Review>(`/api/jobs/${props.jobId}/review/confirm`, { revision: review.value.revision })
+    const result = await post<Review>(`/api/jobs/${jobId}/review/confirm`, { revision: review.value.revision })
+    if (!active(jobId, version) || result.job_id !== jobId) return
     apply(result); notice.value = `修订 r${result.revision} 已确认。后续修改将另存为新草稿。`
-  } catch (value) { fail(value) }
-  finally { pending.value = false }
+  } catch (value) { if (active(jobId, version)) fail(value) }
+  finally { if (active(jobId, version)) pending.value = false }
 }
 function seek(segment: Segment) {
   selectedId.value = segment.id
@@ -95,12 +101,12 @@ function addProduct() { products.value.push({ id: crypto.randomUUID(), name: '�
 function onUnload(event: BeforeUnloadEvent) { if (dirty.value) { event.preventDefault(); event.returnValue = '' } }
 window.addEventListener('beforeunload', onUnload)
 watch(() => props.jobId, () => { review.value = null; void load() }, { immediate: true })
-onBeforeUnmount(() => { loadVersion++; window.removeEventListener('beforeunload', onUnload) })
+onBeforeUnmount(() => { stopped = true; loadVersion++; window.removeEventListener('beforeunload', onUnload) })
 </script>
 
 <template>
   <section class="panel review-panel" aria-label="商品片段审核">
-    <div class="panel-heading"><div><div class="eyebrow">HUMAN REVIEW</div><h2>商品片段审核 <span v-if="review">r{{ review.revision }} · 第 {{ review.generation }} 次分析</span></h2></div><div class="actions"><span v-if="review" class="status" :class="review.status.toLowerCase()">{{ dirty ? '有未保存修改' : review.status === 'CONFIRMED' ? '本版已确认' : '待审核草稿' }}</span><button class="text-button" :disabled="pending" @click="load">{{ dirty ? '放弃修改并重新读取' : '重新读取' }}</button></div></div>
+    <div class="panel-heading"><div><div class="eyebrow">HUMAN REVIEW</div><h2>商品片段审核 <span v-if="review">r{{ review.revision }} · 第 {{ review.generation }} 次分析</span></h2></div><div class="actions"><span v-if="review" class="status" :class="review.status.toLowerCase()">{{ dirty ? '有未保存修改' : review.status === 'CONFIRMED' ? '本版已确认' : '待审核草稿' }}</span><button class="text-button" :disabled="pending" @click="load">{{ dirty ? '放弃修改并重新读取' : '重新读取' }}</button><a v-if="review?.confirmed_revisions.length" class="text-button" :href="`#exports-${jobId}`">跳到正式导出 ↓</a></div></div>
     <div v-if="error" class="message error" role="alert">{{ error }}</div>
     <div v-if="notice" class="message notice" role="status">{{ notice }}</div>
     <p v-if="!review" class="empty">{{ pending ? '正在读取分析结果…' : '审核数据暂不可用。' }}</p>
@@ -124,6 +130,7 @@ onBeforeUnmount(() => { loadVersion++; window.removeEventListener('beforeunload'
       </div>
       </fieldset>
       <div class="review-savebar"><div><b>{{ dirty ? '修改尚未保存' : `当前修订 r${review.revision}` }}</b><small>保存新版本；确认后才允许创建正式导出。</small></div><button class="secondary" :disabled="pending || !dirty" @click="save">{{ pending ? '处理中…' : '保存修订' }}</button><button class="primary" :disabled="pending || dirty || unresolved > 0 || review.status === 'CONFIRMED'" @click="confirm">{{ review.status === 'CONFIRMED' ? '本版已确认' : '确认此版本' }}</button></div>
+      <ExportPanel :key="review.job_id" :job-id="review.job_id" :confirmed-revisions="review.confirmed_revisions" :current-revision="review.revision" :dirty="dirty" />
     </template>
   </section>
 </template>

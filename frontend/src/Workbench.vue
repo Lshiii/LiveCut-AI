@@ -6,10 +6,10 @@ import './style.css'
 
 const videos = ref<VideoAsset[]>([]), jobs = ref<AnalysisJob[]>([])
 const selectedVideoId = ref(''), selectedJob = ref<AnalysisJob | null>(null)
-const pending = ref(''), errorMessage = ref(''), notice = ref('')
+const pending = ref(''), errorMessage = ref(''), connectionError = ref(''), notice = ref('')
 const online = ref(false), loading = ref(true), query = ref(''), filter = ref('ALL')
 const visualProvider = ref('ocr'), maxTextCalls = ref(12), fileInput = ref<HTMLInputElement | null>(null)
-const reviewEditor = ref<{ dirty: boolean } | null>(null)
+const reviewEditor = ref<{ dirty: boolean; pending: boolean } | null>(null)
 let timer: number | undefined, refreshing = false, stopped = false, selectionVersion = 0
 const names: Record<string, string> = {
   QUEUED: '等待执行', RUNNING: '正在分析', REVIEW_READY: '待人工审核', FAILED: '执行失败',
@@ -25,7 +25,7 @@ const currentVideo = computed(() => videos.value.find(v => v.id === (selectedJob
 const completeCount = computed(() => selectedJob.value?.stages.filter(s => ['SUCCEEDED', 'SKIPPED'].includes(s.status)).length ?? 0)
 function videoName(id: string) { return videos.value.find(v => v.id === id)?.original_filename ?? `视频 ${id.slice(0, 8)}` }
 function date(value: string) { return new Date(value).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) }
-function showError(error: unknown) {
+function formatError(error: unknown) {
   const code = error instanceof ApiError ? error.code : 'CLIENT_ERROR'
   const translated: Record<string, string> = {
     NETWORK_UNAVAILABLE: '无法连接服务，请检查 Java 服务是否正在运行。',
@@ -33,24 +33,34 @@ function showError(error: unknown) {
     ATTEMPTS_EXHAUSTED: '重试次数已耗尽，请创建新的分析任务。',
     JOB_NOT_RETRYABLE: '任务当前不可重试，请刷新状态。',
   }
-  errorMessage.value = translated[code] ?? `操作未完成：${code}`
-  if (error instanceof ApiError && error.requestId) errorMessage.value += `（请求 ${error.requestId}）`
+  const message = translated[code] ?? `操作未完成：${code}`
+  return error instanceof ApiError && error.requestId ? `${message}（请求 ${error.requestId}）` : message
 }
-async function loadDetail(id: string) {
-  if (selectedJob.value?.id !== id && reviewEditor.value?.dirty) {
-    errorMessage.value = '审核有未保存修改，请先保存或在审核区放弃修改。'; return
-  }
+function showError(error: unknown) { errorMessage.value = formatError(error) }
+async function loadDetail(id: string, background = false) {
+  if (!canSelect(id)) return
   const version = ++selectionVersion
   try {
     const result = await api<AnalysisJob>(`/api/jobs/${encodeURIComponent(id)}`)
-    if (stopped || version !== selectionVersion) return
+    if (stopped || version !== selectionVersion || !canSelect(id)) return
     selectedJob.value = result; selectedVideoId.value = result.video_id
     const url = new URL(location.href); url.searchParams.set('job', id); history.replaceState({}, '', url)
     if (!videos.value.some(v => v.id === result.video_id)) {
       const video = await api<VideoAsset>(`/api/videos/${encodeURIComponent(result.video_id)}`)
       if (!stopped && !videos.value.some(v => v.id === video.id)) videos.value.push(video)
     }
-  } catch (error) { if (version === selectionVersion) showError(error) }
+  } catch (error) {
+    if (version === selectionVersion) {
+      if (background) connectionError.value = formatError(error)
+      else showError(error)
+    }
+  }
+}
+function canSelect(id: string) {
+  if (selectedJob.value?.id === id) return true
+  if (reviewEditor.value?.pending) { errorMessage.value = '审核正在提交，请稍后再切换任务。'; return false }
+  if (reviewEditor.value?.dirty) { errorMessage.value = '审核有未保存修改，请先保存或在审核区放弃修改。'; return false }
+  return true
 }
 async function refresh() {
   if (refreshing || stopped) return
@@ -62,13 +72,17 @@ async function refresh() {
     const selected = currentVideo.value
     videos.value = videoPage.items
     if (selected && !videos.value.some(v => v.id === selected.id)) videos.value.push(selected)
-    jobs.value = jobPage.items; online.value = true
+    jobs.value = jobPage.items; online.value = true; connectionError.value = ''
     if (!selectedVideoId.value && videos.value[0]) selectedVideoId.value = videos.value[0].id
-    if (!pending.value && selectedAtStart && selectedJob.value?.id === selectedAtStart && selectionVersion === versionAtStart) await loadDetail(selectedAtStart)
-  } catch (error) { online.value = false; showError(error) }
+    if (!pending.value && selectedAtStart && selectedJob.value?.id === selectedAtStart && selectionVersion === versionAtStart) await loadDetail(selectedAtStart, true)
+  } catch (error) { online.value = false; connectionError.value = formatError(error) }
   finally { refreshing = false; loading.value = false }
 }
 function selectVideo() {
+  if (reviewEditor.value?.pending) {
+    selectedVideoId.value = selectedJob.value?.video_id ?? selectedVideoId.value
+    errorMessage.value = '审核正在提交，请稍后再切换任务。'; return
+  }
   if (reviewEditor.value?.dirty) {
     selectedVideoId.value = selectedJob.value?.video_id ?? selectedVideoId.value
     errorMessage.value = '审核有未保存修改，请先保存或在审核区放弃修改。'; return
@@ -79,6 +93,7 @@ function selectVideo() {
 async function upload(event: Event) {
   const input = event.target as HTMLInputElement, file = input.files?.[0]
   if (!file) return
+  if (reviewEditor.value?.pending) { errorMessage.value = '请等待审核提交完成，再上传新视频。'; input.value = ''; return }
   if (reviewEditor.value?.dirty) { errorMessage.value = '请先保存审核修改，再上传新视频。'; input.value = ''; return }
   if (!file.name.toLowerCase().endsWith('.mp4') || file.size > 1073741824 || file.size === 0) {
     errorMessage.value = '请选择非空的 MP4 视频，大小不超过 1 GiB。'; input.value = ''; return
@@ -111,11 +126,14 @@ async function createJob() {
 }
 async function action(kind: 'cancel' | 'retry') {
   if (!selectedJob.value || pending.value) return
+  const jobId = selectedJob.value.id, version = selectionVersion
   pending.value = kind; errorMessage.value = ''; notice.value = ''
   try {
-    selectedJob.value = await post<AnalysisJob>(`/api/jobs/${selectedJob.value.id}/${kind}`)
+    const result = await post<AnalysisJob>(`/api/jobs/${jobId}/${kind}`)
+    if (stopped || selectedJob.value?.id !== jobId || version !== selectionVersion || result.id !== jobId) return
+    selectedJob.value = result
     notice.value = kind === 'cancel' ? '任务已取消，旧执行结果将被拒绝。' : '已请求重试。'; await refresh()
-  } catch (error) { showError(error) }
+  } catch (error) { if (!stopped && selectedJob.value?.id === jobId && version === selectionVersion) showError(error) }
   finally { pending.value = '' }
 }
 onMounted(async () => {
@@ -140,7 +158,7 @@ onUnmounted(() => { stopped = true; selectionVersion++; window.clearInterval(tim
       <header class="topbar"><span>工作区 <span class="slash">/</span> 视频与任务</span><span class="connection"><i :class="{ online }"></i>{{ online ? '服务已连接' : '服务未连接' }}</span></header>
       <div class="page">
         <section class="page-title"><div><div class="eyebrow">VIDEO WORKSPACE</div><h1>把直播，整理成商品片段<span>。</span></h1><p>上传录像，自动定位讲解区间，再由你完成审核。</p></div><button class="primary upload-button" :disabled="!!pending" @click="fileInput?.click()"><span>＋</span>{{ pending === 'upload' ? '正在上传…' : '上传视频' }}</button><input ref="fileInput" class="visually-hidden" type="file" accept=".mp4,video/mp4" aria-label="上传 MP4 视频" @change="upload"></section>
-        <div v-if="errorMessage" class="message error" role="alert"><span>{{ errorMessage }}</span><button aria-label="关闭错误提示" @click="errorMessage = ''">×</button></div>
+        <div v-if="errorMessage || connectionError" class="message error" role="alert"><span>{{ errorMessage || connectionError }}</span><button aria-label="关闭错误提示" @click="errorMessage = ''; connectionError = ''">×</button></div>
         <div v-if="notice" class="message notice" role="status"><span>{{ notice }}</span><button aria-label="关闭操作提示" @click="notice = ''">×</button></div>
         <section class="overview" aria-label="当前加载任务统计">
           <div><span>视频素材</span><strong>{{ videos.length.toString().padStart(2, '0') }}</strong><small>本地来源已留档</small></div>
@@ -180,7 +198,7 @@ onUnmounted(() => { stopped = true; selectionVersion++; window.clearInterval(tim
             </div>
           </section>
         </div>
-        <ReviewPanel v-if="selectedJob?.status === 'REVIEW_READY' && currentVideo" ref="reviewEditor" :job-id="selectedJob.id" :video-url="currentVideo.content_url" />
+        <ReviewPanel v-if="selectedJob?.status === 'REVIEW_READY' && currentVideo" :key="selectedJob.id" ref="reviewEditor" :job-id="selectedJob.id" :video-url="currentVideo.content_url" />
         <section v-else-if="currentVideo" class="panel source-panel"><div class="panel-heading"><div><h2>原视频预览</h2><p>{{ currentVideo.original_filename }}</p></div><span class="subtle-number">{{ (currentVideo.size_bytes / 1024 / 1024).toFixed(1) }} MB</span></div><div class="source-layout"><video :key="currentVideo.id" :src="currentVideo.content_url" controls preload="metadata" playsinline></video><div class="source-description"><span class="eyebrow">SOURCE VIDEO</span><h3>所有片段，共用一条时间轴。</h3><p>播放器支持按需读取原视频。ASR 时间戳映射到原视频毫秒，后续审核和切片都以此为准。</p><dl><dt>来源状态</dt><dd>{{ currentVideo.media_validation_status }}</dd><dt>文件 SHA256</dt><dd class="hash">{{ currentVideo.content_hash }}</dd></dl><small>上传时仅检查基本文件头，完整媒体探测由 Worker 执行。</small></div></div></section>
         <footer class="page-footer"><span>LiveCut AI</span> 自动预测需要人工复核 · 真实素材仅保存在本地</footer>
       </div>

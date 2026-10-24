@@ -20,7 +20,7 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   const controller = new AbortController()
   const timeout = window.setTimeout(() => controller.abort(), init.body instanceof FormData ? 300000 : 15000)
   try {
-    const response = await fetch(path, { ...init, signal: controller.signal })
+    const response = await fetch(path, { cache: 'no-store', ...init, signal: controller.signal })
     const body = await response.json().catch(() => null)
     if (!response.ok) throw new ApiError(body?.error_code ?? `HTTP_${response.status}`, body?.request_id)
     if (!body || typeof body !== 'object') throw new ApiError('INVALID_SERVER_RESPONSE')

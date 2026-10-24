@@ -16,6 +16,7 @@ import java.util.TreeMap;
 import java.util.UUID;
 
 import io.livecut.jobs.JobModels.*;
+import io.livecut.exports.ExportService;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.http.HttpStatus;
@@ -43,10 +44,12 @@ public class JobService {
             row.getString("status"), row.getInt("attempt"), row.getString("run_token"), row.getString("worker_id"),
             instant(row, "lease_until"), instant(row, "hard_deadline_at"), instant(row, "next_run_at"),
             row.getString("input_hash"), row.getString("checkpoint_key"), row.getString("checkpoint_hash"),
-            row.getString("manifest_key"), row.getString("manifest_hash"), row.getString("error_code"));
+            row.getString("manifest_key"), row.getString("manifest_hash"), row.getString("error_code"),
+            row.getString("owner_type"), row.getString("owner_id"));
     private final JdbcTemplate jdbc;
     private final TransactionTemplate transaction;
     private final ArtifactVerifier artifactVerifier;
+    private final ExportService exports;
     private final int leaseSeconds;
     private final int hardDeadlineSeconds;
     private final int maxAttempts;
@@ -59,13 +62,14 @@ public class JobService {
                       @Value("${livecut.jobs.max-attempts:3}") int maxAttempts,
                       @Value("${livecut.jobs.retry-delay-seconds:2}") int retryDelaySeconds,
                       @Value("${livecut.jobs.scan-enabled:true}") boolean scanEnabled,
-                      ArtifactVerifier artifactVerifier) {
+                      ArtifactVerifier artifactVerifier, ExportService exports) {
         if (leaseSeconds < 1 || leaseSeconds > 3600 || hardDeadlineSeconds < 1 || hardDeadlineSeconds > 86400
                 || maxAttempts < 1 || maxAttempts > 10 || retryDelaySeconds < 0 || retryDelaySeconds > 3600) {
             throw new IllegalArgumentException("Invalid scheduler lease, deadline, attempt or retry settings");
         }
         this.jdbc = jdbc;
         this.artifactVerifier = artifactVerifier;
+        this.exports = exports;
         this.transaction = new TransactionTemplate(manager);
         this.transaction.setIsolationLevel(TransactionDefinition.ISOLATION_READ_COMMITTED);
         this.leaseSeconds = leaseSeconds;
@@ -132,7 +136,7 @@ public class JobService {
             if ("CANCELLED".equals(job.get("status"))) { return snapshot(job); }
             if ("REVIEW_READY".equals(job.get("status"))) { throw conflict("JOB_NOT_CANCELLABLE", "A completed job cannot be cancelled"); }
             stages(id, true);
-            jdbc.update("UPDATE job_stage SET status='CANCELLED',run_token=NULL,worker_id=NULL,lease_until=NULL,hard_deadline_at=NULL,updated_at=CURRENT_TIMESTAMP(6) WHERE job_id=? AND status NOT IN ('SUCCEEDED','SKIPPED')", id);
+            jdbc.update("UPDATE job_stage SET status='CANCELLED',run_token=NULL,worker_id=NULL,lease_until=NULL,hard_deadline_at=NULL,updated_at=CURRENT_TIMESTAMP(6) WHERE job_id=? AND owner_type='ANALYSIS' AND status NOT IN ('SUCCEEDED','SKIPPED')", id);
             touch(id, "CANCELLED");
             return snapshot(job(id, true));
         });
@@ -148,7 +152,7 @@ public class JobService {
             if (failed.stream().anyMatch(stage -> stage.attempt() >= maxAttempts)) {
                 throw conflict("ATTEMPTS_EXHAUSTED", "Execution attempts are exhausted; create a new analysis job");
             }
-            jdbc.update("UPDATE job_stage SET status='READY',run_token=NULL,worker_id=NULL,lease_until=NULL,hard_deadline_at=NULL,next_run_at=CURRENT_TIMESTAMP(6),error_code=NULL,updated_at=CURRENT_TIMESTAMP(6) WHERE job_id=? AND status='FAILED'", id);
+            jdbc.update("UPDATE job_stage SET status='READY',run_token=NULL,worker_id=NULL,lease_until=NULL,hard_deadline_at=NULL,next_run_at=CURRENT_TIMESTAMP(6),error_code=NULL,updated_at=CURRENT_TIMESTAMP(6) WHERE job_id=? AND owner_type='ANALYSIS' AND status='FAILED'", id);
             touch(id, "RUNNING");
             return snapshot(job(id, true));
         });
@@ -156,12 +160,12 @@ public class JobService {
 
     public List<ReadyStage> ready(String stageType, int limit) {
         if (limit < 1 || limit > 100) { throw bad("INVALID_ARGUMENT", "limit must be 1..100"); }
-        if (stageType != null && !FLOW.contains(stageType)) { throw bad("INVALID_ARGUMENT", "Unknown stage type"); }
+        if (stageType != null && !FLOW.contains(stageType) && !"EXPORT_CLIP".equals(stageType)) { throw bad("INVALID_ARGUMENT", "Unknown stage type"); }
         String predicate = stageType == null ? "" : " AND s.stage_type=?";
         List<Object> parameters = new ArrayList<>();
         if (stageType != null) { parameters.add(stageType); }
         parameters.add(limit);
-        return jdbc.query("SELECT s.* FROM job_stage s JOIN analysis_job j ON j.id=s.job_id WHERE s.status='READY' AND s.next_run_at<=CURRENT_TIMESTAMP(6) AND j.status IN ('QUEUED','RUNNING')" + predicate + " ORDER BY s.next_run_at,s.id LIMIT ?",
+        return jdbc.query("SELECT s.* FROM job_stage s JOIN analysis_job j ON j.id=s.job_id LEFT JOIN export_job e ON s.owner_type='EXPORT' AND e.id=s.owner_id AND e.job_id=s.job_id WHERE s.status='READY' AND s.next_run_at<=CURRENT_TIMESTAMP(6) AND ((s.owner_type='ANALYSIS' AND j.status IN ('QUEUED','RUNNING')) OR (s.owner_type='EXPORT' AND j.status='REVIEW_READY' AND e.status IN ('QUEUED','RUNNING')))" + predicate + " ORDER BY s.next_run_at,s.id LIMIT ?",
                 (row, index) -> new ReadyStage(row.getString("id"), row.getString("job_id"), row.getString("stage_type"), row.getString("shard_key"), instant(row, "next_run_at")), parameters.toArray());
     }
 
@@ -172,9 +176,10 @@ public class JobService {
         String claimId = identifier(request.claimRequestId(), "claim_request_id");
         String requestHash = sha256(stageId + "\n" + worker);
         return transaction.execute(status -> {
-            String jobId = stageJob(stageId);
-            Map<String, Object> job = job(jobId, true);
-            StageRow stage = stage(stageId, true);
+            StageParent parent = lockParent(stageId);
+            Map<String, Object> job = parent.analysis();
+            String jobId = String.valueOf(job.get("id"));
+            StageRow stage = parent.stage();
             Instant now = dbNow();
             int inserted = jdbc.update("INSERT IGNORE INTO stage_claim_request (worker_id,claim_request_id,request_hash,stage_id,outcome) VALUES (?,?,?,?,'PENDING')", worker, claimId, requestHash, stageId);
             Map<String, Object> receipt = jdbc.queryForMap("SELECT * FROM stage_claim_request WHERE worker_id=? AND claim_request_id=? FOR UPDATE", worker, claimId);
@@ -183,7 +188,7 @@ public class JobService {
                 if (!"CLAIMED".equals(receipt.get("outcome"))) {
                     return noClaim("EXPIRED".equals(receipt.get("outcome")) ? "EXPIRED" : "NO_WORK", stageId);
                 }
-                boolean valid = stage.status().equals("RUNNING") && activeJob(job)
+                boolean valid = stage.status().equals("RUNNING") && activeParent(parent)
                         && stage.attempt() == ((Number) receipt.get("attempt")).intValue()
                         && sameToken(stage.runToken(), String.valueOf(receipt.get("run_token")))
                         && stage.leaseUntil().isAfter(now) && stage.hardDeadlineAt().isAfter(now);
@@ -193,7 +198,7 @@ public class JobService {
                 }
                 return claimed("ALREADY_CLAIMED", stage, job);
             }
-            if (!activeJob(job) || !stage.status().equals("READY") || stage.nextRunAt().isAfter(now)) {
+            if (!activeParent(parent) || !stage.status().equals("READY") || stage.nextRunAt().isAfter(now)) {
                 jdbc.update("UPDATE stage_claim_request SET outcome='NO_WORK' WHERE worker_id=? AND claim_request_id=?", worker, claimId);
                 return noClaim("NO_WORK", stageId);
             }
@@ -209,7 +214,7 @@ public class JobService {
                     token, worker, timestamp(lease), timestamp(deadline), stageId);
             StageRow current = stage(stageId, true);
             jdbc.update("UPDATE stage_claim_request SET outcome='CLAIMED',attempt=?,run_token=? WHERE worker_id=? AND claim_request_id=?", current.attempt(), token, worker, claimId);
-            touch(jobId, "RUNNING");
+            touchParent(current, "RUNNING");
             return claimed("CLAIMED", current, job(jobId, true));
         });
     }
@@ -220,7 +225,7 @@ public class JobService {
             if (!locked.stage().hardDeadlineAt().isAfter(locked.dbNow())) { throw stale(); }
             Instant lease = minimum(locked.dbNow().plusSeconds(leaseSeconds), locked.stage().hardDeadlineAt());
             jdbc.update("UPDATE job_stage SET lease_until=?,updated_at=CURRENT_TIMESTAMP(6) WHERE id=?", timestamp(lease), locked.stage().id());
-            touch(locked.jobId(), null);
+            touchParent(locked.stage(), null);
             return action("ACCEPTED", locked.stage().id());
         });
     }
@@ -240,7 +245,7 @@ public class JobService {
             artifactVerifier.verifyCheckpoint(request.checkpointKey(), request.checkpointHash(),
                     artifactIdentity(locked.stage(), job(locked.jobId(), false)));
             jdbc.update("UPDATE job_stage SET checkpoint_key=?,checkpoint_hash=?,updated_at=CURRENT_TIMESTAMP(6) WHERE id=?", request.checkpointKey(), request.checkpointHash(), locked.stage().id());
-            touch(locked.jobId(), null);
+            touchParent(locked.stage(), null);
             return action("ACCEPTED", locked.stage().id());
         });
     }
@@ -250,26 +255,29 @@ public class JobService {
         String id = uuid(stageId, "INVALID_STAGE_ID");
         credential(request.credential());
         return transaction.execute(status -> {
-            String jobId = stageJob(id);
-            Map<String, Object> job = job(jobId, true);
-            StageRow stage = stage(id, true);
-            if ("CANCELLED".equals(job.get("status"))) { throw stale(); }
+            StageParent parent = lockParent(id);
+            Map<String, Object> job = parent.analysis();
+            String jobId = String.valueOf(job.get("id"));
+            StageRow stage = parent.stage();
+            if (!isExport(stage) && "CANCELLED".equals(job.get("status"))) { throw stale(); }
             if (stage.status().equals("SUCCEEDED") && matches(stage, request.credential())) {
                 artifactKey(stage, request.manifestKey(), true);
                 hash(request.manifestHash(), "INVALID_MANIFEST_HASH");
                 if (!request.manifestHash().equals(stage.manifestHash()) || !request.manifestKey().equals(stage.manifestKey())) {
                     throw conflict("RESULT_CONFLICT", "This completed attempt already has a different immutable result");
                 }
-                artifactVerifier.verifyManifest(request.manifestKey(), request.manifestHash(), artifactIdentity(stage, job));
+                verifyResult(stage, job, request);
                 return new StageActionResult("ALREADY_APPLIED", stageSnapshot(stage, false));
             }
-            requireActive(stage, job, request.credential());
+            requireActive(parent, request.credential());
+            if (!stage.hardDeadlineAt().isAfter(dbNow())) { throw stale(); }
             artifactKey(stage, request.manifestKey(), true);
             hash(request.manifestHash(), "INVALID_MANIFEST_HASH");
-            artifactVerifier.verifyManifest(request.manifestKey(), request.manifestHash(), artifactIdentity(stage, job));
+            var manifest = verifyResult(stage, job, request);
             jdbc.update("UPDATE job_stage SET status='SUCCEEDED',lease_until=NULL,manifest_key=?,manifest_hash=?,error_code=NULL,updated_at=CURRENT_TIMESTAMP(6) WHERE id=?", request.manifestKey(), request.manifestHash(), id);
-            advance(jobId, stage.stageType());
-            touch(jobId, null);
+            if (isExport(stage)) { exports.recordSuccess(stage, manifest); }
+            else { advance(jobId, stage.stageType()); }
+            touchParent(stage, null);
             return action("ACCEPTED", id);
         });
     }
@@ -282,7 +290,7 @@ public class JobService {
             LockedStage locked = lockActiveStage(stageId, request.credential());
             if (request.retryable() && locked.stage().attempt() < maxAttempts) {
                 retryWait(locked.stage(), request.errorCode(), locked.dbNow());
-                touch(locked.jobId(), null);
+                touchParent(locked.stage(), null);
             } else { terminalFailure(locked.stage(), request.errorCode()); }
             return action("ACCEPTED", locked.stage().id());
         });
@@ -295,39 +303,34 @@ public class JobService {
         }
         String id = uuid(stageId, "INVALID_STAGE_ID");
         credential(execution);
-        String jobId = stageJob(id);
-        Map<String, Object> parent = job(jobId, true);
-        StageRow row = stage(id, true);
-        requireActive(row, parent, execution);
+        StageParent parent = lockParent(id);
+        StageRow row = parent.stage();
+        requireActive(parent, execution);
         Instant now = dbNow();
         if (!row.hardDeadlineAt().isAfter(now)) { throw stale(); }
-        return new LockedStage(jobId, row, now);
+        return new LockedStage(row.jobId(), row, now);
     }
 
     @Scheduled(fixedDelayString = "${livecut.jobs.scan-delay-ms:1000}")
     public void scheduledRecovery() { if (scanEnabled) { recoverExpired(); } }
 
     public int recoverExpired() {
-        List<String> jobs = jdbc.queryForList("SELECT DISTINCT job_id FROM job_stage WHERE (status='RUNNING' AND (lease_until<=CURRENT_TIMESTAMP(6) OR hard_deadline_at<=CURRENT_TIMESTAMP(6))) OR (status='RETRY_WAIT' AND next_run_at<=CURRENT_TIMESTAMP(6)) LIMIT 100", String.class);
+        List<String> ids = jdbc.queryForList("SELECT id FROM job_stage WHERE (status='RUNNING' AND (lease_until<=CURRENT_TIMESTAMP(6) OR hard_deadline_at<=CURRENT_TIMESTAMP(6))) OR (status='RETRY_WAIT' AND next_run_at<=CURRENT_TIMESTAMP(6)) ORDER BY next_run_at,id LIMIT 100", String.class);
         int changed = 0;
-        for (String jobId : jobs) {
+        for (String id : ids) {
             Integer count = transaction.execute(status -> {
-                Map<String, Object> job = job(jobId, true);
-                if (!activeJob(job)) { return 0; }
-                List<StageRow> stages = stages(jobId, true);
+                StageParent parent = lockParent(id);
+                if (!activeParent(parent)) { return 0; }
+                StageRow stage = parent.stage();
                 Instant now = dbNow();
                 int mutations = 0;
-                for (StageRow stage : stages) {
-                    if (stage.status().equals("RUNNING") && (!stage.leaseUntil().isAfter(now) || !stage.hardDeadlineAt().isAfter(now))) {
-                        if (stage.attempt() >= maxAttempts) { terminalFailure(stage, "LEASE_EXPIRED"); mutations++; break; }
-                        retryWait(stage, "LEASE_EXPIRED", now);
-                        mutations++;
-                    }
+                if (stage.status().equals("RUNNING") && (!stage.leaseUntil().isAfter(now) || !stage.hardDeadlineAt().isAfter(now))) {
+                    if (stage.attempt() >= maxAttempts) { terminalFailure(stage, "LEASE_EXPIRED"); return 1; }
+                    retryWait(stage, "LEASE_EXPIRED", now);
+                    mutations++;
                 }
-                if (activeJob(job(jobId, true))) {
-                    mutations += jdbc.update("UPDATE job_stage SET status='READY',updated_at=CURRENT_TIMESTAMP(6) WHERE job_id=? AND status='RETRY_WAIT' AND next_run_at<=?", jobId, timestamp(now));
-                }
-                if (mutations > 0) { touch(jobId, null); }
+                mutations += jdbc.update("UPDATE job_stage SET status='READY',updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND status='RETRY_WAIT' AND next_run_at<=?", id, timestamp(now));
+                if (mutations > 0) { touchParent(stage, null); }
                 return mutations;
             });
             changed += count == null ? 0 : count;
@@ -340,11 +343,12 @@ public class JobService {
     }
 
     private void terminalFailure(StageRow stage, String code) {
-        stages(stage.jobId(), true);
+        if (!isExport(stage)) { stages(stage.jobId(), true); }
         jdbc.update("UPDATE job_stage SET status='FAILED',run_token=NULL,worker_id=NULL,lease_until=NULL,hard_deadline_at=NULL,error_code=?,last_retryable=FALSE,updated_at=CURRENT_TIMESTAMP(6) WHERE id=?", code, stage.id());
+        if (isExport(stage)) { exports.refreshLocked(stage.ownerId()); return; }
         // Fence sibling work when the parent is terminal; manual retry only
         // revives explicit FAILED rows, never a still-live previous token.
-        jdbc.update("UPDATE job_stage SET status='FAILED',run_token=NULL,worker_id=NULL,lease_until=NULL,hard_deadline_at=NULL,error_code='PARENT_STAGE_FAILED',updated_at=CURRENT_TIMESTAMP(6) WHERE job_id=? AND id<>? AND status IN ('RUNNING','READY','RETRY_WAIT')", stage.jobId(), stage.id());
+        jdbc.update("UPDATE job_stage SET status='FAILED',run_token=NULL,worker_id=NULL,lease_until=NULL,hard_deadline_at=NULL,error_code='PARENT_STAGE_FAILED',updated_at=CURRENT_TIMESTAMP(6) WHERE job_id=? AND owner_type='ANALYSIS' AND id<>? AND status IN ('RUNNING','READY','RETRY_WAIT')", stage.jobId(), stage.id());
         touch(stage.jobId(), "FAILED");
     }
 
@@ -389,7 +393,7 @@ public class JobService {
     }
 
     private List<StageRow> stages(String jobId, boolean lock) {
-        return jdbc.query("SELECT * FROM job_stage WHERE job_id=? ORDER BY id" + (lock ? " FOR UPDATE" : ""), STAGE, jobId);
+        return jdbc.query("SELECT * FROM job_stage WHERE job_id=? AND owner_type='ANALYSIS' ORDER BY id" + (lock ? " FOR UPDATE" : ""), STAGE, jobId);
     }
 
     private JobSnapshot snapshot(Map<String, Object> row) {
@@ -414,6 +418,7 @@ public class JobService {
     private StageActionResult action(String outcome, String stageId) { return new StageActionResult(outcome, stageSnapshot(stage(stageId, true), false)); }
 
     private ArtifactVerifier.ManifestIdentity artifactIdentity(StageRow stage, Map<String, Object> job) {
+        if (isExport(stage)) { return exports.manifestIdentity(stage, job); }
         String sourceHash = jdbc.queryForObject("SELECT content_hash FROM video_asset WHERE id=?", String.class, job.get("video_id"));
         return new ArtifactVerifier.ManifestIdentity(stage.jobId(), String.valueOf(job.get("video_id")),
                 ((Number) job.get("generation")).intValue(), stage.id(), stage.stageType(),
@@ -422,11 +427,12 @@ public class JobService {
 
     private ClaimResult claimed(String outcome, StageRow stage, Map<String, Object> job) {
         Map<String, Object> video = jdbc.queryForMap("SELECT source_key,content_hash FROM video_asset WHERE id=?", job.get("video_id"));
-        List<ArtifactRef> artifacts = stages(stage.jobId(), true).stream().filter(row -> row.status().equals("SUCCEEDED"))
+        List<ArtifactRef> artifacts = isExport(stage) ? List.of() : stages(stage.jobId(), true).stream().filter(row -> row.status().equals("SUCCEEDED"))
                 .map(row -> new ArtifactRef(row.id(), row.stageType(), row.shardKey(), row.manifestKey(), row.manifestHash())).toList();
         return new ClaimResult(outcome, stage.id(), stage.attempt(), stage.runToken(), stage.leaseUntil(), stage.hardDeadlineAt(),
                 stage.jobId(), stage.stageType(), stage.shardKey(), String.valueOf(video.get("source_key")),
-                String.valueOf(video.get("content_hash")), readConfig(job), artifacts,
+                isExport(stage) ? exports.manifestIdentity(stage, job).sourceHash() : String.valueOf(video.get("content_hash")),
+                isExport(stage) ? exports.claimConfig(stage) : readConfig(job), artifacts,
                 stage.checkpointKey(), stage.checkpointHash(), stage.inputHash(),
                 String.valueOf(job.get("video_id")), ((Number) job.get("generation")).intValue());
     }
@@ -442,7 +448,28 @@ public class JobService {
     private static boolean activeJob(Map<String, Object> job) { return Set.of("QUEUED", "RUNNING").contains(job.get("status")); }
     private static boolean matches(StageRow stage, Credential credential) { return stage.attempt() == credential.attempt() && sameToken(stage.runToken(), credential.runToken()); }
     private static boolean sameToken(String left, String right) { return left != null && right != null && MessageDigest.isEqual(left.getBytes(StandardCharsets.US_ASCII), right.getBytes(StandardCharsets.US_ASCII)); }
-    private static void requireActive(StageRow stage, Map<String, Object> job, Credential credential) { if (!activeJob(job) || !stage.status().equals("RUNNING") || !matches(stage, credential)) { throw stale(); } }
+    private record StageParent(Map<String, Object> analysis, Map<String, Object> owner, StageRow stage) {}
+    private StageParent lockParent(String id) {
+        StageRow hint = stage(id, false);
+        Map<String, Object> analysis = job(hint.jobId(), true);
+        Map<String, Object> owner = isExport(hint) ? exports.lockOwner(hint.ownerId(), hint.jobId()) : analysis;
+        return new StageParent(analysis, owner, stage(id, true));
+    }
+    private boolean activeParent(StageParent parent) {
+        return isExport(parent.stage()) ? "REVIEW_READY".equals(parent.analysis().get("status")) && exports.active(parent.owner()) : activeJob(parent.analysis());
+    }
+    private void requireActive(StageParent parent, Credential credential) {
+        if (!activeParent(parent) || !parent.stage().status().equals("RUNNING") || !matches(parent.stage(), credential)) { throw stale(); }
+    }
+    private static boolean isExport(StageRow stage) { return "EXPORT".equals(stage.ownerType()); }
+    private void touchParent(StageRow stage, String analysisStatus) {
+        if (isExport(stage)) { exports.refreshLocked(stage.ownerId()); }
+        else { touch(stage.jobId(), analysisStatus); }
+    }
+    private ArtifactVerifier.VerifiedManifest verifyResult(StageRow stage, Map<String, Object> job, CompleteRequest request) {
+        return isExport(stage) ? exports.verifyResult(stage, job, request.manifestKey(), request.manifestHash())
+                : artifactVerifier.verifyManifest(request.manifestKey(), request.manifestHash(), artifactIdentity(stage, job));
+    }
     private static void credential(Credential value) { if (value == null || value.attempt() < 1 || value.runToken() == null || !value.runToken().matches("[A-Za-z0-9_-]{16,64}")) { throw stale(); } }
 
     private static void artifactKey(StageRow stage, String key, boolean manifest) {

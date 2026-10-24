@@ -2,6 +2,8 @@
 
 Java 负责状态、租约和请求数预算，单槽 Python Worker 执行媒体、ASR、OCR 和商品分段。复用已有算法，没有为接入后台改写识别策略。固定流程是 MEDIA → ASR → SEGMENT → TIMELINE，成功后进入 REVIEW_READY，输出仍为 DRAFT。
 
+审核确认后，独立的 EXPORT_CLIP 阶段从冻结修订生成正式 MP4。它复用领取、心跳和完成协议，与分析状态隔离，不调用模型。持续 Worker 默认也领取导出；只处理导出可运行 `./scripts/worker.ps1 -StageType EXPORT_CLIP -Once`，每次处理一个片段。详细验证见 [正式导出](./12-正式导出与下载.md)。
+
 ## 启动
 
 先启动 [Java 服务](./07-Java视频来源服务.md)，私有 `.env.java` 中配置相同的 `LIVECUT_WORKER_API_KEY` 和共享 `LIVECUT_STORAGE_ROOT`。Java 与 Worker 必须指向同一个目录。模型凭证继续从进程环境变量 `DASHSCOPE_API_KEY` 读取，FFmpeg/ffprobe 可用对应 LIVECUT 环境变量指定。不要把密钥放进命令行或前端。

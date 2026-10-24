@@ -172,6 +172,8 @@ class BudgetTransport(httpx.BaseTransport):
 
     def handle_request(self, request: httpx.Request) -> httpx.Response:
         self.context.guard.check()
+        if self.context.lease.stage_type == "EXPORT_CLIP":
+            raise ModelBudgetError("MODEL_OPERATION_NOT_ALLOWED")
         path = request.url.path.rstrip("/")
         kind = None
         if request.method == "POST" and path.endswith("/services/audio/asr/transcription"):
@@ -182,6 +184,8 @@ class BudgetTransport(httpx.BaseTransport):
             if request.method == "POST" and "/tasks/" in path:
                 return self._query(request)
             return self.inner.handle_request(request)
+        if self.context.lease.stage_type != {"ASR": "ASR", "TEXT": "SEGMENT"}[kind]:
+            raise ModelBudgetError("MODEL_OPERATION_NOT_ALLOWED")
         try:
             body = json.loads(request.read())
             model = body["model"]

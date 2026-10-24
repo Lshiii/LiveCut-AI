@@ -30,7 +30,7 @@ from .ocr import observe_video_ocr, ocr_model_id
 from .segmentation import discover_products
 from .worker_client import WorkerClient, WorkerClientError
 
-STAGES = ("MEDIA", "ASR", "SEGMENT", "TIMELINE")
+STAGES = ("MEDIA", "ASR", "SEGMENT", "TIMELINE", "EXPORT_CLIP")
 
 
 class WorkerError(Exception):
@@ -141,7 +141,7 @@ class Lease:
     input_hash: str | None = None
 
     @classmethod
-    def parse(cls, value: dict) -> Lease:
+    def parse(cls, value: dict, *, validate_export: bool = True) -> Lease:
         if value.get("outcome") not in {"CLAIMED", "ALREADY_CLAIMED"}:
             raise WorkerError("INVALID_CLAIM")
         for field in ("job_id", "video_id", "stage_id", "run_token"):
@@ -159,7 +159,12 @@ class Lease:
         if value.get("input_hash") is not None:
             if not isinstance(value["input_hash"], str) or not re.fullmatch(r"[a-f0-9]{64}", value["input_hash"]):
                 raise WorkerError("INVALID_CLAIM")
-        return cls(**{field: value[field] for field in cls.__dataclass_fields__ if field in value})
+        lease = cls(**{field: value[field] for field in cls.__dataclass_fields__ if field in value})
+        if validate_export and lease.stage_type == "EXPORT_CLIP":
+            from .worker_export import ExportSpec
+
+            ExportSpec.from_lease(lease)
+        return lease
 
     @property
     def attempt_key(self) -> str:
@@ -364,7 +369,9 @@ class StageWorker:
         if claim.get("outcome") in {"NO_WORK", "EXPIRED"}:
             _native_path(claim_path).unlink()
             return "unavailable"
-        lease = Lease.parse(claim)
+        # A malformed frozen export still has valid fenced credentials. Defer
+        # its configuration check into the failure callback boundary below.
+        lease = Lease.parse(claim, validate_export=False)
         if lease.stage_id != pending["stage_id"]:
             raise WorkerError("CLAIM_TARGET_CHANGED")
         if stage_type is not None and lease.stage_type != stage_type:
@@ -386,12 +393,22 @@ class StageWorker:
         thread.start()
         try:
             guard.check()
+            if lease.stage_type == "EXPORT_CLIP":
+                from .worker_export import ExportSpec
+
+                ExportSpec.from_lease(lease)
             manifest = self.executor(context)
             guard.check()
             expected = {"job_id": lease.job_id, "stage_id": lease.stage_id,
                         "stage_type": lease.stage_type, "attempt": lease.attempt,
                         "video_id": lease.video_id, "analysis_generation": lease.generation,
                         "run_token": lease.run_token, "input_sha256": lease.source_hash}
+            if lease.stage_type == "EXPORT_CLIP":
+                from .worker_export import ExportSpec
+
+                expected.update(asdict(ExportSpec.from_lease(lease)))
+                expected.update(data_kind="reviewed_export", review_status="CONFIRMED",
+                                stage_input_hash=lease.input_hash)
             if any(manifest.get(key) != value for key, value in expected.items()):
                 raise WorkerError("INVALID_RESULT_MANIFEST")
             if not isinstance(manifest.get("artifacts"), list):
@@ -463,6 +480,11 @@ class AnalysisStageExecutor:
         self.ffmpeg_path, self.ffprobe_path = ffmpeg_path, ffprobe_path
 
     def __call__(self, context: StageContext) -> dict:
+        if context.lease.stage_type == "EXPORT_CLIP":
+            from .worker_export import ExportStageExecutor
+
+            return ExportStageExecutor(ffmpeg_path=self.ffmpeg_path,
+                                       ffprobe_path=self.ffprobe_path)(context)
         context.guard.check()
         lease, directory = context.lease, context.directory
         source = shared_path(context.storage_root, lease.source_key, must_exist=True)
