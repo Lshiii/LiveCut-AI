@@ -29,7 +29,7 @@ import httpx
 
 from livecut.contracts import validate_analysis_result
 
-PROMPT_VERSION = "catalog-free-anchors-v6-explicit-coverage"
+PROMPT_VERSION = "catalog-free-anchors-v8-combined-diagnostics"
 DEFAULT_BASE_URL = "https://dashscope.aliyuncs.com/api/v1"
 _KINDS = {"product_talk", "non_product", "mixed", "uncertain"}
 _STATUSES = {"identified", "unknown", "ambiguous", "not_applicable"}
@@ -242,8 +242,56 @@ def _expand_anchor_ranges(parsed: Any, window: dict) -> None:
         segment["utterance_ids"] = ordered[positions[start]:positions[end] + 1]
 
 
+def _coverage_diagnostics(parsed: dict, window: dict) -> str:
+    """Describe coverage conflicts using bounded source IDs, never model prose.
+
+    Diagnostics do not change, reorder or complete the model's assignments.
+    Later malformed segments are ignored here and still fail strict validation.
+    """
+    ordered = [item["utterance_id"] for item in window["visible"]]
+    order = {uid: index for index, uid in enumerate(ordered)}
+    owners: dict[str, int] = {}
+    duplicate_ids: set[str] = set()
+    conflicting_segments: set[int] = set()
+    last_order = -1
+    for index, segment in enumerate(parsed["segments"]):
+        if not isinstance(segment, dict) or not isinstance(segment.get("utterance_ids"), list):
+            continue
+        ids = [uid for uid in segment["utterance_ids"] if isinstance(uid, str) and uid in order]
+        if ids and order[ids[0]] <= last_order:
+            conflicting_segments.add(index)
+        for uid in ids:
+            if uid in owners:
+                duplicate_ids.add(uid)
+                conflicting_segments.update((owners[uid], index))
+            else:
+                owners[uid] = index
+        if ids:
+            last_order = order[ids[-1]]
+    duplicates = [uid for uid in ordered if uid in duplicate_ids]
+    missing = [uid for uid in window["core_ids"] if uid not in owners]
+
+    def samples(ids: list[str]) -> list[str]:
+        # Keep only complete identifiers; a clipped ID must never look usable.
+        return [uid for uid in ids if len(_json(uid)) <= 96][:16]
+
+    duplicate_samples, missing_samples = samples(duplicates), samples(missing)
+    detail = {
+        "diagnostic_version": "coverage-v1",
+        "duplicate_ids": duplicate_samples, "duplicate_id_count": len(duplicates),
+        "omitted_duplicate_id_count": len(duplicates) - len(duplicate_samples),
+        "missing_core_ids": missing_samples, "missing_core_id_count": len(missing),
+        "omitted_missing_core_id_count": len(missing) - len(missing_samples),
+        "conflicting_segment_indices": sorted(conflicting_segments)[:16],
+        "conflicting_segment_count": len(conflicting_segments),
+    }
+    return "; coverage_diagnostics=" + _json(detail)
+
+
 def _validate_window(parsed: Any, window: dict, *, grouping: str) -> None:
     def invalid(reason: str) -> None:
+        if isinstance(parsed, dict) and isinstance(parsed.get("segments"), list):
+            reason += _coverage_diagnostics(parsed, window)
         raise SegmentationError("INVALID_MODEL_OUTPUT", reason)
 
     if not isinstance(parsed, dict) or set(parsed) != {"products", "segments"}:
@@ -323,7 +371,7 @@ def _validate_window(parsed: Any, window: dict, *, grouping: str) -> None:
             invalid("mixed requires ambiguous candidates")
     missing = [uid for uid in window["core_ids"] if uid not in seen]
     if missing:
-        invalid("every core utterance must be assigned exactly once; missing IDs: " + _json(missing))
+        invalid("every core utterance must be assigned exactly once")
 
 
 def _endpoint(base_url: str) -> str:

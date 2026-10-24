@@ -123,4 +123,35 @@ GitHub 的 PowerShell syntax 工作流只在 Windows Runner 解析脚本，不�
 
 ## 真实 30 分钟验收记录
 
-> 待本轮实际运行后填写：素材来源/授权与 SHA256、实际源时长和编码、分析/审核/导出 ID、各阶段耗时及请求 usage、真实成片校验、恢复证据、失败与人工处理。当前占位不表示已完成验收。
+本轮结论：**上传、MEDIA 和 ASR 已通过；SEGMENT 三个 attempt 均未通过严格输出校验，完整 30 分钟闭环尚未完成。** 已有 10 分钟审核/正式导出结果见 [正式导出记录](./12-正式导出与下载.md)，不能用它替代本轮长样本验收。
+
+### 输入与执行
+
+- 来源：[公开商家直播回放](https://livebuy.tv/replays/k3BqqM) 连续 1100～2900 秒，H.264 360×640 / AAC、159,834,576 字节、容器时长 1800.017 秒。SHA256 为 `4868ad1821fb0887123416f3619abb80549fa93d7e309cc9d92dd1fa25618d32`。
+- 该片段来自同一条开发直播，包含此前的 10 分钟片段；不是独立封存测试集。严格全片音视频解码退出码 0，公开源首、中、尾各 300 帧与本地逐帧匹配；未将整条源视频重新下载做逐字节比较。600/1200 秒间隔的 1800 组像素检查未发现重复拼接。
+- 实际 HTTP 上传返回 201，video_id 为 `0851da2a-c923-4323-bebb-32b03950811d`；随后由浏览器创建 job `68a38b1a-d708-4fc1-a9e2-bbab06195f1d`，OCR、qwen-plus、paraformer-v2，上限 TEXT 24 / ASR 1。
+- MEDIA、ASR 均在 attempt 1 成功，得到 285 条转写。OCR 的现有资源上限为 16 帧，末帧 675009ms，coverage_truncated=true；后半段没有 OCR 采样，不能声称 OCR 覆盖整片。此轮保留识别策略，没有调整视觉计费或把网页商品跳转点输入模型。
+
+### 格式失败与恢复
+
+| 执行 | 结果 | 本次新增上游文本 POST | 累计 TEXT |
+|---|---|---:|---:|
+| SEGMENT attempt 1，v6 | 第 5 个窗口重复、遗漏核心语句，首次输出与一次修复均不合法 | 11 | 11/24 |
+| SEGMENT attempt 2，v7 | 第 5 个窗口通过，第 6 个窗口仍有多标签与重复区间 | 4 | 15/24 |
+| SEGMENT attempt 3，v8 | 合并约束反馈后仍重复分配 7 个 ID，严格拒绝 | 1 | 16/24 |
+
+v7/v8 只改格式校验反馈：将重复/遗漏的源 ID、冲突段索引和数量有界地反馈，一次反馈同时包含覆盖问题和先发现的字段约束。基础提示词、商品归类策略、严格校验与每次只修复一次的上限保持不变。没有自动排序、补句、选择商品或放行无效输出。v8 完整 Python 验证 288 项及 98 子测试通过，Ruff 通过；这证明代码回归，不能当作本轮识别成功。
+
+第二轮回放 10 个旧响应、第三轮回放 13 个旧响应；第三轮只发送 1 个新上游请求。原始响应和旧失败证据哈希未变，旧请求 body 命中缓存，不重做已成功 ASR。上游观察在原 HTTPTransport 进入网络后记录，和客户端逻辑请求日志分别保存；逻辑请求文件数不能当作实际调用或账单。
+
+最终 ASR 1/1、TEXT 16/24，17 条 model_call 均为 Provider 响应已取得且 SUCCEEDED，原响应 SHA 均核对通过，无 DISPATCHING/UNKNOWN_OUTCOME。**Provider 请求成功不等于业务分段成功。** 只接受前 5/10 个窗口；未生成完整 analysis-result、TIMELINE 保持 BLOCKED，没有新审核确认或正式成片。
+
+文本实际 usage 合计输入 56,676、输出 7,830、总计 64,506 tokens，包含被拒绝的输出。ASR Provider usage 原样返回 duration 1795，不能将其当作媒体时长 1800.017 秒或实际人民币账单。
+
+各次 Worker 执行 wall time 合计 355.437 秒，包含外部模型等待，且任务最终失败；不能将其报告为成功处理时延。ASR 完成至首次 SEGMENT 另有 16252.769 秒调度暂停，从创建到最后失败为 18082.953 秒，未把这段暂停混为算法计算耗时。
+
+### 当前未通过项
+
+完整 30 分钟分段、随后审核与至少 3 个正式片段导出仍未通过。当前停止重试并保留全部记录，没有增加预算、重置 attempt 或改写失败结果。后续要先解决模型结构输出的可靠性，再重新验证这条长样本闭环；商品识别精度优化另行进行，不提前填写提升数字。
+
+原始素材、请求/响应、转写与截图只保存在本地忽略目录。可复核摘要：data/runs/long-sample-validation/validation-report.json、data/runs/mvp-30min/analysis-failure-verification.json、final-model-ledger-verification.json、segment-retry2-verification.json 和 v8-offline-replay-verification.json。第三轮完整结果包含在 analysis-failure-verification.json 中。
