@@ -155,3 +155,7 @@ v7/v8 只改格式校验反馈：将重复/遗漏的源 ID、冲突段索引和�
 完整 30 分钟分段、随后审核与至少 3 个正式片段导出仍未通过。当前停止重试并保留全部记录，没有增加预算、重置 attempt 或改写失败结果。后续要先解决模型结构输出的可靠性，再重新验证这条长样本闭环；商品识别精度优化另行进行，不提前填写提升数字。
 
 原始素材、请求/响应、转写与截图只保存在本地忽略目录。可复核摘要：data/runs/long-sample-validation/validation-report.json、data/runs/mvp-30min/analysis-failure-verification.json、final-model-ledger-verification.json、segment-retry2-verification.json 和 v8-offline-replay-verification.json。第三轮完整结果包含在 analysis-failure-verification.json 中。
+
+### v9 新任务补充验证
+
+2026-10-24 晚间，generation 2 任务 `7e2c6b9a-0885-4fb7-9d06-c0b33c9a0098` 使用严格逐句分类数组，MEDIA/ASR 再次成功。SEGMENT 首窗应有 28 项，主响应和一次修复都只有 27 项，attempt 1 失败后停止；累计 TEXT 3/24、ASR 1/1，未执行 TIMELINE，也未产生新审核或成片。完整 30 分钟闭环仍未通过。协议、用量及失败边界见 [逐句分类记录](./14-逐句分类协议.md)，私有证据位于 data/runs/mvp-30min-v9/。没有修改旧任务、静默补句或提高预算。
