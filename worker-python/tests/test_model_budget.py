@@ -1,3 +1,4 @@
+import copy
 import json
 import threading
 
@@ -186,7 +187,7 @@ def test_recorded_response_hash_mismatch_prevents_replay(tmp_path):
 
 def test_real_segmentation_adapter_reads_recorded_raw_response_after_attempt_change(tmp_path):
     prediction = {"products": [{"label": "mask", "category": "面膜", "variant_description": ""}],
-                  "segments": [{"utterance_ids": ["u1"], "content_kind": "product_talk",
+                  "assignments": [{"content_kind": "product_talk",
                                 "identity_status": "identified", "product_labels": ["mask"]}]}
     raw = {"output": {"choices": [{"finish_reason": "stop", "message": {
         "role": "assistant", "content": json.dumps(prediction, ensure_ascii=False)}}]},
@@ -209,6 +210,72 @@ def test_real_segmentation_adapter_reads_recorded_raw_response_after_attempt_cha
     assert events.count("provider") == 1
     assert "unit-test-only" not in (tmp_path / api.response_key).read_text(encoding="utf-8")
     resumed.close()
+
+
+def test_dense_protocol_body_does_not_replay_legacy_range_response(tmp_path):
+    # A mocked durable ledger exercises real body hashing and stored-response
+    # verification. This is protocol recovery, not a live Provider experiment.
+    class Ledger:
+        def __init__(self):
+            self.calls = {}
+
+        def reserve_call(self, payload):
+            request_id = payload["request_id"]
+            existing = request_id in self.calls
+            self.calls.setdefault(request_id, {**payload, "status": "RESERVED"})
+            return {"outcome": "EXISTING" if existing else "RESERVED",
+                    "call": copy.deepcopy(self.calls[request_id])}
+
+        def update_call(self, request_id, payload):
+            self.calls[request_id].update({key: value for key, value in payload.items()
+                                           if value is not None})
+            return {"outcome": "UPDATED", "call": copy.deepcopy(self.calls[request_id])}
+
+    legacy = {"products": [], "segments": [{"start_utterance_id": "u1",
+               "end_utterance_id": "u1", "content_kind": "non_product",
+               "identity_status": "not_applicable", "product_labels": []}]}
+    dense = {"products": [], "assignments": [{"content_kind": "non_product",
+              "identity_status": "not_applicable", "product_labels": []}]}
+    external = []
+    pending = [legacy, dense]
+    ledger = Ledger()
+
+    def upstream(request):
+        external.append(json.loads(request.content))
+        assert pending, "Identical dense body must replay its original raw response"
+        return httpx.Response(200, json={"output": {"choices": [{"finish_reason": "stop",
+            "message": {"content": json.dumps(pending.pop(0))}}]}, "usage": {"input_tokens": 3}})
+
+    def client_for(attempt):
+        lease = Lease.parse(claim(stage_type="SEGMENT", attempt=attempt,
+                                  run_token=f"token-{attempt}"))
+        context = StageContext(lease, tmp_path, tmp_path / f"attempt-{attempt}",
+                               LeaseGuard(lease, threading.Event()))
+        return httpx.Client(transport=BudgetTransport(ledger, context,
+                            inner=httpx.MockTransport(upstream)))
+
+    url = "https://provider.example/api/v1/services/aigc/text-generation/generation"
+    with client_for(1) as client:
+        assert json.loads(client.post(url, json={"model": "qwen-plus", "input": {"messages": [
+            {"role": "system", "content": "legacy range protocol synthetic fixture"}]}}).json()[
+                "output"]["choices"][0]["message"]["content"]) == legacy
+    old_call = copy.deepcopy(next(iter(ledger.calls.values())))
+    items = [{"utterance_id": "u1", "start_ms": 0, "end_ms": 1000,
+              "text": "合成闲聊", "source_chunk_id": "c1"}]
+    with client_for(2) as client:
+        first = discover_products(items, 1000, tmp_path / "dense", client=client,
+            api_key="unit-test-only", job_id="job-1", base_url="https://provider.example/api/v1")
+    with client_for(3) as client:
+        replay = discover_products(items, 1000, tmp_path / "replay", client=client,
+            api_key="unit-test-only", job_id="job-1", base_url="https://provider.example/api/v1")
+    assert first == replay and len(external) == len(ledger.calls) == 2
+    assert ledger.calls[old_call["request_id"]] == old_call
+    dense_call = next(value for key, value in ledger.calls.items() if key != old_call["request_id"])
+    assert dense_call["input_hash"] != old_call["input_hash"]
+    assert all(value["status"] == "SUCCEEDED" for value in ledger.calls.values())
+    from livecut.worker import sha256
+    assert all(sha256(tmp_path / value["response_key"]) == value["response_hash"]
+               for value in ledger.calls.values())
 
 
 def test_endpoint_and_actual_audio_hash_bind_asr_identity_without_url_secret(tmp_path):
