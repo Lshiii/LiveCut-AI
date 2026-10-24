@@ -23,6 +23,19 @@ const reviewCount = computed(() => jobs.value.filter(j => j.status === 'REVIEW_R
 const visibleJobs = computed(() => jobs.value.filter(j => `${videoName(j.video_id)} ${j.id}`.toLowerCase().includes(query.value.toLowerCase()) && (filter.value === 'ALL' || j.status === filter.value)))
 const currentVideo = computed(() => videos.value.find(v => v.id === (selectedJob.value?.video_id || selectedVideoId.value)))
 const completeCount = computed(() => selectedJob.value?.stages.filter(s => ['SUCCEEDED', 'SKIPPED'].includes(s.status)).length ?? 0)
+const retryExplanation = computed(() => {
+  const actions = selectedJob.value?.actions
+  if (actions?.retry_block_reason === 'ATTEMPTS_EXHAUSTED') {
+    return `失败阶段已达到 ${actions.max_attempts} 次执行上限。可新建一次分析，新任务使用独立的模型调用预算。`
+  }
+  return '当前没有可重试的失败阶段，请刷新任务状态，或新建一次分析。'
+})
+function latestSnapshot(incoming: AnalysisJob) {
+  const candidates = [selectedJob.value, jobs.value.find(job => job.id === incoming.id)]
+  // Equal versions remain refreshable: a Java restart may change the current
+  // max_attempts configuration without changing this persisted job version.
+  return candidates.reduce<AnalysisJob>((latest, known) => known?.id === latest.id && known.state_version > latest.state_version ? known : latest, incoming)
+}
 function videoName(id: string) { return videos.value.find(v => v.id === id)?.original_filename ?? `视频 ${id.slice(0, 8)}` }
 function date(value: string) { return new Date(value).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) }
 function formatError(error: unknown) {
@@ -30,8 +43,9 @@ function formatError(error: unknown) {
   const translated: Record<string, string> = {
     NETWORK_UNAVAILABLE: '无法连接服务，请检查 Java 服务是否正在运行。',
     REQUEST_TIMEOUT: '请求超时。创建任务可再次点击，系统会复用幂等键。',
-    ATTEMPTS_EXHAUSTED: '重试次数已耗尽，请创建新的分析任务。',
+    ATTEMPTS_EXHAUSTED: '阶段执行次数已耗尽，请创建新的分析任务。新任务使用独立的模型调用预算。',
     JOB_NOT_RETRYABLE: '任务当前不可重试，请刷新状态。',
+    JOB_NOT_CANCELLABLE: '任务当前不可取消，请刷新状态。',
   }
   const message = translated[code] ?? `操作未完成：${code}`
   return error instanceof ApiError && error.requestId ? `${message}（请求 ${error.requestId}）` : message
@@ -43,7 +57,8 @@ async function loadDetail(id: string, background = false) {
   try {
     const result = await api<AnalysisJob>(`/api/jobs/${encodeURIComponent(id)}`)
     if (stopped || version !== selectionVersion || !canSelect(id)) return
-    selectedJob.value = result; selectedVideoId.value = result.video_id
+    if (result.id !== id) throw new ApiError('INVALID_SERVER_RESPONSE')
+    selectedJob.value = latestSnapshot(result); selectedVideoId.value = result.video_id
     const url = new URL(location.href); url.searchParams.set('job', id); history.replaceState({}, '', url)
     if (!videos.value.some(v => v.id === result.video_id)) {
       const video = await api<VideoAsset>(`/api/videos/${encodeURIComponent(result.video_id)}`)
@@ -72,7 +87,7 @@ async function refresh() {
     const selected = currentVideo.value
     videos.value = videoPage.items
     if (selected && !videos.value.some(v => v.id === selected.id)) videos.value.push(selected)
-    jobs.value = jobPage.items; online.value = true; connectionError.value = ''
+    jobs.value = jobPage.items.map(latestSnapshot); online.value = true; connectionError.value = ''
     if (!selectedVideoId.value && videos.value[0]) selectedVideoId.value = videos.value[0].id
     if (!pending.value && selectedAtStart && selectedJob.value?.id === selectedAtStart && selectionVersion === versionAtStart) await loadDetail(selectedAtStart, true)
   } catch (error) { online.value = false; connectionError.value = formatError(error) }
@@ -126,12 +141,20 @@ async function createJob() {
 }
 async function action(kind: 'cancel' | 'retry') {
   if (!selectedJob.value || pending.value) return
+  if (kind === 'retry' && !selectedJob.value.actions?.can_retry) {
+    errorMessage.value = selectedJob.value.actions?.retry_block_reason === 'ATTEMPTS_EXHAUSTED'
+      ? retryExplanation.value : '任务当前不可重试，请刷新状态。'
+    return
+  }
+  if (kind === 'cancel' && !selectedJob.value.actions?.can_cancel) {
+    errorMessage.value = '任务当前不可取消，请刷新状态。'; return
+  }
   const jobId = selectedJob.value.id, version = selectionVersion
   pending.value = kind; errorMessage.value = ''; notice.value = ''
   try {
     const result = await post<AnalysisJob>(`/api/jobs/${jobId}/${kind}`)
     if (stopped || selectedJob.value?.id !== jobId || version !== selectionVersion || result.id !== jobId) return
-    selectedJob.value = result
+    selectedJob.value = latestSnapshot(result)
     notice.value = kind === 'cancel' ? '任务已取消，旧执行结果将被拒绝。' : '已请求重试。'; await refresh()
   } catch (error) { if (!stopped && selectedJob.value?.id === jobId && version === selectionVersion) showError(error) }
   finally { pending.value = '' }
@@ -186,7 +209,9 @@ onUnmounted(() => { stopped = true; selectionVersion++; window.clearInterval(tim
                 <ol class="stages"><li v-for="(stage, index) in orderedStages" :key="stage.id" :class="stage.status.toLowerCase()"><span class="step">{{ stage.status === 'SUCCEEDED' ? '✓' : index + 1 }}</span><div><b>{{ stageNames[stage.stage_type] ?? stage.stage_type }}</b><small>{{ names[stage.status] ?? stage.status }}<template v-if="stage.attempt"> · 第 {{ stage.attempt }} 次执行</template></small><code v-if="stage.error_code">{{ stage.error_code }}</code></div></li></ol>
                 <div class="budget"><span>已预留模型请求</span><b>文本 {{ selectedJob.budget.text_calls_reserved }}/{{ selectedJob.budget.max_text_calls }} <i>·</i> ASR {{ selectedJob.budget.asr_calls_reserved }}/{{ selectedJob.budget.max_asr_submissions }}</b><small>次数上限，不代表人民币费用</small></div>
                 <p v-if="selectedJob.status === 'REVIEW_READY'" class="review-note">自动结果已就绪。请在下方审核区核对商品和边界，再确认修订版本。</p>
-                <div class="actions"><button v-if="['QUEUED', 'RUNNING'].includes(selectedJob.status)" class="secondary" :disabled="!!pending" @click="action('cancel')">取消任务</button><button v-if="selectedJob.status === 'FAILED'" class="secondary" :disabled="!!pending" @click="action('retry')">重试失败阶段</button><button class="text-button" :disabled="!!pending" @click="selectVideo">新建一次分析 →</button></div>
+                <p v-if="selectedJob.status === 'FAILED' && !selectedJob.actions?.can_retry" class="help" role="status">{{ retryExplanation }}</p>
+                <p v-else-if="selectedJob.actions?.can_retry" class="help">重试仅恢复失败阶段，每阶段最多执行 {{ selectedJob.actions.max_attempts }} 次；模型请求仍受本任务原预算限制。</p>
+                <div class="actions"><button v-if="selectedJob.actions?.can_cancel" class="secondary" :disabled="!!pending" @click="action('cancel')">取消任务</button><button v-if="selectedJob.actions?.can_retry" class="secondary" :disabled="!!pending" @click="action('retry')">重试失败阶段</button><button class="text-button" :disabled="!!pending" @click="selectVideo">新建一次分析 →</button></div>
               </template>
               <template v-else>
                 <p class="help">无需商品清单。模型从语音和画面文字中发现商品。</p>

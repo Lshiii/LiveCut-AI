@@ -43,10 +43,14 @@ public final class JobModels {
                                   @JsonProperty("text_calls_reserved") int textCallsReserved,
                                   @JsonProperty("max_asr_submissions") int maxAsrSubmissions,
                                   @JsonProperty("asr_calls_reserved") int asrCallsReserved) {}
+    public record JobActions(@JsonProperty("can_cancel") boolean canCancel,
+                             @JsonProperty("can_retry") boolean canRetry,
+                             @JsonProperty("retry_block_reason") String retryBlockReason,
+                             @JsonProperty("max_attempts") int maxAttempts) {}
     public record JobSnapshot(String id, @JsonProperty("video_id") String videoId, int generation,
                                String status, @JsonProperty("config_hash") String configHash,
                                Map<String, Object> config, @JsonProperty("state_version") long stateVersion,
-                               List<StageSnapshot> stages, BudgetSnapshot budget,
+                               List<StageSnapshot> stages, BudgetSnapshot budget, JobActions actions,
                                @JsonProperty("created_at") Instant createdAt,
                                @JsonProperty("updated_at") Instant updatedAt) {}
     public record JobPage(List<JobSnapshot> items, int limit, int offset) {}

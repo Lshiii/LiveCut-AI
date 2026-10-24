@@ -113,11 +113,13 @@ class JobProtocolIntegrationTests {
         assertEquals(4, first.path("stages").size());
         assertEquals("READY", stage(first, "MEDIA").path("status").asText());
         assertEquals("BLOCKED", stage(first, "ASR").path("status").asText());
+        assertActions(first, true, false, "JOB_NOT_RETRYABLE", 3);
         error(send("POST", "/api/jobs", Map.of("video_id", videoId, "config", Map.of("max_text_calls", 13)), key, null), 409, "IDEMPOTENCY_CONFLICT");
         JsonNode list = json(send("GET", "/api/jobs?limit=1&offset=0", null, null, null));
         assertEquals(1, list.path("limit").asInt());
         assertEquals(1, list.path("items").size());
         assertEquals(first.path("id").asText(), list.path("items").get(0).path("id").asText());
+        assertEquals(get(first.path("id").asText()).path("actions"), list.path("items").get(0).path("actions"));
         error(send("GET", "/api/jobs?limit=101", null, null, null), 400, "INVALID_ARGUMENT");
     }
 
@@ -248,7 +250,13 @@ class JobProtocolIntegrationTests {
         JsonNode canceled = create();
         String canceledId = canceled.path("id").asText();
         JsonNode canceledClaim = claim(stage(canceled, "MEDIA").path("id").asText(), "cancel-worker", UUID.randomUUID().toString());
-        assertEquals("CANCELLED", json(send("POST", "/api/jobs/" + canceledId + "/cancel", null, null, null)).path("status").asText());
+        assertActions(get(canceledId), true, false, "JOB_NOT_RETRYABLE", 3);
+        JsonNode canceledSnapshot = json(send("POST", "/api/jobs/" + canceledId + "/cancel", null, null, null));
+        assertEquals("CANCELLED", canceledSnapshot.path("status").asText());
+        assertActions(canceledSnapshot, false, false, "JOB_NOT_RETRYABLE", 3);
+        JsonNode canceledAgain = json(send("POST", "/api/jobs/" + canceledId + "/cancel", null, null, null));
+        assertEquals(canceledSnapshot.path("state_version"), canceledAgain.path("state_version"));
+        assertActions(canceledAgain, false, false, "JOB_NOT_RETRYABLE", 3);
         error(worker("POST", stagePath(canceledClaim, "heartbeat"), credentials(canceledClaim)), 409, "STALE_ATTEMPT");
         error(send("POST", "/api/jobs/" + canceledId + "/retry", null, null, null), 409, "JOB_NOT_RETRYABLE");
 
@@ -260,15 +268,99 @@ class JobProtocolIntegrationTests {
             assertEquals(attempt, current.path("attempt").asInt());
             assertEquals(200, worker("POST", stagePath(current, "fail"), withCredential(current,
                     "error_code", "FIXTURE_FAILURE", "retryable", false)).statusCode());
-            assertEquals("FAILED", get(jobId).path("status").asText());
+            JsonNode failed = get(jobId);
+            assertEquals("FAILED", failed.path("status").asText());
+            // Automatic retryability is false above. Manual recovery remains
+            // available until the execution-attempt limit is actually reached.
+            assertActions(failed, true, attempt < 3, attempt < 3 ? null : "ATTEMPTS_EXHAUSTED", 3);
+            assertEquals(failed.path("actions"), listed(jobId).path("actions"));
             var retry = send("POST", "/api/jobs/" + jobId + "/retry", null, null, null);
             if (attempt < 3) {
                 assertEquals(200, retry.statusCode(), text(retry));
                 assertEquals("READY", stage(json(retry), "MEDIA").path("status").asText());
                 assertEquals(attempt, stage(json(retry), "MEDIA").path("attempt").asInt());
+                assertActions(json(retry), true, false, "JOB_NOT_RETRYABLE", 3);
+                // A browser holding the preceding can_retry=true snapshot does
+                // not acquire permission for a second transition.
+                error(send("POST", "/api/jobs/" + jobId + "/retry", null, null, null), 409, "JOB_NOT_RETRYABLE");
+                assertEquals(attempt, stage(get(jobId), "MEDIA").path("attempt").asInt());
             } else {
                 error(retry, 409, "ATTEMPTS_EXHAUSTED");
             }
+        }
+    }
+
+    @Test
+    void actionCapabilitiesIgnoreExportFailuresAndStalePermissionCannotReviveCancelledWork() {
+        JsonNode created = create();
+        String jobId = created.path("id").asText();
+        String mediaId = stage(created, "MEDIA").path("id").asText();
+        String exportStageId = UUID.randomUUID().toString();
+        // Fault injection stays within this test's job. A failed EXPORT row
+        // must neither supply a missing ANALYSIS failure nor exhaust its limit.
+        jdbc().update("INSERT INTO job_stage (id,job_id,owner_type,owner_id,stage_type,shard_key,status,attempt,input_hash) VALUES (?,?,'EXPORT',?,'EXPORT_CLIP',?,'FAILED',99,?)",
+                exportStageId, jobId, UUID.randomUUID().toString(), UUID.randomUUID().toString(), HASH);
+        jdbc().update("UPDATE analysis_job SET status='FAILED' WHERE id=?", jobId);
+        JsonNode withoutAnalysisFailure = get(jobId);
+        assertActions(withoutAnalysisFailure, true, false, "JOB_NOT_RETRYABLE", 3);
+        assertEquals(4, withoutAnalysisFailure.path("stages").size());
+        error(send("POST", "/api/jobs/" + jobId + "/retry", null, null, null), 409, "JOB_NOT_RETRYABLE");
+
+        jdbc().update("UPDATE job_stage SET status='FAILED',attempt=1,last_retryable=FALSE,error_code='FIXTURE_FAILURE' WHERE id=?", mediaId);
+        JsonNode allowed = get(jobId);
+        assertActions(allowed, true, true, null, 3);
+        assertEquals(allowed.path("actions"), listed(jobId).path("actions"));
+        jdbc().update("UPDATE job_stage SET status='FAILED',attempt=3 WHERE job_id=? AND owner_type='ANALYSIS' AND stage_type='ASR'", jobId);
+        assertActions(get(jobId), true, false, "ATTEMPTS_EXHAUSTED", 3);
+        error(send("POST", "/api/jobs/" + jobId + "/retry", null, null, null), 409, "ATTEMPTS_EXHAUSTED");
+        assertEquals(1, stage(get(jobId), "MEDIA").path("attempt").asInt());
+        // Restore only the injected sibling, leaving the original failed MEDIA
+        // state intact before testing its legitimate recovery below.
+        jdbc().update("UPDATE job_stage SET status='BLOCKED',attempt=0 WHERE job_id=? AND owner_type='ANALYSIS' AND stage_type='ASR'", jobId);
+        JsonNode retried = json(send("POST", "/api/jobs/" + jobId + "/retry", null, null, null));
+        assertEquals("READY", stage(retried, "MEDIA").path("status").asText());
+        assertEquals("FAILED", jdbc().queryForObject("SELECT status FROM job_stage WHERE id=?", String.class, exportStageId));
+        assertEquals(99, jdbc().queryForObject("SELECT attempt FROM job_stage WHERE id=?", Integer.class, exportStageId));
+
+        JsonNode current = claim(mediaId, "stale-action-worker", UUID.randomUUID().toString());
+        assertEquals(200, worker("POST", stagePath(current, "fail"), withCredential(current,
+                "error_code", "FIXTURE_FAILURE", "retryable", false)).statusCode());
+        assertActions(get(jobId), true, true, null, 3);
+        // The user may abandon a failed task. The old capability is an
+        // observation only; the endpoint must lock and recompute it.
+        JsonNode abandoned = json(send("POST", "/api/jobs/" + jobId + "/cancel", null, null, null));
+        assertActions(abandoned, false, false, "JOB_NOT_RETRYABLE", 3);
+        error(send("POST", "/api/jobs/" + jobId + "/retry", null, null, null), 409, "JOB_NOT_RETRYABLE");
+        assertEquals(2, stage(get(jobId), "MEDIA").path("attempt").asInt());
+        assertEquals("FAILED", jdbc().queryForObject("SELECT status FROM job_stage WHERE id=?", String.class, exportStageId));
+    }
+
+    @Test
+    void capabilitiesAreRecomputedFromPersistedWorkAndConfiguredLimitAfterRestart() {
+        String jobId = create().path("id").asText();
+        String stageId = stage(get(jobId), "MEDIA").path("id").asText();
+        for (int attempt = 1; attempt <= 2; attempt++) {
+            JsonNode current = claim(stageId, "configured-limit-worker", UUID.randomUUID().toString());
+            assertEquals(attempt, current.path("attempt").asInt());
+            assertEquals(200, worker("POST", stagePath(current, "fail"), withCredential(current,
+                    "error_code", "FIXTURE_FAILURE", "retryable", false)).statusCode());
+            assertActions(get(jobId), true, true, null, 3);
+            if (attempt == 1) {
+                assertEquals(200, send("POST", "/api/jobs/" + jobId + "/retry", null, null, null).statusCode());
+            }
+        }
+        context.close();
+        try {
+            startContext(2);
+            JsonNode restored = get(jobId);
+            assertEquals("FAILED", restored.path("status").asText());
+            assertActions(restored, true, false, "ATTEMPTS_EXHAUSTED", 2);
+            assertEquals(restored.path("actions"), listed(jobId).path("actions"));
+            error(send("POST", "/api/jobs/" + jobId + "/retry", null, null, null), 409, "ATTEMPTS_EXHAUSTED");
+            assertEquals(2, stage(get(jobId), "MEDIA").path("attempt").asInt());
+        } finally {
+            if (context != null && context.isActive()) { context.close(); }
+            startContext();
         }
     }
 
@@ -373,7 +465,14 @@ class JobProtocolIntegrationTests {
         assertEquals(200, worker("POST", stagePath(segment, "complete"), completion(segment)).statusCode());
         JsonNode timeline = claim(stage(get(jobId), "TIMELINE").path("id").asText(), "fan-in-timeline", UUID.randomUUID().toString());
         assertEquals(200, worker("POST", stagePath(timeline, "complete"), completion(timeline)).statusCode());
-        assertEquals("REVIEW_READY", get(jobId).path("status").asText());
+        JsonNode completed = get(jobId);
+        assertEquals("REVIEW_READY", completed.path("status").asText());
+        assertActions(completed, false, false, "JOB_NOT_RETRYABLE", 3);
+        assertEquals(completed.path("actions"), listed(jobId).path("actions"));
+        // The creation snapshot advertised cancellation, but completion has
+        // revoked it by the time this delayed browser action reaches Java.
+        error(send("POST", "/api/jobs/" + jobId + "/cancel", null, null, null), 409, "JOB_NOT_CANCELLABLE");
+        assertEquals(completed.path("state_version"), get(jobId).path("state_version"));
     }
 
     @Test
@@ -393,6 +492,7 @@ class JobProtocolIntegrationTests {
         assertEquals(claimed.path("hard_deadline_at"), restored.path("hard_deadline_at"));
         assertEquals(checkpoint, restored.path("checkpoint_key").asText());
         assertEquals("RUNNING", stage(get(jobId), "MEDIA").path("status").asText());
+        assertActions(get(jobId), true, false, "JOB_NOT_RETRYABLE", 3);
         assertEquals(200, worker("POST", stagePath(restored, "complete"), completion(restored)).statusCode());
     }
 
@@ -410,10 +510,14 @@ class JobProtocolIntegrationTests {
     }
 
     private void startContext() {
+        startContext(3);
+    }
+
+    private void startContext(int maximumAttempts) {
         context = new SpringApplicationBuilder(LivecutBackendApplication.class).run(
                 "--server.port=0", "--server.address=127.0.0.1", "--livecut.storage.root=" + storageRoot.toAbsolutePath(),
                 "--livecut.worker.api-key=" + WORKER_KEY, "--livecut.jobs.scan-enabled=false", "--livecut.jobs.lease-seconds=30",
-                "--livecut.jobs.hard-deadline-seconds=1800", "--livecut.jobs.max-attempts=3", "--livecut.jobs.retry-delay-seconds=2");
+                "--livecut.jobs.hard-deadline-seconds=1800", "--livecut.jobs.max-attempts=" + maximumAttempts, "--livecut.jobs.retry-delay-seconds=2");
         base = URI.create("http://127.0.0.1:" + context.getEnvironment().getRequiredProperty("local.server.port"));
     }
 
@@ -433,6 +537,29 @@ class JobProtocolIntegrationTests {
         var response = send("GET", "/api/jobs/" + id, null, null, null);
         assertEquals(200, response.statusCode(), text(response));
         return json(response);
+    }
+
+    private JsonNode listed(String jobId) {
+        var response = send("GET", "/api/jobs?limit=100&offset=0", null, null, null);
+        assertEquals(200, response.statusCode(), text(response));
+        for (JsonNode job : json(response).path("items")) {
+            if (jobId.equals(job.path("id").asText())) { return job; }
+        }
+        throw new AssertionError("Expected this test job in the public list");
+    }
+
+    private static void assertActions(JsonNode job, boolean canCancel, boolean canRetry,
+                                      String retryBlockReason, int maximumAttempts) {
+        JsonNode actions = job.path("actions");
+        assertTrue(actions.isObject(), "Every public job snapshot must include explicit action capabilities");
+        assertTrue(actions.path("can_cancel").isBoolean());
+        assertTrue(actions.path("can_retry").isBoolean());
+        assertEquals(canCancel, actions.path("can_cancel").asBoolean());
+        assertEquals(canRetry, actions.path("can_retry").asBoolean());
+        assertTrue(actions.path("max_attempts").isIntegralNumber());
+        assertEquals(maximumAttempts, actions.path("max_attempts").asInt());
+        if (retryBlockReason == null) { assertTrue(actions.path("retry_block_reason").isNull()); }
+        else { assertEquals(retryBlockReason, actions.path("retry_block_reason").asText()); }
     }
 
     private JsonNode claim(String stageId, String worker, String request) {

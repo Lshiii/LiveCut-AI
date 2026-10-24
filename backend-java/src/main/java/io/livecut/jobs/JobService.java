@@ -120,7 +120,9 @@ public class JobService {
         if (limit < 1 || limit > 100 || offset < 0) { throw bad("INVALID_ARGUMENT", "limit must be 1..100 and offset nonnegative"); }
         return transaction.execute(status -> {
             List<String> ids = jdbc.queryForList("SELECT id FROM analysis_job ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?", String.class, limit, offset);
-            return new JobPage(ids.stream().map(id -> snapshot(job(id, false))).toList(), limit, offset);
+            // Match detail reads: a stage cannot change between reading the
+            // parent's state_version and computing the public action policy.
+            return new JobPage(ids.stream().map(id -> snapshot(job(id, true))).toList(), limit, offset);
         });
     }
 
@@ -134,8 +136,7 @@ public class JobService {
         return transaction.execute(status -> {
             Map<String, Object> job = job(id, true);
             if ("CANCELLED".equals(job.get("status"))) { return snapshot(job); }
-            if ("REVIEW_READY".equals(job.get("status"))) { throw conflict("JOB_NOT_CANCELLABLE", "A completed job cannot be cancelled"); }
-            stages(id, true);
+            if (!actions(job, stages(id, true)).canCancel()) { throw conflict("JOB_NOT_CANCELLABLE", "A completed job cannot be cancelled"); }
             jdbc.update("UPDATE job_stage SET status='CANCELLED',run_token=NULL,worker_id=NULL,lease_until=NULL,hard_deadline_at=NULL,updated_at=CURRENT_TIMESTAMP(6) WHERE job_id=? AND owner_type='ANALYSIS' AND status NOT IN ('SUCCEEDED','SKIPPED')", id);
             touch(id, "CANCELLED");
             return snapshot(job(id, true));
@@ -146,11 +147,12 @@ public class JobService {
         String id = uuid(jobId, "INVALID_JOB_ID");
         return transaction.execute(status -> {
             Map<String, Object> job = job(id, true);
-            if (!"FAILED".equals(job.get("status"))) { throw conflict("JOB_NOT_RETRYABLE", "Only failed jobs can be retried"); }
-            List<StageRow> failed = stages(id, true).stream().filter(stage -> stage.status().equals("FAILED")).toList();
-            if (failed.isEmpty()) { throw conflict("JOB_NOT_RETRYABLE", "No failed stages are available"); }
-            if (failed.stream().anyMatch(stage -> stage.attempt() >= maxAttempts)) {
-                throw conflict("ATTEMPTS_EXHAUSTED", "Execution attempts are exhausted; create a new analysis job");
+            JobActions actions = actions(job, stages(id, true));
+            if (!actions.canRetry()) {
+                String message = "ATTEMPTS_EXHAUSTED".equals(actions.retryBlockReason())
+                        ? "Execution attempts are exhausted; create a new analysis job"
+                        : "Only failed jobs with failed stages can be retried";
+                throw conflict(actions.retryBlockReason(), message);
             }
             jdbc.update("UPDATE job_stage SET status='READY',run_token=NULL,worker_id=NULL,lease_until=NULL,hard_deadline_at=NULL,next_run_at=CURRENT_TIMESTAMP(6),error_code=NULL,updated_at=CURRENT_TIMESTAMP(6) WHERE job_id=? AND owner_type='ANALYSIS' AND status='FAILED'", id);
             touch(id, "RUNNING");
@@ -398,15 +400,29 @@ public class JobService {
 
     private JobSnapshot snapshot(Map<String, Object> row) {
         String id = String.valueOf(row.get("id"));
-        List<StageSnapshot> stages = stages(id, false).stream().map(stage -> stageSnapshot(stage, true)).toList();
+        List<StageRow> rows = stages(id, false);
+        List<StageSnapshot> stages = rows.stream().map(stage -> stageSnapshot(stage, true)).toList();
         return new JobSnapshot(id, String.valueOf(row.get("video_id")), ((Number) row.get("generation")).intValue(),
                 String.valueOf(row.get("status")), String.valueOf(row.get("config_hash")), readConfig(row),
                 ((Number) row.get("state_version")).longValue(), stages,
                 new BudgetSnapshot(((Number) row.get("max_text_calls")).intValue(),
                         ((Number) row.get("text_calls_reserved")).intValue(),
                         ((Number) row.get("max_asr_submissions")).intValue(),
-                        ((Number) row.get("asr_calls_reserved")).intValue()),
+                        ((Number) row.get("asr_calls_reserved")).intValue()), actions(row, rows),
                 valueInstant(row.get("created_at")), valueInstant(row.get("updated_at")));
+    }
+
+    /** Advisory snapshot and mutation endpoints share the exact same policy.
+     * Budgets are deliberately separate: a legal stage retry may use cached
+     * artifacts, and never reserves or grants another provider request here.
+     */
+    private JobActions actions(Map<String, Object> job, List<StageRow> rows) {
+        String status = String.valueOf(job.get("status"));
+        boolean canCancel = !Set.of("CANCELLED", "REVIEW_READY").contains(status);
+        List<StageRow> failed = rows.stream().filter(stage -> stage.status().equals("FAILED")).toList();
+        String blocked = !"FAILED".equals(status) || failed.isEmpty() ? "JOB_NOT_RETRYABLE"
+                : failed.stream().anyMatch(stage -> stage.attempt() >= maxAttempts) ? "ATTEMPTS_EXHAUSTED" : null;
+        return new JobActions(canCancel, blocked == null, blocked, maxAttempts);
     }
 
     private static StageSnapshot stageSnapshot(StageRow row, boolean publicView) {
