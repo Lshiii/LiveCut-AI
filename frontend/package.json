@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "test": "node --experimental-strip-types --test src/__tests__/upload.test.ts",
+    "test": "node --experimental-strip-types --test src/__tests__/*.test.ts",
     "build": "vue-tsc --build && vite build",
     "preview": "vite preview",
     "build-only": "vite build",

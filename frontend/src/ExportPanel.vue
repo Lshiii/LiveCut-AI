@@ -1,17 +1,8 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { api, ApiError, post, type Page } from './api'
+import { api, ApiError, post, type ExportClip, type ExportJob, type Page } from './api'
 import { downloadJson } from './download'
-
-interface ExportClip {
-  id: string; segment_id: string; product_id: string; product_name: string
-  start_ms: number; end_ms: number; stage_id: string; status: string; attempt: number
-  error_code: string | null; size_bytes: number | null; content_url: string | null; download_url: string | null
-}
-interface ExportJob {
-  id: string; job_id: string; video_id: string; approved_revision: number; snapshot_hash: string
-  profile: string; status: string; state_version: number; created_at: string; updated_at: string; clips: ExportClip[]
-}
+import { SnapshotError, SnapshotStream, isExportTerminal, newestSnapshot, parseExportSnapshot, streamLabels, type StreamMode } from './snapshotStream'
 interface ApprovedReview {
   revision: number; status: string
   products: { id: string; name: string }[]
@@ -22,7 +13,17 @@ const revision = ref<number | ''>(''), approved = ref<ApprovedReview | null>(nul
 const exportProduct = ref('')
 const selectedIds = ref<string[]>([]), batches = ref<ExportJob[]>([]), selectedBatchId = ref(''), previewId = ref('')
 const pending = ref(''), error = ref(''), refreshError = ref(''), notice = ref(''), loadingRevision = ref(false)
-let timer: number | undefined, stopped = false, refreshing = false, revisionVersion = 0, listVersion = 0
+const streamMode = ref<StreamMode>('idle')
+let timer: number | undefined, stopped = false, refreshing = false, revisionVersion = 0, listVersion = 0, resourceEpoch = 0
+const batchStream = new SnapshotStream<ExportJob>({
+  kind: 'export', parse: (raw, id) => parseExportSnapshot(raw, id, props.jobId), terminal: isExportTerminal,
+  fetchSnapshot: (id, signal) => api<unknown>(`/api/exports/${id}`, { signal }),
+  onMode: mode => { streamMode.value = mode },
+  onSnapshot: snapshot => {
+    if (stopped || snapshot.job_id !== props.jobId || snapshot.id !== selectedBatchId.value) return
+    mergeBatch(snapshot)
+  },
+})
 const names: Record<string, string> = { QUEUED: '等待执行', READY: '等待领取', RUNNING: '正在导出', RETRY_WAIT: '等待重试', SUCCEEDED: '已完成', FAILED: '导出失败', PARTIAL_FAILED: '部分失败', CANCELLED: '已取消' }
 const candidates = computed(() => approved.value?.segments.filter(s => s.enabled && s.product_id) ?? [])
 const productOptions = computed(() => approved.value?.products.filter(product => candidates.value.some(segment => segment.product_id === product.id)) ?? [])
@@ -33,8 +34,16 @@ const completed = computed(() => currentBatch.value?.clips.filter(clip => clip.s
 const selectedDuration = computed(() => candidates.value.filter(s => selectedIds.value.includes(s.id)).reduce((total, s) => total + s.end_ms - s.start_ms, 0))
 function time(ms: number) { return `${Math.floor(ms / 60000).toString().padStart(2, '0')}:${(ms % 60000 / 1000).toFixed(3).padStart(6, '0')}` }
 function productName(id: string | null) { return approved.value?.products.find(p => p.id === id)?.name ?? '未归属' }
+function mergeBatch(snapshot: ExportJob) {
+  const index = batches.value.findIndex(batch => batch.id === snapshot.id)
+  if (index >= 0) batches.value[index] = newestSnapshot(batches.value[index], snapshot)
+  else batches.value.unshift(snapshot)
+}
+function syncBatchSnapshot() {
+  if (currentBatch.value && batchStream.resourceId === currentBatch.value.id) batchStream.acceptHttp(currentBatch.value)
+}
 function errorMessage(value: unknown) {
-  const code = value instanceof ApiError ? value.code : 'CLIENT_ERROR'
+  const code = value instanceof ApiError ? value.code : value instanceof SnapshotError ? 'INVALID_SERVER_RESPONSE' : 'CLIENT_ERROR'
   const messages: Record<string, string> = {
     REVIEW_NOT_CONFIRMED: '这个审核版本尚未确认，请先确认后再导出。',
     EXPORT_REQUIRES_CONFIRMATION: '这个审核版本尚未确认，请先确认后再导出。',
@@ -47,17 +56,18 @@ function errorMessage(value: unknown) {
     ARTIFACT_HASH_MISMATCH: '成片完整性校验未通过，文件清单未下载，请检查本地存储。',
     EXPORT_CONTENT_INTEGRITY_ERROR: '成片与登记信息不一致，文件清单未下载。',
     EXPORT_SNAPSHOT_INVALID: '导出快照无效，文件清单未下载。',
+    INVALID_SERVER_RESPONSE: '导出返回的数据不完整或不匹配，已保留上次有效状态。',
   }
   return messages[code] ?? `导出操作未完成：${code}`
 }
 function fail(value: unknown) { error.value = errorMessage(value) }
 async function loadRevision() {
-  const version = ++revisionVersion
+  const version = ++revisionVersion, jobId = props.jobId
   approved.value = null; exportProduct.value = ''; selectedIds.value = []; loadingRevision.value = true; error.value = ''
   if (revision.value === '') { loadingRevision.value = false; return }
   try {
-    const result = await api<ApprovedReview>(`/api/jobs/${props.jobId}/review?revision=${revision.value}`)
-    if (stopped || version !== revisionVersion) return
+    const result = await api<ApprovedReview>(`/api/jobs/${jobId}/review?revision=${revision.value}`)
+    if (stopped || version !== revisionVersion || jobId !== props.jobId) return
     if (result.status !== 'CONFIRMED' || result.revision !== revision.value) throw new ApiError('REVIEW_NOT_CONFIRMED')
     approved.value = result
     selectedIds.value = result.segments.filter(s => s.enabled && s.product_id).map(s => s.id)
@@ -71,35 +81,43 @@ async function refresh() {
   try {
     const result = await api<Page<ExportJob>>(`/api/exports?job_id=${jobId}&limit=100&offset=0`)
     if (stopped || version !== listVersion || jobId !== props.jobId) return
+    const incoming = result.items.map(batch => parseExportSnapshot(batch, batch.id, jobId))
+    const selected = currentBatch.value
     refreshError.value = ''
-    batches.value = result.items
+    batches.value = incoming.map(batch => newestSnapshot(batches.value.find(known => known.id === batch.id), batch))
+    if (selected && !batches.value.some(batch => batch.id === selected.id)) batches.value.push(selected)
     if (!batches.value.some(batch => batch.id === selectedBatchId.value)) selectedBatchId.value = batches.value[0]?.id ?? ''
-    if (!currentBatch.value?.clips.some(clip => clip.id === previewId.value)) previewId.value = ''
+    syncBatchSnapshot()
   } catch (value) { if (version === listVersion && !stopped) refreshError.value = errorMessage(value) }
   finally { refreshing = false }
 }
 async function create() {
   if (pending.value || !approved.value || !selectedIds.value.length) return
+  const jobId = props.jobId, epoch = resourceEpoch
   pending.value = 'create'; error.value = ''; notice.value = ''; listVersion++
   try {
-    const result = await post<ExportJob>('/api/exports', { job_id: props.jobId, approved_revision: approved.value.revision, segment_ids: [...selectedIds.value], profile: 'h264-aac-v1' })
-    if (result.job_id !== props.jobId) throw new ApiError('INVALID_SERVER_RESPONSE')
-    batches.value = [result, ...batches.value.filter(batch => batch.id !== result.id)]
+    const raw = await post<ExportJob>('/api/exports', { job_id: jobId, approved_revision: approved.value.revision, segment_ids: [...selectedIds.value], profile: 'h264-aac-v1' })
+    if (stopped || epoch !== resourceEpoch || jobId !== props.jobId) return
+    const result = parseExportSnapshot(raw, raw.id, jobId)
+    mergeBatch(result)
     selectedBatchId.value = result.id; previewId.value = ''
+    syncBatchSnapshot()
     notice.value = `已打开 r${result.approved_revision} 的导出批次。相同版本、选择和编码配置会复用同一任务。`
-  } catch (value) { fail(value) }
-  finally { pending.value = '' }
+  } catch (value) { if (!stopped && epoch === resourceEpoch && jobId === props.jobId) fail(value) }
+  finally { if (!stopped && epoch === resourceEpoch) pending.value = '' }
 }
 async function retry(clip: ExportClip) {
   if (!currentBatch.value || pending.value) return
-  const batchId = currentBatch.value.id
+  const batchId = currentBatch.value.id, jobId = props.jobId, epoch = resourceEpoch
   pending.value = clip.id; error.value = ''; notice.value = ''; listVersion++
   try {
-    await post<unknown>(`/api/exports/${batchId}/clips/${clip.id}/retry`)
+    const raw = await post<unknown>(`/api/exports/${batchId}/clips/${clip.id}/retry`)
+    if (stopped || epoch !== resourceEpoch || jobId !== props.jobId || selectedBatchId.value !== batchId) return
+    mergeBatch(parseExportSnapshot(raw, batchId, jobId)); syncBatchSnapshot()
     notice.value = '已请求重试这个片段；已完成的片段保持不变。'
     await refresh()
-  } catch (value) { fail(value) }
-  finally { pending.value = '' }
+  } catch (value) { if (!stopped && epoch === resourceEpoch && jobId === props.jobId && selectedBatchId.value === batchId) fail(value) }
+  finally { if (!stopped && epoch === resourceEpoch) pending.value = '' }
 }
 async function downloadManifest() {
   if (!currentBatch.value || pending.value) return
@@ -121,12 +139,13 @@ watch(() => props.confirmedRevisions.join(','), () => {
 }, { immediate: true })
 watch(revision, () => { void loadRevision() }, { immediate: true })
 watch(exportProduct, () => { selectedIds.value = visibleCandidates.value.map(segment => segment.id) })
+watch(selectedBatchId, id => { batchStream.select(id || null, currentBatch.value) }, { flush: 'sync' })
 watch(() => props.jobId, () => {
-  revisionVersion++; listVersion++; batches.value = []; selectedBatchId.value = ''; previewId.value = ''; error.value = ''; refreshError.value = ''; notice.value = ''
+  resourceEpoch++; revisionVersion++; listVersion++; batchStream.select(null); batches.value = []; selectedBatchId.value = ''; previewId.value = ''; pending.value = ''; error.value = ''; refreshError.value = ''; notice.value = ''
   void loadRevision(); void refresh()
 })
-onMounted(() => { void refresh(); timer = window.setInterval(() => { if (!document.hidden && !pending.value) void refresh() }, 3000) })
-onBeforeUnmount(() => { stopped = true; revisionVersion++; listVersion++; window.clearInterval(timer) })
+onMounted(() => { void refresh(); timer = window.setInterval(() => { if (!document.hidden && !pending.value) void refresh() }, 15000) })
+onBeforeUnmount(() => { stopped = true; resourceEpoch++; revisionVersion++; listVersion++; window.clearInterval(timer); batchStream.dispose() })
 </script>
 
 <template>
@@ -146,7 +165,7 @@ onBeforeUnmount(() => { stopped = true; revisionVersion++; listVersion++; window
       </template>
     </div>
     <div class="export-history"><div class="export-history-heading"><h3>导出批次 <span>{{ batches.length }}</span></h3><button class="text-button" :disabled="!!pending" @click="refresh">↻ 刷新</button></div><p v-if="!batches.length" class="help">还没有导出批次。任务创建后会保存到后台，关闭页面不影响执行。</p><div v-else class="batch-tabs"><button v-for="batch in batches" :key="batch.id" :class="{ active: selectedBatchId === batch.id }" :disabled="!!pending" @click="selectedBatchId = batch.id; previewId = ''">r{{ batch.approved_revision }} · {{ batch.id.slice(0, 8) }}<span class="status" :class="batch.status.toLowerCase()">{{ names[batch.status] ?? batch.status }}</span></button></div>
-      <template v-if="currentBatch"><div class="batch-summary"><span>冻结版本 r{{ currentBatch.approved_revision }} · {{ completed }} / {{ currentBatch.clips.length }} 完成</span><code>{{ currentBatch.id }}</code><button class="text-button" :disabled="!!pending" @click="downloadManifest">{{ pending === 'manifest' ? '正在下载…' : '下载文件清单 JSON ↓' }}</button></div><div v-for="clip in currentBatch.clips" :key="clip.id" class="export-clip"><div><b>{{ clip.product_name }}</b><p>{{ time(clip.start_ms) }} → {{ time(clip.end_ms) }} <span v-if="clip.attempt">· 第 {{ clip.attempt }} 次执行</span></p><code v-if="clip.error_code">{{ clip.error_code }}</code></div><span class="status" :class="clip.status.toLowerCase()">{{ names[clip.status] ?? clip.status }}</span><small v-if="clip.size_bytes != null">{{ (clip.size_bytes / 1024 / 1024).toFixed(2) }} MB</small><div class="clip-actions"><template v-if="clip.status === 'SUCCEEDED' && clip.content_url"><button class="secondary" @click="previewId = clip.id">预览</button><a v-if="clip.download_url" class="secondary" :href="clip.download_url">下载 MP4 ↓</a></template><button v-if="clip.status === 'FAILED'" class="secondary" :disabled="!!pending" @click="retry(clip)">重试此片段</button></div></div>
+      <template v-if="currentBatch"><div class="batch-summary"><span>冻结版本 r{{ currentBatch.approved_revision }} · {{ completed }} / {{ currentBatch.clips.length }} 完成</span><span class="snapshot-mode" role="status">{{ streamLabels[streamMode] }}</span><code>{{ currentBatch.id }}</code><button class="text-button" :disabled="!!pending" @click="downloadManifest">{{ pending === 'manifest' ? '正在下载…' : '下载文件清单 JSON ↓' }}</button></div><div v-for="clip in currentBatch.clips" :key="clip.id" class="export-clip"><div><b>{{ clip.product_name }}</b><p>{{ time(clip.start_ms) }} → {{ time(clip.end_ms) }} <span v-if="clip.attempt">· 第 {{ clip.attempt }} 次执行</span></p><code v-if="clip.error_code">{{ clip.error_code }}</code></div><span class="status" :class="clip.status.toLowerCase()">{{ names[clip.status] ?? clip.status }}</span><small v-if="clip.size_bytes != null">{{ (clip.size_bytes / 1024 / 1024).toFixed(2) }} MB</small><div class="clip-actions"><template v-if="clip.status === 'SUCCEEDED' && clip.content_url"><button class="secondary" @click="previewId = clip.id">预览</button><a v-if="clip.download_url" class="secondary" :href="clip.download_url">下载 MP4 ↓</a></template><button v-if="clip.status === 'FAILED'" class="secondary" :disabled="!!pending" @click="retry(clip)">重试此片段</button></div></div>
         <div v-if="preview?.content_url" class="export-preview"><div><b>{{ preview.product_name }} · 成片预览</b><button class="text-button" @click="previewId = ''">关闭预览</button></div><video :key="preview.id" :src="preview.content_url" controls preload="metadata" playsinline></video></div>
       </template>
     </div>

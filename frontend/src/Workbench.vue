@@ -3,6 +3,7 @@ import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { api, ApiError, post, type AnalysisJob, type Page, type VideoAsset } from './api'
 import ReviewPanel from './ReviewPanel.vue'
 import UploadPanel from './UploadPanel.vue'
+import { SnapshotError, SnapshotStream, isAnalysisTerminal, newestSnapshot, parseAnalysisSnapshot, streamLabels, type StreamMode } from './snapshotStream'
 import './style.css'
 
 const videos = ref<VideoAsset[]>([]), jobs = ref<AnalysisJob[]>([])
@@ -12,8 +13,18 @@ const online = ref(false), loading = ref(true), query = ref(''), filter = ref('A
 const visualProvider = ref('ocr'), maxTextCalls = ref(12)
 const uploadPanel = ref<{ chooseFile: () => void } | null>(null)
 const reviewEditor = ref<{ dirty: boolean; pending: boolean } | null>(null)
+const streamMode = ref<StreamMode>('idle')
 let timer: number | undefined, refreshing = false, stopped = false, selectionVersion = 0
 let uploadSelectionVersion = 0
+const taskStream = new SnapshotStream<AnalysisJob>({
+  kind: 'job', parse: parseAnalysisSnapshot, terminal: isAnalysisTerminal,
+  fetchSnapshot: (id, signal) => api<unknown>(`/api/jobs/${id}`, { signal }),
+  onMode: mode => { streamMode.value = mode },
+  onSnapshot: snapshot => {
+    if (stopped || selectedJob.value?.id !== snapshot.id) return
+    applySelectedSnapshot(snapshot)
+  },
+})
 const names: Record<string, string> = {
   QUEUED: '等待执行', RUNNING: '正在分析', REVIEW_READY: '待人工审核', FAILED: '执行失败',
   CANCELLED: '已取消', READY: '等待领取', BLOCKED: '等待前序', SUCCEEDED: '已完成', RETRY_WAIT: '等待重试', SKIPPED: '已跳过',
@@ -37,31 +48,51 @@ function latestSnapshot(incoming: AnalysisJob) {
   const candidates = [selectedJob.value, jobs.value.find(job => job.id === incoming.id)]
   // Equal versions remain refreshable: a Java restart may change the current
   // max_attempts configuration without changing this persisted job version.
-  return candidates.reduce<AnalysisJob>((latest, known) => known?.id === latest.id && known.state_version > latest.state_version ? known : latest, incoming)
+  return candidates.reduce<AnalysisJob>((latest, known) => newestSnapshot(known, latest), incoming)
+}
+function applySelectedSnapshot(snapshot: AnalysisJob) {
+  const latest = latestSnapshot(snapshot)
+  const index = jobs.value.findIndex(job => job.id === latest.id)
+  if (index >= 0) jobs.value[index] = latest
+  // Updating status must never unmount an editor with unsaved or in-flight changes.
+  if (selectedJob.value?.id === latest.id && selectedJob.value.status === 'REVIEW_READY'
+      && latest.status !== 'REVIEW_READY' && (reviewEditor.value?.dirty || reviewEditor.value?.pending)) return
+  selectedJob.value = latest; selectedVideoId.value = latest.video_id
+}
+function adoptHttpSnapshot(snapshot: AnalysisJob) {
+  const latest = latestSnapshot(snapshot)
+  if (taskStream.resourceId !== latest.id) {
+    applySelectedSnapshot(latest); taskStream.select(latest.id, latest)
+  } else {
+    const accepted = taskStream.acceptHttp(latest)
+    if (accepted) applySelectedSnapshot(accepted)
+  }
 }
 function videoName(id: string) { return videos.value.find(v => v.id === id)?.original_filename ?? `视频 ${id.slice(0, 8)}` }
 function date(value: string) { return new Date(value).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) }
 function formatError(error: unknown) {
-  const code = error instanceof ApiError ? error.code : 'CLIENT_ERROR'
+  const code = error instanceof ApiError ? error.code : error instanceof SnapshotError ? 'INVALID_SERVER_RESPONSE' : 'CLIENT_ERROR'
   const translated: Record<string, string> = {
     NETWORK_UNAVAILABLE: '无法连接服务，请检查 Java 服务是否正在运行。',
     REQUEST_TIMEOUT: '请求超时。创建任务可再次点击，系统会复用幂等键。',
     ATTEMPTS_EXHAUSTED: '阶段执行次数已耗尽，请创建新的分析任务。新任务使用独立的模型调用预算。',
     JOB_NOT_RETRYABLE: '任务当前不可重试，请刷新状态。',
     JOB_NOT_CANCELLABLE: '任务当前不可取消，请刷新状态。',
+    INVALID_SERVER_RESPONSE: '任务返回的数据不完整或不匹配，已保留上次有效状态。',
   }
   const message = translated[code] ?? `操作未完成：${code}`
   return error instanceof ApiError && error.requestId ? `${message}（请求 ${error.requestId}）` : message
 }
 function showError(error: unknown) { errorMessage.value = formatError(error) }
 async function loadDetail(id: string, background = false) {
-  if (!canSelect(id)) return
+  if (stopped || !canSelect(id)) return
   const version = ++selectionVersion
+  if (selectedJob.value?.id !== id) taskStream.select(null)
   try {
-    const result = await api<AnalysisJob>(`/api/jobs/${encodeURIComponent(id)}`)
+    const raw = await api<unknown>(`/api/jobs/${encodeURIComponent(id)}`)
     if (stopped || version !== selectionVersion || !canSelect(id)) return
-    if (result.id !== id) throw new ApiError('INVALID_SERVER_RESPONSE')
-    selectedJob.value = latestSnapshot(result); selectedVideoId.value = result.video_id
+    const result = parseAnalysisSnapshot(raw, id)
+    adoptHttpSnapshot(result)
     const url = new URL(location.href); url.searchParams.set('job', id); history.replaceState({}, '', url)
     if (!videos.value.some(v => v.id === result.video_id)) {
       const video = await api<VideoAsset>(`/api/videos/${encodeURIComponent(result.video_id)}`)
@@ -72,6 +103,8 @@ async function loadDetail(id: string, background = false) {
       if (background) connectionError.value = formatError(error)
       else showError(error)
     }
+  } finally {
+    if (!stopped && version === selectionVersion && selectedJob.value && taskStream.resourceId === null) taskStream.select(selectedJob.value.id, selectedJob.value)
   }
 }
 function canSelect(id: string) {
@@ -90,9 +123,12 @@ async function refresh() {
     const selected = currentVideo.value
     videos.value = videoPage.items
     if (selected && !videos.value.some(v => v.id === selected.id)) videos.value.push(selected)
-    jobs.value = jobPage.items.map(latestSnapshot); online.value = true; connectionError.value = ''
+    jobs.value = jobPage.items.map(item => latestSnapshot(parseAnalysisSnapshot(item, item.id))); online.value = true; connectionError.value = ''
     if (!selectedVideoId.value && videos.value[0]) selectedVideoId.value = videos.value[0].id
-    if (!pending.value && selectedAtStart && selectedJob.value?.id === selectedAtStart && selectionVersion === versionAtStart) await loadDetail(selectedAtStart, true)
+    if (selectedAtStart && selectedJob.value?.id === selectedAtStart && selectionVersion === versionAtStart) {
+      const snapshot = jobs.value.find(job => job.id === selectedAtStart)
+      if (snapshot) adoptHttpSnapshot(snapshot)
+    }
   } catch (error) { online.value = false; connectionError.value = formatError(error) }
   finally { refreshing = false; loading.value = false }
 }
@@ -105,7 +141,7 @@ function selectVideo() {
     selectedVideoId.value = selectedJob.value?.video_id ?? selectedVideoId.value
     errorMessage.value = '审核有未保存修改，请先保存或在审核区放弃修改。'; return
   }
-  selectedJob.value = null; selectionVersion++
+  selectedJob.value = null; selectionVersion++; taskStream.select(null)
   const url = new URL(location.href); url.searchParams.delete('job'); history.replaceState({}, '', url)
 }
 function canStartUpload() {
@@ -132,17 +168,25 @@ async function uploaded(video: VideoAsset) {
 async function createJob() {
   if (!selectedVideoId.value || pending.value) return
   if (!Number.isInteger(maxTextCalls.value) || maxTextCalls.value < 1 || maxTextCalls.value > 100) { errorMessage.value = '文本请求上限须为 1～100 的整数。'; return }
+  const version = selectionVersion, videoId = selectedVideoId.value
   pending.value = 'create'; errorMessage.value = ''; notice.value = ''
-  const payload = { video_id: selectedVideoId.value, config: { visual_provider: visualProvider.value, max_text_calls: maxTextCalls.value } }
+  const payload = { video_id: videoId, config: { visual_provider: visualProvider.value, max_text_calls: maxTextCalls.value } }
   const inputKey = JSON.stringify(payload)
   try {
     let saved: { input: string; key: string } | null = null
     try { saved = JSON.parse(localStorage.getItem('livecut-pending-create') ?? 'null') } catch { /* discard invalid browser state */ }
     const key = saved?.input === inputKey ? saved.key : crypto.randomUUID()
     localStorage.setItem('livecut-pending-create', JSON.stringify({ input: inputKey, key }))
-    const job = await post<AnalysisJob>('/api/jobs', payload, { 'Idempotency-Key': key })
-    localStorage.removeItem('livecut-pending-create'); await loadDetail(job.id)
-    notice.value = '任务已创建。计算 Worker 在线后会自动领取。'; await refresh()
+    const raw = await post<AnalysisJob>('/api/jobs', payload, { 'Idempotency-Key': key })
+    if (stopped) return
+    const job = parseAnalysisSnapshot(raw, raw.id)
+    if (job.video_id !== videoId) throw new ApiError('INVALID_SERVER_RESPONSE')
+    localStorage.removeItem('livecut-pending-create')
+    if (version === selectionVersion && selectedVideoId.value === videoId && !reviewEditor.value?.dirty && !reviewEditor.value?.pending) {
+      await loadDetail(job.id)
+      notice.value = '任务已创建。计算 Worker 在线后会自动领取。'
+    } else notice.value = '任务已创建。当前选择和审核内容保持不变，可在任务列表中打开。'
+    await refresh()
   } catch (error) { showError(error) }
   finally { pending.value = '' }
 }
@@ -161,7 +205,7 @@ async function action(kind: 'cancel' | 'retry') {
   try {
     const result = await post<AnalysisJob>(`/api/jobs/${jobId}/${kind}`)
     if (stopped || selectedJob.value?.id !== jobId || version !== selectionVersion || result.id !== jobId) return
-    selectedJob.value = latestSnapshot(result)
+    adoptHttpSnapshot(parseAnalysisSnapshot(result, jobId))
     notice.value = kind === 'cancel' ? '任务已取消，旧执行结果将被拒绝。' : '已请求重试。'; await refresh()
   } catch (error) { if (!stopped && selectedJob.value?.id === jobId && version === selectionVersion) showError(error) }
   finally { pending.value = '' }
@@ -170,9 +214,9 @@ onMounted(async () => {
   await refresh()
   const id = new URL(location.href).searchParams.get('job')
   if (id && /^[0-9a-f-]{36}$/i.test(id)) await loadDetail(id)
-  timer = window.setInterval(() => { if (!document.hidden) void refresh() }, 3000)
+  if (!stopped) timer = window.setInterval(() => { if (!document.hidden) void refresh() }, 15000)
 })
-onUnmounted(() => { stopped = true; selectionVersion++; window.clearInterval(timer) })
+onUnmounted(() => { stopped = true; selectionVersion++; window.clearInterval(timer); taskStream.dispose() })
 </script>
 
 <template>
@@ -206,10 +250,10 @@ onUnmounted(() => { stopped = true; selectionVersion++; window.clearInterval(tim
             <div v-else class="task-list">
               <button v-for="job in visibleJobs" :key="job.id" class="task-row" :class="{ active: selectedJob?.id === job.id }" @click="loadDetail(job.id)"><span class="video-tile">▷</span><span class="task-info"><strong>{{ videoName(job.video_id) }}</strong><span>第 {{ job.generation }} 次分析 <i>·</i> {{ date(job.created_at) }}</span><small>{{ job.id.slice(0, 8) }}</small></span><span class="status" :class="job.status.toLowerCase()">{{ names[job.status] ?? job.status }}</span><span class="row-arrow">›</span></button>
             </div>
-            <footer class="list-footer">显示最近 {{ jobs.length }} 个任务（最多 100 个）<span>每 3 秒更新</span></footer>
+            <footer class="list-footer">显示最近 {{ jobs.length }} 个任务（最多 100 个）<span>定时刷新任务列表</span></footer>
           </section>
           <section class="panel setup-panel">
-            <div class="panel-heading"><h2>{{ selectedJob ? '任务详情' : '新建分析' }}</h2><span class="subtle-number">{{ selectedJob ? '#' + selectedJob.id.slice(0, 8) : '01 — 04' }}</span></div>
+            <div class="panel-heading"><h2>{{ selectedJob ? '任务详情' : '新建分析' }}</h2><span class="subtle-number">{{ selectedJob ? streamLabels[streamMode] + ' · #' + selectedJob.id.slice(0, 8) : '01 — 04' }}</span></div>
             <div class="setup-body">
               <label class="field-label" for="source-video">视频来源</label><select id="source-video" v-model="selectedVideoId" :disabled="!!pending" @change="selectVideo"><option value="" disabled>请先上传视频</option><option v-for="video in videos" :key="video.id" :value="video.id">{{ video.original_filename }}</option></select>
               <template v-if="selectedJob">
