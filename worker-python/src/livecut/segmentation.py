@@ -29,7 +29,7 @@ import httpx
 
 from livecut.contracts import validate_analysis_result
 
-PROMPT_VERSION = "catalog-free-v11-derived-identity"
+PROMPT_VERSION = "catalog-free-v11.1-context-feedback"
 OUTPUT_PROTOCOL_VERSION = "keyed-classifications-v2"
 DEFAULT_BASE_URL = "https://dashscope.aliyuncs.com/api/v1"
 _KINDS = {"product_talk", "non_product", "mixed", "uncertain"}
@@ -228,6 +228,11 @@ def _parse_response(raw: dict, window: dict, *, grouping: str) -> dict:
     expected = set(core_ids)
     missing = [uid for uid in core_ids if uid not in assignments]
     non_core_count = sum(key not in expected for key in assignments)
+    visible_ids = {item["utterance_id"] for item in window["visible"]}
+    extra_context = [item["utterance_id"] for item in window["visible"]
+                     if item["utterance_id"] not in expected
+                     and item["utterance_id"] in assignments]
+    unknown_count = sum(key not in visible_ids for key in assignments)
     # Validate the product registry with the unchanged strict validator first.
     # Its messages contain fixed constraints/indices, never model field values.
     product_error = None
@@ -252,10 +257,15 @@ def _parse_response(raw: dict, window: dict, *, grouping: str) -> dict:
             segments.append(segment)
     if missing or non_core_count or errors or product_error:
         samples = [uid for uid in missing if len(_json(uid)) <= 96][:16]
+        context_samples = [uid for uid in extra_context if len(_json(uid)) <= 96][:16]
         detail = {"diagnostic_version": "classification-v2",
                   "missing_core_ids": samples, "missing_core_id_count": len(missing),
                   "omitted_missing_core_id_count": len(missing) - len(samples),
                   "non_core_key_count": non_core_count,
+                  "extra_context_ids": context_samples,
+                  "extra_context_id_count": len(extra_context),
+                  "omitted_extra_context_id_count": len(extra_context) - len(context_samples),
+                  "unknown_key_count": unknown_count,
                   "value_error_count": len(errors), "value_errors": errors[:16],
                   "omitted_value_error_count": max(0, len(errors) - 16)}
         reason = product_error or ("assignments keys must equal core_utterance_ids exactly"
@@ -862,6 +872,7 @@ def discover_products(
                                  + "分类值仅含 content_kind/product_labels，不输出identity_status；assignments 必须为对象，"
                                  + "键集合严格等于 core_utterance_ids，每个核心ID恰好一次。"
                                  + "不省略核心ID，不添加上下文/未知键；分类值不得输出范围、时间、索引。"
+                                 + "删除 extra_context_ids 列出的上下文键；它们仅供理解，不能作为 assignments 的键。"
                                  + "请根据相同输入重新输出符合固定格式的 JSON。只允许这一次修复。"})
                 raw = _request(
                     active_client, endpoint=endpoint, key=key, model=model, messages=messages,

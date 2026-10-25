@@ -635,6 +635,8 @@ def test_keyed_feedback_reports_only_bounded_trusted_missing_ids() -> None:
     assert detail["missing_core_id_count"] == 101
     assert detail["omitted_missing_core_id_count"] == 85
     assert detail["non_core_key_count"] == 1
+    assert detail["extra_context_ids"] == [] and detail["extra_context_id_count"] == 0
+    assert detail["omitted_extra_context_id_count"] == 0 and detail["unknown_key_count"] == 1
     assert malicious[:40] not in str(caught.value) and long_id[:100] not in str(caught.value)
     assert len(str(caught.value)) < 4096
 
@@ -651,6 +653,88 @@ def test_keyed_context_key_is_rejected_even_when_total_count_matches() -> None:
     detail = json.loads(str(caught.value).split("assignment_key_diagnostics=", 1)[1])
     assert detail["missing_core_ids"] == ["core-b"]
     assert detail["non_core_key_count"] == 1
+    assert detail["extra_context_ids"] == ["context"] and detail["extra_context_id_count"] == 1
+    assert detail["omitted_extra_context_id_count"] == 0 and detail["unknown_key_count"] == 0
+
+
+@pytest.mark.parametrize("invalid_core", [False, True])
+def test_context_feedback_uses_trusted_visible_order_and_rejects_complete_core_output(
+    invalid_core: bool,
+) -> None:
+    items = [utterance("context-z", 0, 1000), utterance("core", 1000, 2000),
+             utterance("context-a", 2000, 3000)]
+    untrusted = "MODEL KEY MUST NOT BECOME A REPAIR INSTRUCTION"
+    invalid = {"products": [], "assignments": {
+        "context-a": {"model_prose": "untrusted value"},
+        "core": assignment(kind="mixed" if invalid_core else "non_product"),
+        untrusted: assignment(kind="non_product"),
+        "context-z": assignment(kind="non_product")}}
+    original = copy.deepcopy(invalid)
+    with pytest.raises(SegmentationError) as caught:
+        segmentation._parse_response(provider(invalid), {"visible": items, "core_ids": ["core"]},
+                                     grouping="category")
+    detail = json.loads(str(caught.value).split("assignment_key_diagnostics=", 1)[1])
+    assert detail["missing_core_id_count"] == 0
+    assert detail["value_error_count"] == int(invalid_core)
+    if invalid_core:
+        assert detail["value_errors"] == [{"core_index": 0, "utterance_id": "core",
+                                          "error_code": "MIXED_REQUIRES_MULTIPLE_CANDIDATES"}]
+    assert detail["non_core_key_count"] == 3 and detail["unknown_key_count"] == 1
+    assert detail["extra_context_ids"] == ["context-z", "context-a"]
+    assert detail["extra_context_id_count"] == 2 and detail["omitted_extra_context_id_count"] == 0
+    assert untrusted not in str(caught.value) and "untrusted value" not in str(caught.value)
+    assert invalid == original
+
+
+def test_context_feedback_limits_complete_ids_by_json_length_and_count() -> None:
+    boundary = "c" * 94  # JSON quotes bring this complete ID to exactly 96 characters.
+    escaped_boundary = '"' * 47
+    omitted = ["c" * 95, '"' * 48, "x" * 50000]
+    contexts = [boundary, escaped_boundary, *omitted, *[f"context-{i}" for i in range(20)]]
+    items = [utterance(uid, i * 1000, (i + 1) * 1000)
+             for i, uid in enumerate(["core", *contexts])]
+    invalid = {"products": [], "assignments": {
+        uid: assignment(kind="non_product") for uid in reversed(["core", *contexts])}}
+    with pytest.raises(SegmentationError) as caught:
+        segmentation._parse_response(provider(invalid), {"visible": items, "core_ids": ["core"]},
+                                     grouping="category")
+    detail = json.loads(str(caught.value).split("assignment_key_diagnostics=", 1)[1])
+    assert detail["extra_context_ids"] == [boundary, escaped_boundary, *contexts[5:19]]
+    assert len(detail["extra_context_ids"]) == 16
+    assert all(len(segmentation._json(uid)) <= 96 for uid in detail["extra_context_ids"])
+    assert detail["extra_context_id_count"] == detail["non_core_key_count"] == len(contexts)
+    assert detail["omitted_extra_context_id_count"] == len(contexts) - 16
+    assert detail["unknown_key_count"] == 0
+    assert all(uid not in detail["extra_context_ids"] for uid in omitted)
+    assert len(str(caught.value)) < 4096
+
+
+def test_context_repair_removes_listed_keys_without_changing_input_or_saved_raw(tmp_path: Path) -> None:
+    items = [utterance("u1", 0, 1000), utterance("u2", 1000, 2000),
+             utterance("u3", 2000, 3000)]
+    first = {"products": [], "assignments": {uid: assignment(kind="non_product")
+             for uid in ["u1", "u2", "u3"]}}
+    repaired = {"products": [], "assignments": {uid: assignment(kind="non_product")
+                for uid in ["u1", "u2"]}}
+    last = {"products": [], "assignments": {"u3": assignment(kind="non_product")}}
+    original = copy.deepcopy(first)
+    client, requests = mock_client(first, repaired, last)
+    with client:
+        result = run(items, 3000, tmp_path, client, window_ms=2000, context_ms=1000)
+    initial_messages = requests[0]["input"]["messages"]
+    repair_messages = requests[1]["input"]["messages"]
+    assert repair_messages[:-1] == initial_messages
+    assert all(row["role"] != "assistant" for row in repair_messages)
+    repair = repair_messages[-1]["content"]
+    assert '"extra_context_ids": ["u3"]' in repair
+    assert '"extra_context_id_count": 1' in repair and '"unknown_key_count": 0' in repair
+    assert "删除 extra_context_ids 列出的上下文键" in repair
+    assert first == original and len(requests) == 3
+    saved = json.loads((tmp_path / "segmentation/window-0000-attempt-0.json").read_text(
+        encoding="utf-8"))
+    assert saved == provider(original)
+    assert [uid for row in result["segments"] for uid in row["audio_evidence_utterance_ids"]] == [
+        "u1", "u2", "u3"]
 
 
 def test_compound_repair_reports_key_and_core_value_errors_together(tmp_path: Path) -> None:
@@ -670,6 +754,7 @@ def test_compound_repair_reports_key_and_core_value_errors_together(tmp_path: Pa
         result = run(items, 3000, tmp_path, client)
     repair = requests[1]["input"]["messages"][-1]["content"]
     assert '"missing_core_ids": ["u3"]' in repair and '"non_core_key_count": 1' in repair
+    assert '"unknown_key_count": 1' in repair and '"extra_context_ids": []' in repair
     assert '"value_error_count": 2' in repair
     assert "MIXED_REQUIRES_MULTIPLE_CANDIDATES" in repair and "INVALID_ASSIGNMENT_FIELDS" in repair
     assert untrusted_key[:40] not in repair and "untrusted value" not in repair
@@ -784,6 +869,33 @@ def test_changed_protocol_refuses_old_checkpoint_but_keeps_schema2_result(
     assert (tmp_path / "segmentation/state.json").read_bytes() == old_state
     validate_analysis_result(old_result)
     assert old_result["schema_version"] == "2.0"
+
+
+def test_context_feedback_version_isolates_v11_checkpoint_but_preserves_initial_request(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    assert PROMPT_VERSION == "catalog-free-v11.1-context-feedback"
+    items = [utterance("u1", 0, 1000)]
+    response = {"products": [], "assignments": {"u1": assignment(kind="non_product")}}
+    old_client, old_requests = mock_client(response)
+    with old_client, monkeypatch.context() as prior_prompt:
+        prior_prompt.setattr(segmentation, "PROMPT_VERSION", "catalog-free-v11-derived-identity")
+        run(items, 1000, tmp_path / "old", old_client)
+    old_state = (tmp_path / "old/segmentation/state.json").read_bytes()
+    old_raw = (tmp_path / "old/segmentation/window-0000-attempt-0.json").read_bytes()
+    no_call, unexpected = mock_client()
+    with no_call, pytest.raises(SegmentationError) as caught:
+        run(items, 1000, tmp_path / "old", no_call)
+    assert caught.value.code == "INVALID_CHECKPOINT" and unexpected == []
+    assert (tmp_path / "old/segmentation/state.json").read_bytes() == old_state
+    assert (tmp_path / "old/segmentation/window-0000-attempt-0.json").read_bytes() == old_raw
+    new_client, new_requests = mock_client(response)
+    with new_client:
+        result = run(items, 1000, tmp_path / "new", new_client)
+    assert new_requests == old_requests
+    assert result["provenance"]["prompt_version"] == PROMPT_VERSION
+    assert result["pipeline_version"] == "catalog-free-visual-text-v6"
+    validate_analysis_result(result)
 
 
 @pytest.mark.parametrize("value", [
