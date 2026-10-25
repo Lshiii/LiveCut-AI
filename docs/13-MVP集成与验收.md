@@ -2,6 +2,8 @@
 
 ## 本机启动
 
+2026-10-25 最新长样本关口：generation 3 以显式 ASR 复用接收 285 条转写，新增 ASR 请求与账本均为零，详见 [转写复用](./16-ASR转写复用.md)。v11 分段已通过 8/10 窗，但第九窗额外返回三个上下文键，唯一修复仍未纠正，严格拒绝后 FAILED（TEXT 19/30、ASR 0/1）。没有本轮完整时间轴、审核或成片；具体失败与下一步见 [逐句协议记录](./14-逐句分类协议.md#v11-真实运行结果)。原 g1/g2 失败任务、账本和源产物保留不变。
+
 以下命令在仓库根目录的 PowerShell 执行。Java、Worker 和 Vue 分别运行在三个终端；MySQL 使用独立后台进程或 [Compose](./07-Java视频来源服务.md)，当前没有将全部服务容器化。
 
 依赖：Java 21、Python 3.11 和 uv、Node.js 22.18+ 或 24.12+、FFmpeg/ffprobe。前端具体 Node 约束以 `frontend/package.json` 为准。Windows 本机数据库辅助脚本要求 PowerShell 与 CIM/NetTCP 模块可用；不会管理 Windows 的 MySQL80 服务。

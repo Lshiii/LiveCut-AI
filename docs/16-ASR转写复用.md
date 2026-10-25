@@ -86,6 +86,8 @@ Java 在 claim 的父任务锁内、生成领取结果和增加 attempt 前，�
 
 2026-10-25，联合工作树 Python 回归 **381 项及 98 子测试通过，耗时 16.08 秒，Ruff 通过**；Java 统一集成回归 **96 项通过，零失败、错误、跳过**。Python 数量包含同时开发的逐句分类协议改动，不能全部归为本功能新增测试。
 
+功能提交 `10799d4` 的 GitHub CI 独立验证为 Python **365 项及 98 子测试**、Java **96 项无跳过**，PowerShell 语法通过；后续包含 v11 的 `5bfe688` 完整 Python CI 为 **381 项及 98 子测试**。本地与 CI 数量对应各自代码版本。
+
 新增合成文件测试使用真实计算的 manifest/artifact SHA，覆盖成功原字节复制、空转写、零 Provider transport、源文件 SHA 保持、模型/音频/阶段状态/manifest 身份与内容篡改、额外 artifact 校验、checkpoint 各输入字段与严格整数、raw 语义不一致、重复 JSON 键、链接/junction 越界、重复匹配 manifest，以及 endpoint 优先级。目标协议测试覆盖 API 参数、错误任务回包、旧/异任务 journal 拒绝、领取/完成响应丢失恢复、CLI 参数限制和源快照读取中断。Java 集成检查覆盖目标 ready 筛选及错误目标 claim 的无副作用拒绝。
 
 真实验证通过正常 POST 创建 generation 3 任务 `2e32acf5-ee52-4fc3-a8ce-524207456edd`，同一 1800.017 秒视频先完成自己的 MEDIA，再从 generation 2 任务 `7e2c6b9a-0885-4fb7-9d06-c0b33c9a0098` 显式复用 ASR。目标 ASR attempt 1 为 SUCCEEDED，CLI 退出码 0，执行耗时 0.735 秒（不含前后只读审计）；285 条转写原字节 SHA256 为 `473a3b630edc4eecee5f807d625faa81cf633eca6a862edcbacb95c9e48804fb`，与源 manifest 锚定的转写一致。目标 manifest、transcript 和 cache_provenance 均通过 Java 与独立磁盘哈希核对。
