@@ -50,6 +50,29 @@ public class ReviewService {
         });
     }
 
+    public ConfirmedReview download(String id, long revision) {
+        String jobId = uuid(id);
+        if (revision < 0) { throw invalid("revision must be nonnegative"); }
+        return transaction.execute(status -> {
+            Document document = document(jobId);
+            Content content = content(jobId, revision);
+            // Application DB sessions store UTC. Format the stored DATETIME
+            // literally, without a JVM-default-time-zone conversion.
+            List<String> confirmations = jdbc.queryForList(
+                    "SELECT DATE_FORMAT(confirmed_at,'%Y-%m-%dT%H:%i:%s.%fZ') FROM review_confirmation WHERE job_id=? AND revision=?",
+                    String.class, jobId, revision);
+            if (confirmations.isEmpty()) {
+                throw conflict("REVIEW_DOWNLOAD_REQUIRES_CONFIRMATION", "Only an explicitly confirmed revision may be downloaded");
+            }
+            // No latest_revision, other confirmations, download time or private
+            // source document: later edits cannot change this revision's bytes.
+            return new ConfirmedReview("1.0", "review_revision", jobId, document.job().videoId(),
+                    document.job().generation(), revision, "CONFIRMED", confirmations.getFirst(),
+                    document.source().durationMs(), document.job().sourceHash(), document.sourceHash(),
+                    content.products(), content.segments());
+        });
+    }
+
     public Snapshot save(String id, JsonNode request) {
         String jobId = uuid(id);
         fields(request, Set.of("base_revision", "products", "segments"));

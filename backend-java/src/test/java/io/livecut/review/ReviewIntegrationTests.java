@@ -211,6 +211,72 @@ class ReviewIntegrationTests {
     }
 
     @Test
+    void reviewDownloadRequiresAnExplicitExistingConfirmedRevision() throws Exception {
+        Fixture fixture = fixture(null);
+        ok(send("GET", fixture.reviewPath(), null));
+        error(send("GET", fixture.reviewPath() + "/download", null), 400, "INVALID_ARGUMENT");
+        for (String number : List.of("-1", "1.0", "01", "9223372036854775808")) {
+            error(send("GET", fixture.reviewPath() + "/download?revision=" + number, null), 400, "INVALID_ARGUMENT");
+        }
+        error(send("GET", fixture.reviewPath() + "/download?revision=999", null), 404, "REVIEW_REVISION_NOT_FOUND");
+        error(send("GET", fixture.reviewPath() + "/download?revision=0", null), 409, "REVIEW_DOWNLOAD_REQUIRES_CONFIRMATION");
+        assertEquals(1, count("review_revision", fixture.jobId()));
+        assertEquals(0, count("review_confirmation", fixture.jobId()));
+    }
+
+    @Test
+    void confirmedDownloadPreservesExactHistoricalBytesAndDistinctSourceHashes() throws Exception {
+        Fixture fixture = fixture(null);
+        JsonNode original = ok(send("GET", fixture.reviewPath(), null));
+        ObjectNode edit = edit(original);
+        ((ObjectNode) edit.path("products").get(0)).put("name", "审核面膜");
+        firstSegment(edit).put("start_ms", 1500);
+        ((ObjectNode) edit.path("segments").get(1)).put("product_id", "p2");
+        ((ArrayNode) edit.path("products")).add(product("manual_bag", "人工补充垃圾袋"));
+        ((ArrayNode) edit.path("segments")).add(segment("manual_added", 21000, 24000, "manual_bag", true));
+        JsonNode saved = ok(send("PUT", fixture.reviewPath(), edit));
+        ok(send("POST", fixture.reviewPath() + "/confirm", Map.of("revision", 1)));
+        String path = fixture.reviewPath() + "/download?revision=1";
+        HttpResponse<byte[]> first = send("GET", path, null);
+        JsonNode document = ok(first);
+        String expectedName = "review-" + fixture.jobId() + "-r1.json";
+        assertEquals("attachment; filename=\"" + expectedName + "\"", first.headers().firstValue("Content-Disposition").orElseThrow());
+        assertTrue(first.headers().firstValue("Content-Type").orElseThrow().startsWith("application/json"));
+        assertEquals("nosniff", first.headers().firstValue("X-Content-Type-Options").orElseThrow());
+        assertTrue(first.headers().firstValue("Cache-Control").orElseThrow().contains("no-store"));
+        assertEquals(first.body().length, first.headers().firstValueAsLong("Content-Length").orElseThrow());
+        assertEquals("\"" + sha(first.body()) + "\"", first.headers().firstValue("ETag").orElseThrow());
+        assertEquals("1.0", document.path("schema_version").asText());
+        assertEquals("review_revision", document.path("data_kind").asText());
+        assertEquals("CONFIRMED", document.path("review_status").asText());
+        assertEquals(fixture.jobId(), document.path("job_id").asText());
+        assertEquals(fixture.videoId(), document.path("video_id").asText());
+        assertEquals(1, document.path("analysis_generation").asInt());
+        assertEquals(1, document.path("revision").asLong());
+        java.time.Instant.parse(document.path("confirmed_at").asText());
+        String sourceVideo = jdbc.queryForObject("SELECT content_hash FROM video_asset WHERE id=?", String.class, fixture.videoId());
+        assertEquals(sourceVideo, document.path("source_video_sha256").asText());
+        assertEquals(fixture.rawHash(), document.path("prediction_source_sha256").asText());
+        assertNotEquals(sourceVideo, fixture.rawHash());
+        assertEquals(saved.path("products"), document.path("products"));
+        assertEquals(saved.path("segments"), document.path("segments"));
+        String bytes = new String(first.body(), StandardCharsets.UTF_8);
+        for (String privateValue : List.of(fixture.token(), "source_json", "manifest_key", "object_key", "private-frame.jpg", "confirmed_revisions", "latest_revision")) {
+            assertFalse(bytes.contains(privateValue));
+        }
+        ObjectNode next = edit(saved);
+        ((ObjectNode) next.path("products").get(0)).put("name", "下一版草稿名称");
+        firstSegment(next).put("start_ms", 2500);
+        ok(send("PUT", fixture.reviewPath(), next));
+        assertArrayEquals(first.body(), send("GET", path, null).body());
+        error(send("GET", fixture.reviewPath() + "/download?revision=2", null), 409, "REVIEW_DOWNLOAD_REQUIRES_CONFIRMATION");
+        ok(send("POST", fixture.reviewPath() + "/confirm", Map.of("revision", 2)));
+        assertArrayEquals(first.body(), send("GET", path, null).body(), "Other confirmation metadata must not enter this revision document");
+        assertEquals(first.headers().firstValue("ETag"), send("GET", path, null).headers().firstValue("ETag"));
+        assertEquals(fixture.rawHash(), sha(Files.readAllBytes(fixture.rawPath())));
+    }
+
+    @Test
     void disabledUnassignedSegmentsMayBeConfirmedAndEmptySelectionRemainsExplicit() throws Exception {
         Fixture fixture = fixture(null);
         JsonNode first = ok(send("GET", fixture.reviewPath(), null));

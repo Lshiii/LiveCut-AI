@@ -132,6 +132,123 @@ class ExportIntegrationTests {
     }
 
     @Test
+    void manifestDownloadListsCurrentStateAndOnlyVerifiedSuccessfulFiles() throws Exception {
+        Fixture fixture = fixture(true);
+        JsonNode batch = create(fixture, 0, List.of(FIRST, SECOND));
+        String batchId = batch.path("id").stringValue();
+        String inventoryPath = "/api/exports/" + batchId + "/manifest";
+        HttpResponse<byte[]> queuedResponse = send("GET", inventoryPath, null);
+        JsonNode queued = ok(queuedResponse);
+        assertAttachment(queuedResponse, "export-" + batchId + "-v" + queued.path("state_version").longValue() + ".json");
+        assertEquals("1.0", queued.path("schema_version").stringValue());
+        assertEquals("export_manifest", queued.path("data_kind").stringValue());
+        assertEquals(batchId, queued.path("export_id").stringValue());
+        assertEquals(fixture.jobId(), queued.path("job_id").stringValue());
+        assertEquals(fixture.videoId(), queued.path("video_id").stringValue());
+        assertEquals(1, queued.path("generation").intValue());
+        assertEquals(0, queued.path("approved_revision").longValue());
+        assertEquals("QUEUED", queued.path("status").stringValue());
+        assertEquals("h264-aac-v1", queued.path("profile").stringValue());
+        assertEquals(jdbc.queryForObject("SELECT content_hash FROM video_asset WHERE id=?", String.class, fixture.videoId()),
+                queued.path("source_video_sha256").stringValue());
+        for (JsonNode clip : queued.path("clips")) { assertTrue(clip.path("file").isNull()); }
+
+        JsonNode successClaim = claim(batch.path("clips").get(0));
+        JsonNode failedClaim = claim(batch.path("clips").get(1));
+        ok(worker("POST", action(successClaim, "complete"), completion(successClaim)));
+        ok(worker("POST", action(failedClaim, "fail"), with(failedClaim, "error_code", "SYNTHETIC_BAD_CLIP", "retryable", false)));
+        HttpResponse<byte[]> response = send("GET", inventoryPath, null);
+        JsonNode partial = ok(response);
+        assertAttachment(response, "export-" + batchId + "-v" + partial.path("state_version").longValue() + ".json");
+        assertEquals("PARTIAL_FAILED", partial.path("status").stringValue());
+        assertTrue(partial.path("state_version").longValue() > queued.path("state_version").longValue());
+        assertEquals(batch.path("snapshot_hash"), partial.path("snapshot_hash"));
+        assertEquals(get("/api/exports/" + batchId).path("updated_at"), partial.path("updated_at"));
+        int files = 0;
+        for (JsonNode clip : partial.path("clips")) {
+            assertEquals(1, clip.path("attempt").intValue());
+            if ("SUCCEEDED".equals(clip.path("status").stringValue())) {
+                files++;
+                JsonNode file = clip.path("file");
+                assertEquals(clip.path("clip_id").stringValue() + ".mp4", file.path("filename").stringValue());
+                assertEquals(CLIP_BYTES.length, file.path("size_bytes").longValue());
+                assertEquals(sha(CLIP_BYTES), file.path("sha256").stringValue());
+                assertEquals("/api/exports/" + batchId + "/clips/" + clip.path("clip_id").stringValue() + "/content?download=true", file.path("download_url").stringValue());
+                assertArrayEquals(CLIP_BYTES, send("GET", file.path("download_url").stringValue(), null).body());
+            } else {
+                assertEquals("FAILED", clip.path("status").stringValue());
+                assertEquals("SYNTHETIC_BAD_CLIP", clip.path("error_code").stringValue());
+                assertTrue(clip.path("file").isNull());
+            }
+        }
+        assertEquals(1, files);
+        String text = new String(response.body(), StandardCharsets.UTF_8);
+        for (String privateValue : List.of("run_token", "manifest_key", "source_key", "response_key", "stage_id", "jobs/", KEY,
+                root.toAbsolutePath().toString(), successClaim.path("run_token").stringValue(), failedClaim.path("run_token").stringValue())) {
+            assertFalse(text.contains(privateValue), "Public inventory must not expose private execution references");
+        }
+        assertArrayEquals(response.body(), send("GET", inventoryPath, null).body(), "An unchanged batch has stable inventory bytes");
+        assertEquals(0, jdbc.queryForObject("SELECT COUNT(*) FROM model_call WHERE job_id=?", Integer.class, fixture.jobId()));
+    }
+
+    @Test
+    void manifestDownloadKeepsHistoricalRevisionTwoAfterNewDraftAndRestart() throws Exception {
+        Fixture fixture = fixture(false);
+        ok(send("PUT", review(fixture), edit(get(review(fixture)))));
+        ObjectNode second = edit(get(review(fixture)));
+        ((ObjectNode) second.path("products").get(0)).put("name", "已确认r2商品名");
+        ((ObjectNode) second.path("segments").get(0)).put("start_ms", 800);
+        ok(send("PUT", review(fixture), second));
+        ok(send("POST", review(fixture) + "/confirm", Map.of("revision", 2)));
+        JsonNode batch = create(fixture, 2, List.of(FIRST));
+        String path = "/api/exports/" + batch.path("id").stringValue() + "/manifest";
+        byte[] before = send("GET", path, null).body();
+        JsonNode inventory = JSON.readTree(before);
+        assertEquals(2, inventory.path("approved_revision").longValue());
+        assertEquals("已确认r2商品名", inventory.path("clips").get(0).path("product_name").stringValue());
+        assertEquals(800, inventory.path("clips").get(0).path("start_ms").longValue());
+        ObjectNode draft = edit(get(review(fixture)));
+        ((ObjectNode) draft.path("products").get(0)).put("name", "r3未确认新商品名");
+        ((ObjectNode) draft.path("segments").get(0)).put("start_ms", 1100);
+        ok(send("PUT", review(fixture), draft));
+        assertEquals("DRAFT", get(review(fixture)).path("status").stringValue());
+        assertArrayEquals(before, send("GET", path, null).body());
+        context.close(); startContext();
+        assertArrayEquals(before, send("GET", path, null).body());
+        assertEquals(fixture.rawHash(), sha(Files.readAllBytes(fixture.rawPath())));
+    }
+
+    @Test
+    void manifestDownloadRejectsMissingTamperedFilesAndInvalidFrozenGeneration() throws Exception {
+        Fixture fixture = fixture(true);
+        JsonNode batch = create(fixture, 0, List.of(FIRST));
+        String batchId = batch.path("id").stringValue();
+        String path = "/api/exports/" + batchId + "/manifest";
+        JsonNode claim = claim(batch.path("clips").get(0));
+        ok(worker("POST", action(claim, "complete"), completion(claim)));
+        byte[] originalInventory = send("GET", path, null).body();
+        Path clipPath = root.resolve(prefix(claim) + "clip.mp4");
+        byte[] changed = CLIP_BYTES.clone(); changed[0] ^= 1;
+        try {
+            Files.write(clipPath, changed);
+            error(send("GET", path, null), 409, "ARTIFACT_HASH_MISMATCH");
+            Files.delete(clipPath);
+            error(send("GET", path, null), 409, "ARTIFACT_NOT_FOUND");
+        } finally { Files.write(clipPath, CLIP_BYTES); }
+        String originalFrozen = jdbc.queryForObject("SELECT frozen_json FROM export_job WHERE id=?", String.class, batchId);
+        try {
+            for (String generation : List.of("0", "-1", "1.5", "\"1\"", "2147483648", "null")) {
+                ObjectNode frozen = (ObjectNode) JSON.readTree(originalFrozen);
+                frozen.set("generation", JSON.readTree(generation));
+                jdbc.update("UPDATE export_job SET frozen_json=? WHERE id=?", JSON.writeValueAsString(frozen), batchId);
+                error(send("GET", path, null), 409, "EXPORT_SNAPSHOT_INVALID");
+            }
+        } finally { jdbc.update("UPDATE export_job SET frozen_json=? WHERE id=?", originalFrozen, batchId); }
+        assertArrayEquals(originalInventory, send("GET", path, null).body());
+        assertEquals("SUCCEEDED", get("/api/exports/" + batchId).path("status").stringValue());
+    }
+
+    @Test
     void unconfirmedDisabledAndInvalidSelectionsCannotBeExported() throws Exception {
         Fixture fixture = fixture(false);
         error(send("POST", "/api/exports", createBody(fixture, 0, List.of(FIRST))), 409, "EXPORT_REQUIRES_CONFIRMATION");
@@ -414,6 +531,14 @@ class ExportIntegrationTests {
     }
     private static void write(String key, byte[] bytes) throws Exception { Path path = root.resolve(key); Files.createDirectories(path.getParent()); Files.write(path, bytes); }
     private static String sha(byte[] bytes) throws Exception { return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes)); }
+    private static void assertAttachment(HttpResponse<byte[]> response, String filename) throws Exception {
+        assertTrue(response.headers().firstValue("Content-Type").orElse("").startsWith("application/json"));
+        assertEquals("attachment; filename=\"" + filename + "\"", response.headers().firstValue("Content-Disposition").orElseThrow());
+        assertEquals(response.body().length, response.headers().firstValueAsLong("Content-Length").orElseThrow());
+        assertEquals("\"" + sha(response.body()) + "\"", response.headers().firstValue("ETag").orElseThrow());
+        assertEquals("no-store", response.headers().firstValue("Cache-Control").orElseThrow());
+        assertEquals("nosniff", response.headers().firstValue("X-Content-Type-Options").orElseThrow());
+    }
     private HttpResponse<byte[]> after(CountDownLatch gate, String method, String path, Object body) {
         try { gate.await(); return send(method, path, body); } catch (Exception failure) { throw new RuntimeException(failure); }
     }

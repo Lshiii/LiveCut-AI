@@ -37,4 +37,17 @@ public final class ReviewModels {
                            @JsonProperty("confirmed_revisions") List<Long> confirmedRevisions,
                            List<Product> products, List<Segment> segments,
                            List<Utterance> utterances, List<Prediction> predictions) {}
+
+    /** A confirmed revision document, distinct from the model's analysis schema. */
+    public record ConfirmedReview(@JsonProperty("schema_version") String schemaVersion,
+                                   @JsonProperty("data_kind") String dataKind,
+                                   @JsonProperty("job_id") String jobId,
+                                   @JsonProperty("video_id") String videoId,
+                                   @JsonProperty("analysis_generation") int generation,
+                                   long revision, @JsonProperty("review_status") String reviewStatus,
+                                   @JsonProperty("confirmed_at") String confirmedAt,
+                                   @JsonProperty("duration_ms") long durationMs,
+                                   @JsonProperty("source_video_sha256") String sourceVideoSha256,
+                                   @JsonProperty("prediction_source_sha256") String predictionSourceSha256,
+                                   List<Product> products, List<Segment> segments) {}
 }

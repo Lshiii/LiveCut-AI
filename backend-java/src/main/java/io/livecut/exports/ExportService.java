@@ -29,6 +29,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.support.TransactionTemplate;
+import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.json.JsonMapper;
 
 /** Frozen confirmed revisions; computation uses the ordinary job_stage lease protocol. */
@@ -116,6 +117,39 @@ public class ExportService {
         return transaction.execute(status -> snapshot(lockPublicOwner(id)));
     }
 
+    public Manifest manifest(String value) {
+        String id = uuid(value, "INVALID_EXPORT_ID");
+        return transaction.execute(status -> {
+            Map<String, Object> owner = lockPublicOwner(id);
+            Snapshot batch = snapshot(owner);
+            int generation;
+            try {
+                JsonNode frozen = JSON.readTree(String.valueOf(owner.get("frozen_json")));
+                JsonNode number = frozen.path("generation");
+                if (!frozen.isObject() || !number.isIntegralNumber() || !number.canConvertToInt()
+                        || number.intValue() < 1) { throw new IllegalArgumentException(); }
+                generation = number.intValue();
+            } catch (RuntimeException invalid) {
+                throw conflict("EXPORT_SNAPSHOT_INVALID", "The frozen export generation is invalid");
+            }
+            List<ManifestClip> clips = new ArrayList<>();
+            for (Clip clip : batch.clips()) {
+                ManifestFile file = null;
+                if ("SUCCEEDED".equals(clip.status())) {
+                    // Same locked byte verification as media GET/HEAD; a
+                    // registered success is not proof that bytes still exist.
+                    Content content = contentLocked(owner, clip.id());
+                    file = new ManifestFile(content.filename(), content.sizeBytes(), content.hash(), clip.downloadUrl());
+                }
+                clips.add(new ManifestClip(clip.id(), clip.segmentId(), clip.productId(), clip.productName(),
+                        clip.startMs(), clip.endMs(), clip.status(), clip.attempt(), clip.errorCode(), file));
+            }
+            return new Manifest("1.0", "export_manifest", id, batch.jobId(), batch.videoId(), generation,
+                    batch.approvedRevision(), String.valueOf(owner.get("source_hash")), batch.snapshotHash(),
+                    batch.profile(), batch.status(), batch.stateVersion(), batch.createdAt(), batch.updatedAt(), List.copyOf(clips));
+        });
+    }
+
     public Snapshot retry(String value, String clipValue) {
         String id = uuid(value, "INVALID_EXPORT_ID");
         String clipId = uuid(clipValue, "INVALID_CLIP_ID");
@@ -134,22 +168,22 @@ public class ExportService {
     public Content content(String value, String clipValue) {
         String id = uuid(value, "INVALID_EXPORT_ID");
         String clipId = uuid(clipValue, "INVALID_CLIP_ID");
-        return transaction.execute(status -> {
-            Map<String, Object> owner = lockPublicOwner(id);
-            Map<String, Object> clip = clip(id, clipId, true);
-            if (!"SUCCEEDED".equals(clip.get("status"))) { throw conflict("EXPORT_CONTENT_NOT_READY", "This clip has not completed successfully"); }
-            // lockPublicOwner already holds this analysis lock. Do not acquire
-            // another parent lock after the clip/stage row has been locked.
-            Map<String, Object> analysis = jdbc.queryForMap("SELECT * FROM analysis_job WHERE id=?", owner.get("job_id"));
-            StageRow stage = stageRow(String.valueOf(clip.get("stage_id")));
-            ArtifactVerifier.ManifestIdentity identity = manifestIdentity(stage, analysis);
-            var manifest = verifier.verifyExportManifest(stage.manifestKey(), stage.manifestHash(), identity, exportIdentity(stage));
-            var file = manifest.artifacts().stream().filter(item -> "clip".equals(item.kind())).findFirst().orElseThrow();
-            if (!file.sha256().equals(clip.get("content_hash")) || file.sizeBytes() != ((Number) clip.get("size_bytes")).longValue()) {
-                throw conflict("EXPORT_CONTENT_INTEGRITY_ERROR", "Export bytes no longer match their registered reference");
-            }
-            return new Content(verifier.verifiedArtifactPath(file.key(), file.sha256(), identity), file.sizeBytes(), file.sha256(), clipId + ".mp4");
-        });
+        return transaction.execute(status -> contentLocked(lockPublicOwner(id), clipId));
+    }
+
+    /** Caller holds analysis then export owner; never reacquire another parent. */
+    private Content contentLocked(Map<String, Object> owner, String clipId) {
+        Map<String, Object> clip = clip(String.valueOf(owner.get("id")), clipId, true);
+        if (!"SUCCEEDED".equals(clip.get("status"))) { throw conflict("EXPORT_CONTENT_NOT_READY", "This clip has not completed successfully"); }
+        Map<String, Object> analysis = jdbc.queryForMap("SELECT * FROM analysis_job WHERE id=?", owner.get("job_id"));
+        StageRow stage = stageRow(String.valueOf(clip.get("stage_id")));
+        ArtifactVerifier.ManifestIdentity identity = manifestIdentity(stage, analysis);
+        var manifest = verifier.verifyExportManifest(stage.manifestKey(), stage.manifestHash(), identity, exportIdentity(stage));
+        var file = manifest.artifacts().stream().filter(item -> "clip".equals(item.kind())).findFirst().orElseThrow();
+        if (!file.sha256().equals(clip.get("content_hash")) || file.sizeBytes() != ((Number) clip.get("size_bytes")).longValue()) {
+            throw conflict("EXPORT_CONTENT_INTEGRITY_ERROR", "Export bytes no longer match their registered reference");
+        }
+        return new Content(verifier.verifiedArtifactPath(file.key(), file.sha256(), identity), file.sizeBytes(), file.sha256(), clipId + ".mp4");
     }
 
     /** Caller already holds analysis_job; acquire this parent before its stages. */

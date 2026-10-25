@@ -29,6 +29,26 @@ public final class ExportModels {
                            @JsonProperty("created_at") Instant createdAt,
                            @JsonProperty("updated_at") Instant updatedAt, List<Clip> clips) {}
     public record Page(List<Snapshot> items, int limit, int offset) {}
+    public record ManifestFile(String filename, @JsonProperty("size_bytes") long sizeBytes,
+                               String sha256, @JsonProperty("download_url") String downloadUrl) {}
+    public record ManifestClip(@JsonProperty("clip_id") String clipId,
+                               @JsonProperty("segment_id") String segmentId,
+                               @JsonProperty("product_id") String productId,
+                               @JsonProperty("product_name") String productName,
+                               @JsonProperty("start_ms") long startMs, @JsonProperty("end_ms") long endMs,
+                               String status, int attempt, @JsonProperty("error_code") String errorCode,
+                               ManifestFile file) {}
+    /** A state-versioned inventory, distinct from the private worker manifest. */
+    public record Manifest(@JsonProperty("schema_version") String schemaVersion,
+                           @JsonProperty("data_kind") String dataKind,
+                           @JsonProperty("export_id") String exportId,
+                           @JsonProperty("job_id") String jobId, @JsonProperty("video_id") String videoId,
+                           int generation, @JsonProperty("approved_revision") long approvedRevision,
+                           @JsonProperty("source_video_sha256") String sourceVideoSha256,
+                           @JsonProperty("snapshot_hash") String snapshotHash, String profile, String status,
+                           @JsonProperty("state_version") long stateVersion,
+                           @JsonProperty("created_at") Instant createdAt,
+                           @JsonProperty("updated_at") Instant updatedAt, List<ManifestClip> clips) {}
     /** Internal streaming reference; never expose local paths as JSON. */
     public record Content(Path path, long sizeBytes, String hash, String filename) {}
 }

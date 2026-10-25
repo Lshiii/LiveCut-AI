@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { api, ApiError, post, type Page } from './api'
+import { downloadJson } from './download'
 
 interface ExportClip {
   id: string; segment_id: string; product_id: string; product_name: string
@@ -42,6 +43,10 @@ function errorMessage(value: unknown) {
     EXPORT_CLIP_NOT_RETRYABLE: '该片段当前不能重试，请刷新查看最新状态。',
     NETWORK_UNAVAILABLE: '无法连接服务，已经创建的后台任务会继续保留。',
     REQUEST_TIMEOUT: '请求超时，可以重试；相同的导出输入会复用同一批次。',
+    ARTIFACT_NOT_FOUND: '成片文件缺失，文件清单未下载，请检查本地存储。',
+    ARTIFACT_HASH_MISMATCH: '成片完整性校验未通过，文件清单未下载，请检查本地存储。',
+    EXPORT_CONTENT_INTEGRITY_ERROR: '成片与登记信息不一致，文件清单未下载。',
+    EXPORT_SNAPSHOT_INVALID: '导出快照无效，文件清单未下载。',
   }
   return messages[code] ?? `导出操作未完成：${code}`
 }
@@ -96,6 +101,21 @@ async function retry(clip: ExportClip) {
   } catch (value) { fail(value) }
   finally { pending.value = '' }
 }
+async function downloadManifest() {
+  if (!currentBatch.value || pending.value) return
+  const batchId = currentBatch.value.id, jobId = props.jobId, version = ++listVersion
+  pending.value = 'manifest'; error.value = ''; notice.value = ''
+  try {
+    await downloadJson(`/api/exports/${batchId}/manifest`)
+    if (!stopped && jobId === props.jobId && version === listVersion && currentBatch.value?.id === batchId) {
+      notice.value = '已请求下载此批次的文件清单 JSON。未完成或失败项会保留实际状态。'
+    }
+  } catch (value) {
+    if (!stopped && jobId === props.jobId && version === listVersion && currentBatch.value?.id === batchId) fail(value)
+  } finally {
+    if (!stopped && pending.value === 'manifest') pending.value = ''
+  }
+}
 watch(() => props.confirmedRevisions.join(','), () => {
   if (revision.value === '' || !props.confirmedRevisions.includes(revision.value)) revision.value = props.confirmedRevisions.at(-1) ?? ''
 }, { immediate: true })
@@ -125,8 +145,8 @@ onBeforeUnmount(() => { stopped = true; revisionVersion++; listVersion++; window
         <div class="create-export-row"><small>已选 {{ selectedIds.length }} 段 · 选区合计 {{ (selectedDuration / 1000).toFixed(3) }} 秒</small><button class="primary" :disabled="!!pending || loadingRevision || !approved || !selectedIds.length" @click="create">{{ pending === 'create' ? '正在创建…' : '创建 / 打开导出' }} →</button></div>
       </template>
     </div>
-    <div class="export-history"><div class="export-history-heading"><h3>导出批次 <span>{{ batches.length }}</span></h3><button class="text-button" :disabled="!!pending" @click="refresh">↻ 刷新</button></div><p v-if="!batches.length" class="help">还没有导出批次。任务创建后会保存到后台，关闭页面不影响执行。</p><div v-else class="batch-tabs"><button v-for="batch in batches" :key="batch.id" :class="{ active: selectedBatchId === batch.id }" @click="selectedBatchId = batch.id; previewId = ''">r{{ batch.approved_revision }} · {{ batch.id.slice(0, 8) }}<span class="status" :class="batch.status.toLowerCase()">{{ names[batch.status] ?? batch.status }}</span></button></div>
-      <template v-if="currentBatch"><div class="batch-summary"><span>冻结版本 r{{ currentBatch.approved_revision }} · {{ completed }} / {{ currentBatch.clips.length }} 完成</span><code>{{ currentBatch.id }}</code></div><div v-for="clip in currentBatch.clips" :key="clip.id" class="export-clip"><div><b>{{ clip.product_name }}</b><p>{{ time(clip.start_ms) }} → {{ time(clip.end_ms) }} <span v-if="clip.attempt">· 第 {{ clip.attempt }} 次执行</span></p><code v-if="clip.error_code">{{ clip.error_code }}</code></div><span class="status" :class="clip.status.toLowerCase()">{{ names[clip.status] ?? clip.status }}</span><small v-if="clip.size_bytes != null">{{ (clip.size_bytes / 1024 / 1024).toFixed(2) }} MB</small><div class="clip-actions"><template v-if="clip.status === 'SUCCEEDED' && clip.content_url"><button class="secondary" @click="previewId = clip.id">预览</button><a v-if="clip.download_url" class="secondary" :href="clip.download_url">下载 MP4 ↓</a></template><button v-if="clip.status === 'FAILED'" class="secondary" :disabled="!!pending" @click="retry(clip)">重试此片段</button></div></div>
+    <div class="export-history"><div class="export-history-heading"><h3>导出批次 <span>{{ batches.length }}</span></h3><button class="text-button" :disabled="!!pending" @click="refresh">↻ 刷新</button></div><p v-if="!batches.length" class="help">还没有导出批次。任务创建后会保存到后台，关闭页面不影响执行。</p><div v-else class="batch-tabs"><button v-for="batch in batches" :key="batch.id" :class="{ active: selectedBatchId === batch.id }" :disabled="!!pending" @click="selectedBatchId = batch.id; previewId = ''">r{{ batch.approved_revision }} · {{ batch.id.slice(0, 8) }}<span class="status" :class="batch.status.toLowerCase()">{{ names[batch.status] ?? batch.status }}</span></button></div>
+      <template v-if="currentBatch"><div class="batch-summary"><span>冻结版本 r{{ currentBatch.approved_revision }} · {{ completed }} / {{ currentBatch.clips.length }} 完成</span><code>{{ currentBatch.id }}</code><button class="text-button" :disabled="!!pending" @click="downloadManifest">{{ pending === 'manifest' ? '正在下载…' : '下载文件清单 JSON ↓' }}</button></div><div v-for="clip in currentBatch.clips" :key="clip.id" class="export-clip"><div><b>{{ clip.product_name }}</b><p>{{ time(clip.start_ms) }} → {{ time(clip.end_ms) }} <span v-if="clip.attempt">· 第 {{ clip.attempt }} 次执行</span></p><code v-if="clip.error_code">{{ clip.error_code }}</code></div><span class="status" :class="clip.status.toLowerCase()">{{ names[clip.status] ?? clip.status }}</span><small v-if="clip.size_bytes != null">{{ (clip.size_bytes / 1024 / 1024).toFixed(2) }} MB</small><div class="clip-actions"><template v-if="clip.status === 'SUCCEEDED' && clip.content_url"><button class="secondary" @click="previewId = clip.id">预览</button><a v-if="clip.download_url" class="secondary" :href="clip.download_url">下载 MP4 ↓</a></template><button v-if="clip.status === 'FAILED'" class="secondary" :disabled="!!pending" @click="retry(clip)">重试此片段</button></div></div>
         <div v-if="preview?.content_url" class="export-preview"><div><b>{{ preview.product_name }} · 成片预览</b><button class="text-button" @click="previewId = ''">关闭预览</button></div><video :key="preview.id" :src="preview.content_url" controls preload="metadata" playsinline></video></div>
       </template>
     </div>

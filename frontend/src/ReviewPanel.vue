@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { api, ApiError, post } from './api'
+import { downloadJson } from './download'
 import ExportPanel from './ExportPanel.vue'
 
 interface Product { id: string; name: string; identity_source?: string }
@@ -17,6 +18,7 @@ const review = ref<Review | null>(null), products = ref<Product[]>([]), segments
 const baseline = ref(''), pending = ref(false), error = ref(''), notice = ref('')
 const selectedId = ref(''), productFilter = ref(''), player = ref<HTMLVideoElement | null>(null)
 const playhead = ref(0)
+const downloadRevision = ref<number | null>(null)
 let loadVersion = 0, stopped = false
 const payload = computed(() => ({
   products: products.value.map(({ id, name }) => ({ id, name })),
@@ -41,6 +43,9 @@ function apply(value: Review) {
   review.value = value
   products.value = structuredClone(value.products); segments.value = structuredClone(value.segments)
   baseline.value = JSON.stringify(payload.value)
+  if (downloadRevision.value === null || !value.confirmed_revisions.includes(downloadRevision.value)) {
+    downloadRevision.value = value.confirmed_revisions.at(-1) ?? null
+  }
   if (!segments.value.some(s => s.id === selectedId.value)) selectedId.value = segments.value[0]?.id ?? ''
 }
 async function load() {
@@ -75,6 +80,18 @@ async function confirm() {
     const result = await post<Review>(`/api/jobs/${jobId}/review/confirm`, { revision: review.value.revision })
     if (!active(jobId, version) || result.job_id !== jobId) return
     apply(result); notice.value = `修订 r${result.revision} 已确认。后续修改将另存为新草稿。`
+    downloadRevision.value = result.revision
+  } catch (value) { if (active(jobId, version)) fail(value) }
+  finally { if (active(jobId, version)) pending.value = false }
+}
+async function downloadConfirmed() {
+  if (!review.value || pending.value || dirty.value || downloadRevision.value === null
+      || !review.value.confirmed_revisions.includes(downloadRevision.value)) return
+  const jobId = props.jobId, version = loadVersion, revision = downloadRevision.value
+  pending.value = true; error.value = ''; notice.value = ''
+  try {
+    await downloadJson(`/api/jobs/${encodeURIComponent(jobId)}/review/download?revision=${revision}`)
+    if (active(jobId, version)) notice.value = `已发起确认版本 r${revision} 的 JSON 下载。`
   } catch (value) { if (active(jobId, version)) fail(value) }
   finally { if (active(jobId, version)) pending.value = false }
 }
@@ -111,6 +128,11 @@ onBeforeUnmount(() => { stopped = true; loadVersion++; window.removeEventListene
     <div v-if="notice" class="message notice" role="status">{{ notice }}</div>
     <p v-if="!review" class="empty">{{ pending ? '正在读取分析结果…' : '审核数据暂不可用。' }}</p>
     <template v-if="review">
+      <div v-if="review.confirmed_revisions.length" class="review-tools">
+        <label>留档版本 <select v-model.number="downloadRevision" aria-label="下载确认版本" :disabled="pending"><option v-for="revision in review.confirmed_revisions" :key="revision" :value="revision">已确认 r{{ revision }}</option></select></label>
+        <button class="secondary" :disabled="pending || dirty || downloadRevision === null" @click="downloadConfirmed">下载确认版本 JSON</button>
+        <span class="help">下载所选确认版本；本页未保存修改不包含在文件中。</span>
+      </div>
       <div class="review-video-layout"><video ref="player" :src="videoUrl" controls preload="metadata" playsinline @timeupdate="playhead = Math.round((($event.target as HTMLVideoElement).currentTime || 0) * 1000)"></video><div class="review-instructions"><span class="eyebrow">MODEL RESULT → YOUR DECISION</span><h3>校对归属，再确认边界。</h3><p>点击片段定位原视频，结合右侧语音证据核对商品。可改名、调整毫秒边界、拆分或补上漏检片段。</p><p>勾选的片段才进入导出候选。未归属商品的片段需先补充归属，或取消勾选。</p><div class="review-count"><b>{{ enabledCount }}</b> 段已勾选 <span v-if="unresolved">· {{ unresolved }} 段待归属</span></div><small>模型原始结果独立保留；人工修改有来源标记。</small></div></div>
       <div class="review-timeline" aria-label="商品讲解时间轴"><button v-for="segment in segments" :key="segment.id" :style="{ left: `${segment.start_ms / review.duration_ms * 100}%`, width: `${Math.max(.4, (segment.end_ms - segment.start_ms) / review.duration_ms * 100)}%` }" :class="{ disabled: !segment.enabled, focused: selectedId === segment.id }" :aria-label="`${name(segment.product_id)} ${time(segment.start_ms)} 至 ${time(segment.end_ms)}`" :title="`${name(segment.product_id)} ${time(segment.start_ms)}`" @click="seek(segment)"></button></div>
       <div class="timeline-labels"><span>00:00</span><span>当前 {{ time(playhead) }}</span><span>{{ time(review.duration_ms) }}</span></div>

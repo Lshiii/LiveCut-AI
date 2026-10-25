@@ -2,6 +2,7 @@ package io.livecut.exports;
 
 import java.net.URI;
 
+import io.livecut.downloads.JsonAttachment;
 import io.livecut.video.VideoApiException;
 import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.core.io.FileSystemResource;
@@ -41,6 +42,12 @@ public class ExportController {
 
     @GetMapping("/{id}")
     public ExportModels.Snapshot get(@PathVariable String id) { return exports.get(id); }
+
+    @GetMapping("/{id}/manifest")
+    public ResponseEntity<byte[]> manifest(@PathVariable String id) {
+        var inventory = exports.manifest(id);
+        return JsonAttachment.response("export-" + inventory.exportId() + "-v" + inventory.stateVersion() + ".json", inventory);
+    }
 
     @PostMapping("/{id}/clips/{clipId}/retry")
     public ExportModels.Snapshot retry(@PathVariable String id, @PathVariable String clipId) { return exports.retry(id, clipId); }
