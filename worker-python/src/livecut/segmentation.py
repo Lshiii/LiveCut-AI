@@ -29,8 +29,8 @@ import httpx
 
 from livecut.contracts import validate_analysis_result
 
-PROMPT_VERSION = "catalog-free-v9-dense-core-assignments"
-OUTPUT_PROTOCOL_VERSION = "dense-core-assignments-v1"
+PROMPT_VERSION = "catalog-free-v10-keyed-core-assignments"
+OUTPUT_PROTOCOL_VERSION = "keyed-core-assignments-v1"
 DEFAULT_BASE_URL = "https://dashscope.aliyuncs.com/api/v1"
 _KINDS = {"product_talk", "non_product", "mixed", "uncertain"}
 _STATUSES = {"identified", "unknown", "ambiguous", "not_applicable"}
@@ -41,16 +41,16 @@ _SYSTEM = """你是直播商品讲解分段器。输出且只输出 JSON 对象�
 没有直接图像，不能宣称已看到画面；OCR/视觉观察可作为文字证据，款式不能臆造。
 参考 known_products 的 canonical category/variant_description 以延续已发现的类别/款式，
 返场仍须保留不同区间。不要把某商品前后之间的其他商品或闲聊吞并为一个区间。
-分类结果写入 assignments 数组，按 core_utterance_ids 的输入顺序逐句分类。
-assignments 的长度必须严格等于 assignment_count；第 i 项只分类第 i 个核心语句。
+分类结果写入 assignments 对象，每个核心语句的原始 ID 是一个键，值是该句的分类。
+assignments 的键集合必须严格等于 core_utterance_ids；每个核心 ID 必须恰好出现一次。
 全部核心语句都必须分类，包括商品之间的过渡句、闲聊、口头停顿等，严禁省略。
-transcript 中不在 core_utterance_ids 内的句子只是理解上下文，绝不能为它们增加分类项。
+transcript 中不在 core_utterance_ids 内的句子只是理解上下文，绝不能把它们作为分类键。
 过渡或闲聊可标为 non_product/not_applicable；不确定的核心语句也必须保留一个分类项。
-每项只能包含 content_kind、identity_status、product_labels，不得输出 ID、索引、范围、时间或毫秒。
-程序将数组位置绑定可信 ASR ID，再合并相邻且语义完全相同的分类；你不能自行生成或重排区间。
+每个键的分类值只能包含 content_kind、identity_status、product_labels，不得含索引、范围或时间。
+程序按可信 ASR 原顺序读取每个 ID 的分类，再合并相邻且语义相同的分类；你不能生成区间。
 固定输出结构：{"products":[{"label":"tmp1","category":"垃圾袋",
-"variant_description":""}],"assignments":[{"content_kind":"product_talk",
-"identity_status":"identified","product_labels":["tmp1"]}]}。示例只有一个核心语句；实际必须输出完整数量。
+"variant_description":""}],"assignments":{"u1":{"content_kind":"product_talk",
+"identity_status":"identified","product_labels":["tmp1"]}}}。示例 u1 只有在输入核心 ID 中才可使用。
 products 的 label 是本窗口临时标签，category 是简洁类别名，variant_description 不明确时为空串。
 content_kind 为 product_talk/non_product/mixed/uncertain；identity_status 为
 identified/unknown/ambiguous/not_applicable。明确类别时 identified 且恰好一个商品标签；
@@ -223,27 +223,36 @@ def _parse_response(raw: dict, window: dict, *, grouping: str) -> dict:
                                 "model output must contain only products and assignments; "
                                 "legacy range/list-ID output is not accepted")
     assignments = parsed["assignments"]
-    if not isinstance(assignments, list):
-        raise SegmentationError("INVALID_MODEL_OUTPUT", "assignments must be an array")
-    if len(assignments) != len(window["core_ids"]):
+    if not isinstance(assignments, dict):
+        raise SegmentationError("INVALID_MODEL_OUTPUT", "assignments must be an object keyed by core ASR IDs")
+    core_ids = window["core_ids"]
+    expected = set(core_ids)
+    missing = [uid for uid in core_ids if uid not in assignments]
+    non_core_count = sum(key not in expected for key in assignments)
+    if missing or non_core_count:
+        samples = [uid for uid in missing if len(_json(uid)) <= 96][:16]
+        detail = {"missing_core_ids": samples, "missing_core_id_count": len(missing),
+                  "omitted_missing_core_id_count": len(missing) - len(samples),
+                  "non_core_key_count": non_core_count}
         raise SegmentationError("INVALID_MODEL_OUTPUT",
-                                "assignments length must equal core_utterance_ids: "
-                                f"expected {len(window['core_ids'])}, got {len(assignments)}; "
-                                "do not omit, insert, reorder or truncate items")
+                                "assignments keys must equal core_utterance_ids exactly; "
+                                "do not omit IDs or include context/unknown keys; "
+                                "assignment_key_diagnostics=" + _json(detail))
     segments = []
-    for index, assignment in enumerate(assignments):
+    for index, uid in enumerate(core_ids):
+        assignment = assignments[uid]
         if not isinstance(assignment, dict) or set(assignment) != {
             "content_kind", "identity_status", "product_labels"
         }:
             raise SegmentationError("INVALID_MODEL_OUTPUT",
-                                    f"assignments[{index}] must contain only content_kind, "
+                                    f"assignments[core_index={index}] must contain only content_kind, "
                                     "identity_status and product_labels; no IDs/ranges/times")
-        segments.append({**assignment, "utterance_ids": [window["core_ids"][index]]})
+        segments.append({**assignment, "utterance_ids": [uid]})
     bound = {"products": parsed["products"], "segments": segments}
     try:
         _validate_window(bound, window, grouping=grouping)
     except SegmentationError as exc:
-        raise SegmentationError(exc.code, str(exc).replace("segments[", "assignments[")) from exc
+        raise SegmentationError(exc.code, str(exc).replace("segments[", "assignments[core_index=")) from exc
     return bound
 
 
@@ -812,9 +821,9 @@ def discover_products(
                                  "上一次 JSON 输出未通过校验：" + str(exc)
                                  + "。必须修复这个具体字段约束，不能原样重复失败输出。"
                                  + _GROUPING_INSTRUCTIONS[grouping]
-                                 + "每个 identified 分类项恰好一个标签；assignments 长度必须严格为 "
-                                 + str(len(window["core_ids"])) + "，按 core_utterance_ids 顺序逐项分类。"
-                                 + "不得输出ID、范围、时间、索引；上下文不能增加分类项。"
+                                 + "每个 identified 分类值恰好一个标签；assignments 必须为对象，"
+                                 + "键集合严格等于 core_utterance_ids，每个核心ID恰好一次。"
+                                 + "不省略核心ID，不添加上下文/未知键；分类值不得输出范围、时间、索引。"
                                  + "请根据相同输入重新输出符合固定格式的 JSON。只允许这一次修复。"})
                 raw = _request(
                     active_client, endpoint=endpoint, key=key, model=model, messages=messages,
@@ -833,7 +842,7 @@ def discover_products(
         "schema_version": "2.0", "data_kind": "model_result", "job_id": job_id,
         "video_id": video_id, "analysis_generation": analysis_generation,
         "duration_ms": duration_ms, "transcript_version": transcript_version,
-        "pipeline_version": "catalog-free-visual-text-v4", "review_status": "DRAFT",
+        "pipeline_version": "catalog-free-visual-text-v5", "review_status": "DRAFT",
         "product_discovery_version": PROMPT_VERSION,
         "provenance": {"asr_model_id": asr_model_id, "text_model_id": model,
                        "vision_model_id": visual_model_id if observations else None, "prompt_version": PROMPT_VERSION,

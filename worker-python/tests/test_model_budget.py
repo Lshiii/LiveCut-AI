@@ -187,8 +187,8 @@ def test_recorded_response_hash_mismatch_prevents_replay(tmp_path):
 
 def test_real_segmentation_adapter_reads_recorded_raw_response_after_attempt_change(tmp_path):
     prediction = {"products": [{"label": "mask", "category": "面膜", "variant_description": ""}],
-                  "assignments": [{"content_kind": "product_talk",
-                                "identity_status": "identified", "product_labels": ["mask"]}]}
+                  "assignments": {"u1": {"content_kind": "product_talk",
+                                "identity_status": "identified", "product_labels": ["mask"]}}}
     raw = {"output": {"choices": [{"finish_reason": "stop", "message": {
         "role": "assistant", "content": json.dumps(prediction, ensure_ascii=False)}}]},
         "usage": {"input_tokens": 9, "output_tokens": 4}}
@@ -212,7 +212,8 @@ def test_real_segmentation_adapter_reads_recorded_raw_response_after_attempt_cha
     resumed.close()
 
 
-def test_dense_protocol_body_does_not_replay_legacy_range_response(tmp_path):
+@pytest.mark.parametrize("legacy_protocol", ["v8-ranges", "v9-arrays"])
+def test_keyed_protocol_body_does_not_replay_legacy_response(tmp_path, legacy_protocol):
     # A mocked durable ledger exercises real body hashing and stored-response
     # verification. This is protocol recovery, not a live Provider experiment.
     class Ledger:
@@ -234,8 +235,11 @@ def test_dense_protocol_body_does_not_replay_legacy_range_response(tmp_path):
     legacy = {"products": [], "segments": [{"start_utterance_id": "u1",
                "end_utterance_id": "u1", "content_kind": "non_product",
                "identity_status": "not_applicable", "product_labels": []}]}
-    dense = {"products": [], "assignments": [{"content_kind": "non_product",
-              "identity_status": "not_applicable", "product_labels": []}]}
+    if legacy_protocol == "v9-arrays":
+        legacy = {"products": [], "assignments": [{"content_kind": "non_product",
+                   "identity_status": "not_applicable", "product_labels": []}]}
+    dense = {"products": [], "assignments": {"u1": {"content_kind": "non_product",
+              "identity_status": "not_applicable", "product_labels": []}}}
     external = []
     pending = [legacy, dense]
     ledger = Ledger()
@@ -257,7 +261,7 @@ def test_dense_protocol_body_does_not_replay_legacy_range_response(tmp_path):
     url = "https://provider.example/api/v1/services/aigc/text-generation/generation"
     with client_for(1) as client:
         assert json.loads(client.post(url, json={"model": "qwen-plus", "input": {"messages": [
-            {"role": "system", "content": "legacy range protocol synthetic fixture"}]}}).json()[
+            {"role": "system", "content": legacy_protocol + " synthetic fixture"}]}}).json()[
                 "output"]["choices"][0]["message"]["content"]) == legacy
     old_call = copy.deepcopy(next(iter(ledger.calls.values())))
     items = [{"utterance_id": "u1", "start_ms": 0, "end_ms": 1000,
