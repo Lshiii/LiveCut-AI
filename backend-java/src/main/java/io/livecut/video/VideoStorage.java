@@ -129,7 +129,7 @@ public class VideoStorage {
         }
     }
 
-    private static String displayFilename(String raw) {
+    public static String displayFilename(String raw) {
         if (raw == null) { throw new VideoApiException(HttpStatus.BAD_REQUEST, "INVALID_FILENAME", "A display filename is required"); }
         String value = raw.replace('\\', '/');
         value = value.substring(value.lastIndexOf('/') + 1).strip();
@@ -142,7 +142,7 @@ public class VideoStorage {
         return value;
     }
 
-    private static void validateHeader(byte[] prefix, int count, long size) {
+    public static void validateHeader(byte[] prefix, int count, long size) {
         if (size == 0) { throw new VideoApiException(HttpStatus.BAD_REQUEST, "EMPTY_VIDEO", "Select a nonempty MP4 file"); }
         if (count < 16 || !"ftyp".equals(new String(prefix, 4, 4, StandardCharsets.US_ASCII))) { throw invalidHeader(); }
         long boxSize = Integer.toUnsignedLong(ByteBuffer.wrap(prefix, 0, 4).getInt());

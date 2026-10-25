@@ -140,6 +140,24 @@ select { border: 1px solid #e0e7d9; border-radius: 5px; background: #fff; paddin
 .notice { color: #658367; border-color: #dae8d6; background: #f0f6ed; }
 .page-footer { display: flex; gap: 18px; padding: 30px 0; color: #9db68e; font-size: 9px; }
 .page-footer > span { font-weight: 600; color: #7d9c69; font-size: 10px; }
+.upload-hint { margin: -10px 0 20px; color: #718469; font-size: 11px; line-height: 1.7; }
+.upload-panel { margin: 0 0 22px; padding: 20px 23px; }
+.upload-panel-top { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.upload-file { min-width: 0; }
+.upload-file .eyebrow { margin-bottom: 7px; }
+.upload-file h2 { color: #526b45; font-size: 13px; font-weight: 600; overflow-wrap: anywhere; }
+.upload-meter { display: flex; align-items: center; gap: 14px; margin: 20px 0 10px; }
+.upload-meter progress { display: block; width: 100%; height: 9px; accent-color: #dc7955; border: 0; border-radius: 6px; overflow: hidden; }
+.upload-meter progress::-webkit-progress-bar { background: #eef2e9; border-radius: 6px; }
+.upload-meter progress::-webkit-progress-value { background: #dc7955; border-radius: 6px; }
+.upload-meter b { min-width: 35px; color: #5d7750; font-size: 12px; text-align: right; }
+.upload-facts { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; color: #718469; font-size: 11px; line-height: 1.8; }
+.upload-description { color: #718469; font-size: 11px; line-height: 1.8; margin-top: 10px; }
+.upload-warning { color: #9b723e; }
+.upload-failure { color: #a55e4b; background: #fdf2ec; padding: 10px 12px; border-radius: 5px; margin-top: 12px; font-size: 11px; line-height: 1.8; overflow-wrap: anywhere; }
+.upload-controls { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; margin-top: 16px; }
+.upload-controls .primary { padding: 9px 15px; }
+@media (max-width:650px) { .upload-panel { padding: 18px; } .upload-controls { gap: 12px; } .upload-facts { gap: 4px; } }
 .help, .footnote, .list-footer, .subtle-number, .text-button,
 .overview small, .source-description > small, .budget small,
 .task-info > span, .page-title p, .stages small {

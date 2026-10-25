@@ -13,7 +13,7 @@ public record VideoAssetResponse(
         @JsonProperty("media_validation_status") String mediaValidationStatus,
         @JsonProperty("created_at") Instant createdAt,
         @JsonProperty("content_url") String contentUrl) {
-    static VideoAssetResponse from(VideoAsset asset) {
+    public static VideoAssetResponse from(VideoAsset asset) {
         return new VideoAssetResponse(asset.id(), asset.originalFilename(), asset.contentHash(), asset.sizeBytes(),
                 asset.mediaValidationStatus(), asset.createdAt(), "/api/videos/" + asset.id() + "/content");
     }

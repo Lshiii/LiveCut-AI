@@ -2,15 +2,18 @@
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { api, ApiError, post, type AnalysisJob, type Page, type VideoAsset } from './api'
 import ReviewPanel from './ReviewPanel.vue'
+import UploadPanel from './UploadPanel.vue'
 import './style.css'
 
 const videos = ref<VideoAsset[]>([]), jobs = ref<AnalysisJob[]>([])
 const selectedVideoId = ref(''), selectedJob = ref<AnalysisJob | null>(null)
 const pending = ref(''), errorMessage = ref(''), connectionError = ref(''), notice = ref('')
 const online = ref(false), loading = ref(true), query = ref(''), filter = ref('ALL')
-const visualProvider = ref('ocr'), maxTextCalls = ref(12), fileInput = ref<HTMLInputElement | null>(null)
+const visualProvider = ref('ocr'), maxTextCalls = ref(12)
+const uploadPanel = ref<{ chooseFile: () => void } | null>(null)
 const reviewEditor = ref<{ dirty: boolean; pending: boolean } | null>(null)
 let timer: number | undefined, refreshing = false, stopped = false, selectionVersion = 0
+let uploadSelectionVersion = 0
 const names: Record<string, string> = {
   QUEUED: '等待执行', RUNNING: '正在分析', REVIEW_READY: '待人工审核', FAILED: '执行失败',
   CANCELLED: '已取消', READY: '等待领取', BLOCKED: '等待前序', SUCCEEDED: '已完成', RETRY_WAIT: '等待重试', SKIPPED: '已跳过',
@@ -105,22 +108,26 @@ function selectVideo() {
   selectedJob.value = null; selectionVersion++
   const url = new URL(location.href); url.searchParams.delete('job'); history.replaceState({}, '', url)
 }
-async function upload(event: Event) {
-  const input = event.target as HTMLInputElement, file = input.files?.[0]
-  if (!file) return
-  if (reviewEditor.value?.pending) { errorMessage.value = '请等待审核提交完成，再上传新视频。'; input.value = ''; return }
-  if (reviewEditor.value?.dirty) { errorMessage.value = '请先保存审核修改，再上传新视频。'; input.value = ''; return }
-  if (!file.name.toLowerCase().endsWith('.mp4') || file.size > 1073741824 || file.size === 0) {
-    errorMessage.value = '请选择非空的 MP4 视频，大小不超过 1 GiB。'; input.value = ''; return
-  }
-  pending.value = 'upload'; errorMessage.value = ''; notice.value = ''
-  try {
-    const form = new FormData(); form.append('file', file)
-    const video = await api<VideoAsset>('/api/videos', { method: 'POST', body: form })
-    selectVideo(); selectedVideoId.value = video.id
-    notice.value = '视频已保存，可以创建分析任务。'; await refresh()
-  } catch (error) { showError(error) }
-  finally { pending.value = ''; input.value = '' }
+function canStartUpload() {
+  if (pending.value && pending.value !== 'upload') { errorMessage.value = '请等待当前操作完成，再上传视频。'; return false }
+  if (reviewEditor.value?.pending) { errorMessage.value = '请等待审核提交完成，再上传新视频。'; return false }
+  if (reviewEditor.value?.dirty) { errorMessage.value = '请先保存审核修改，再上传新视频。'; return false }
+  return true
+}
+function uploadBusy(value: boolean) {
+  if (value) pending.value = 'upload'
+  else if (pending.value === 'upload') pending.value = ''
+}
+function uploadStarted() { uploadSelectionVersion = selectionVersion; errorMessage.value = ''; notice.value = '' }
+async function uploaded(video: VideoAsset) {
+  if (stopped) return
+  if (!videos.value.some(item => item.id === video.id)) videos.value.unshift(video)
+  // A delayed upload must not replace a task the user opened or edited while it ran.
+  if (selectionVersion === uploadSelectionVersion && !reviewEditor.value?.dirty && !reviewEditor.value?.pending) {
+    selectedVideoId.value = video.id; selectVideo()
+    notice.value = '视频已保存，可以创建分析任务。'
+  } else notice.value = '视频已保存。当前审核和任务选择保持不变，可在视频来源中选择新视频。'
+  await refresh()
 }
 async function createJob() {
   if (!selectedVideoId.value || pending.value) return
@@ -180,9 +187,10 @@ onUnmounted(() => { stopped = true; selectionVersion++; window.clearInterval(tim
     <main>
       <header class="topbar"><span>工作区 <span class="slash">/</span> 视频与任务</span><span class="connection"><i :class="{ online }"></i>{{ online ? '服务已连接' : '服务未连接' }}</span></header>
       <div class="page">
-        <section class="page-title"><div><div class="eyebrow">VIDEO WORKSPACE</div><h1>把直播，整理成商品片段<span>。</span></h1><p>上传录像，自动定位讲解区间，再由你完成审核。</p></div><button class="primary upload-button" :disabled="!!pending" @click="fileInput?.click()"><span>＋</span>{{ pending === 'upload' ? '正在上传…' : '上传视频' }}</button><input ref="fileInput" class="visually-hidden" type="file" accept=".mp4,video/mp4" aria-label="上传 MP4 视频" @change="upload"></section>
+        <section class="page-title"><div><div class="eyebrow">VIDEO WORKSPACE</div><h1>把直播，整理成商品片段<span>。</span></h1><p>上传录像，自动定位讲解区间，再由你完成审核。</p></div><button class="primary upload-button" :disabled="!!pending" @click="uploadPanel?.chooseFile()"><span>＋</span>{{ pending === 'upload' ? '正在上传…' : '上传视频' }}</button></section>
         <div v-if="errorMessage || connectionError" class="message error" role="alert"><span>{{ errorMessage || connectionError }}</span><button aria-label="关闭错误提示" @click="errorMessage = ''; connectionError = ''">×</button></div>
         <div v-if="notice" class="message notice" role="status"><span>{{ notice }}</span><button aria-label="关闭操作提示" @click="notice = ''">×</button></div>
+        <UploadPanel ref="uploadPanel" :can-start="canStartUpload" @busy="uploadBusy" @started="uploadStarted" @complete="uploaded" />
         <section class="overview" aria-label="当前加载任务统计">
           <div><span>视频素材</span><strong>{{ videos.length.toString().padStart(2, '0') }}</strong><small>本地来源已留档</small></div>
           <div><span>分析进行中</span><strong>{{ activeCount.toString().padStart(2, '0') }}<i class="orange-dot"></i></strong><small>等待执行或正在处理</small></div>
