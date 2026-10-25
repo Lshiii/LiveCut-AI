@@ -148,6 +148,58 @@ class JobProtocolIntegrationTests {
     }
 
     @Test
+    void readyCanTargetOneJobWithoutChangingLegacyDiscovery() {
+        JsonNode first = create();
+        JsonNode target = create();
+        String jobId = target.path("id").asText();
+        var filtered = worker("GET", "/internal/stages/ready?stage_type=MEDIA&limit=1&job_id=" + jobId, null);
+        assertEquals(200, filtered.statusCode(), text(filtered));
+        assertEquals(1, json(filtered).path("items").size());
+        JsonNode item = json(filtered).path("items").get(0);
+        assertEquals(jobId, item.path("job_id").asText());
+        assertEquals(stage(target, "MEDIA").path("id"), item.path("id"));
+        var unfiltered = worker("GET", "/internal/stages/ready?stage_type=MEDIA&limit=100", null);
+        List<String> discovered = new ArrayList<>();
+        json(unfiltered).path("items").forEach(value -> discovered.add(value.path("job_id").asText()));
+        assertTrue(discovered.containsAll(List.of(first.path("id").asText(), jobId)));
+        error(worker("GET", "/internal/stages/ready?job_id=not-a-uuid", null), 400, "INVALID_JOB_ID");
+        error(worker("GET", "/internal/stages/ready?job_id=", null), 400, "INVALID_JOB_ID");
+        assertEquals(0, json(worker("GET", "/internal/stages/ready?job_id=" + UUID.randomUUID(), null)).path("items").size());
+        assertEquals(0, stage(get(jobId), "MEDIA").path("attempt").asInt());
+    }
+
+    @Test
+    void targetedClaimRejectsForeignWorkBeforeAnyReceiptOrAttemptAndBindsReplay() {
+        JsonNode foreign = create();
+        JsonNode target = create();
+        String targetId = target.path("id").asText();
+        String foreignStage = stage(foreign, "MEDIA").path("id").asText();
+        String stageId = stage(target, "MEDIA").path("id").asText();
+        String workerId = "targeted-worker", requestId = UUID.randomUUID().toString();
+        Map<String, Object> wrong = Map.of("stage_id", foreignStage, "worker_id", workerId,
+                "claim_request_id", requestId, "job_id", targetId);
+        error(worker("POST", "/internal/stages/claim", wrong), 409, "CLAIM_TARGET_CHANGED");
+        assertEquals(0, jdbc().queryForObject("SELECT COUNT(*) FROM stage_claim_request WHERE worker_id=? AND claim_request_id=?", Integer.class, workerId, requestId));
+        assertEquals(0, stage(get(foreign.path("id").asText()), "MEDIA").path("attempt").asInt());
+        assertEquals("READY", stage(get(foreign.path("id").asText()), "MEDIA").path("status").asText());
+        Map<String, Object> body = Map.of("stage_id", stageId, "worker_id", workerId,
+                "claim_request_id", requestId, "job_id", targetId);
+        JsonNode claimed = json(worker("POST", "/internal/stages/claim", body));
+        assertEquals("CLAIMED", claimed.path("outcome").asText());
+        assertEquals(targetId, claimed.path("job_id").asText());
+        JsonNode replay = json(worker("POST", "/internal/stages/claim", body));
+        assertEquals("ALREADY_CLAIMED", replay.path("outcome").asText());
+        assertEquals(claimed.path("run_token"), replay.path("run_token"));
+        error(worker("POST", "/internal/stages/claim", claimBody(stageId, workerId, requestId)), 409, "IDEMPOTENCY_CONFLICT");
+        assertEquals(1, stage(get(targetId), "MEDIA").path("attempt").asInt());
+        Map<String, Object> malformed = Map.of("stage_id", stageId, "worker_id", workerId,
+                "claim_request_id", UUID.randomUUID().toString(), "job_id", "bad-id");
+        error(worker("POST", "/internal/stages/claim", malformed), 400, "INVALID_JOB_ID");
+        assertEquals(0, get(targetId).path("budget").path("text_calls_reserved").asInt());
+        assertEquals(0, get(targetId).path("budget").path("asr_calls_reserved").asInt());
+    }
+
+    @Test
     void twoWorkersRaceForOneStageAndLostClaimResponseRecoversTheSameCredential() throws Exception {
         JsonNode job = create();
         String stageId = stage(job, "MEDIA").path("id").asText();

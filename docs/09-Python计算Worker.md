@@ -27,6 +27,8 @@ uv run --extra ocr livecut worker --java-url http://127.0.0.1:8080 --storage-roo
 
 创建任务见 [任务 API](./08-持久任务与调用预算.md)。同一个 journal 目录有进程锁，不能同时运行两个 Worker；每个实例使用独立 worker_id 和 journal。内部 API 默认禁止远程明文 HTTP，外部部署需 HTTPS；当前仅交付本机共享卷方式。
 
+只处理指定任务可增加 `-JobId <父分析任务UUID>`，适用于分析及导出阶段。显式跨任务复用转写时，增加 `-ReuseAsrJob <源任务UUID> -StageType ASR -Once`，同时必须指定目标 `-JobId`。源与目标须同视频、同模型、同音频，全部校验通过后复制已发布转写原字节；失败不回退付费 ASR。源/目标使用独立 journal，不把已有旧 journal 自动迁入目标模式。完整校验、产物与信任边界见 [ASR 转写复用](./16-ASR转写复用.md)。
+
 ## 恢复与文件验证
 
 - 领取前先持久化 claim_request_id，响应丢失重试原领取请求。

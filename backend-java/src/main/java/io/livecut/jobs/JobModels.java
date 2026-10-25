@@ -14,7 +14,12 @@ public final class JobModels {
     public record Credential(int attempt, @JsonProperty("run_token") String runToken) {}
     public record ClaimRequest(@JsonProperty("stage_id") String stageId,
                                @JsonProperty("worker_id") String workerId,
-                               @JsonProperty("claim_request_id") String claimRequestId) {}
+                               @JsonProperty("claim_request_id") String claimRequestId,
+                               @JsonProperty("job_id") String jobId) {
+        public ClaimRequest(String stageId, String workerId, String claimRequestId) {
+            this(stageId, workerId, claimRequestId, null);
+        }
+    }
     public record CheckpointRequest(int attempt, @JsonProperty("run_token") String runToken,
                                     @JsonProperty("checkpoint_key") String checkpointKey,
                                     @JsonProperty("checkpoint_hash") String checkpointHash) {

@@ -48,6 +48,8 @@ def main(argv: list[str] | None = None) -> int:
     worker.add_argument("--storage-root", type=Path, required=True)
     worker.add_argument("--journal-dir", type=Path, required=True)
     worker.add_argument("--once", action="store_true", help="Handle one stage or pending callback")
+    worker.add_argument("--job-id", help="Only claim this analysis job, including fenced export stages")
+    worker.add_argument("--reuse-asr-job", help="Explicitly reuse a verified successful ASR from this job")
     worker.add_argument("--stage-type", choices=("MEDIA", "ASR", "SEGMENT", "TIMELINE", "EXPORT_CLIP"),
                         help="Only claim this stage type; useful for a media-only smoke check")
     worker.add_argument("--poll-seconds", type=float, default=3)
@@ -105,12 +107,18 @@ def main(argv: list[str] | None = None) -> int:
             from .worker import AnalysisStageExecutor, StageWorker
             from .worker_client import WorkerClient
 
+            if args.reuse_asr_job and (not args.once or args.stage_type != "ASR" or not args.job_id):
+                raise WorkerError("INVALID_ASR_REUSE_CONFIGURATION")
             worker_key = os.environ.get("LIVECUT_WORKER_API_KEY") or os.environ.get("LIVECUT_WORKER_KEY", "")
             client = WorkerClient(args.java_url, worker_key)
-            executor = AnalysisStageExecutor(transport_factory=transport_factory(client),
-                                             ffmpeg_path=args.ffmpeg, ffprobe_path=args.ffprobe)
-            runner = StageWorker(client, args.storage_root, args.journal_dir, args.worker_id, executor)
+            runner = None
             try:
+                source = client.job(args.reuse_asr_job) if args.reuse_asr_job else None
+                executor = AnalysisStageExecutor(transport_factory=transport_factory(client),
+                                                 ffmpeg_path=args.ffmpeg, ffprobe_path=args.ffprobe,
+                                                 asr_reuse_source=source)
+                target = {"target_job_id": args.job_id} if args.job_id is not None else {}
+                runner = StageWorker(client, args.storage_root, args.journal_dir, args.worker_id, executor, **target)
                 if args.once:
                     status = runner.run_once(stage_type=args.stage_type)
                     _emit({"status": status, "worker_id": args.worker_id})
@@ -118,7 +126,8 @@ def main(argv: list[str] | None = None) -> int:
                 else:
                     runner.run(poll_seconds=args.poll_seconds, stage_type=args.stage_type)
             except KeyboardInterrupt:
-                runner.stop.set()
+                if runner is not None:
+                    runner.stop.set()
                 _emit({"status": "stopped", "worker_id": args.worker_id})
             finally:
                 client.close()

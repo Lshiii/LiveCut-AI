@@ -161,11 +161,17 @@ public class JobService {
     }
 
     public List<ReadyStage> ready(String stageType, int limit) {
+        return ready(stageType, limit, null);
+    }
+
+    public List<ReadyStage> ready(String stageType, int limit, String jobId) {
         if (limit < 1 || limit > 100) { throw bad("INVALID_ARGUMENT", "limit must be 1..100"); }
         if (stageType != null && !FLOW.contains(stageType) && !"EXPORT_CLIP".equals(stageType)) { throw bad("INVALID_ARGUMENT", "Unknown stage type"); }
+        String targetJob = jobId == null ? null : uuid(jobId, "INVALID_JOB_ID");
         String predicate = stageType == null ? "" : " AND s.stage_type=?";
         List<Object> parameters = new ArrayList<>();
         if (stageType != null) { parameters.add(stageType); }
+        if (targetJob != null) { predicate += " AND s.job_id=?"; parameters.add(targetJob); }
         parameters.add(limit);
         return jdbc.query("SELECT s.* FROM job_stage s JOIN analysis_job j ON j.id=s.job_id LEFT JOIN export_job e ON s.owner_type='EXPORT' AND e.id=s.owner_id AND e.job_id=s.job_id WHERE s.status='READY' AND s.next_run_at<=CURRENT_TIMESTAMP(6) AND ((s.owner_type='ANALYSIS' AND j.status IN ('QUEUED','RUNNING')) OR (s.owner_type='EXPORT' AND j.status='REVIEW_READY' AND e.status IN ('QUEUED','RUNNING')))" + predicate + " ORDER BY s.next_run_at,s.id LIMIT ?",
                 (row, index) -> new ReadyStage(row.getString("id"), row.getString("job_id"), row.getString("stage_type"), row.getString("shard_key"), instant(row, "next_run_at")), parameters.toArray());
@@ -176,11 +182,17 @@ public class JobService {
         String stageId = uuid(request.stageId(), "INVALID_STAGE_ID");
         String worker = identifier(request.workerId(), "worker_id");
         String claimId = identifier(request.claimRequestId(), "claim_request_id");
-        String requestHash = sha256(stageId + "\n" + worker);
+        String targetJob = request.jobId() == null ? null : uuid(request.jobId(), "INVALID_JOB_ID");
+        // Preserve existing unscoped receipt identities. A scoped claim adds
+        // its target so a lost response cannot resume under different inputs.
+        String requestHash = sha256(stageId + "\n" + worker + (targetJob == null ? "" : "\n" + targetJob));
         return transaction.execute(status -> {
             StageParent parent = lockParent(stageId);
             Map<String, Object> job = parent.analysis();
             String jobId = String.valueOf(job.get("id"));
+            if (targetJob != null && !targetJob.equals(jobId)) {
+                throw conflict("CLAIM_TARGET_CHANGED", "Stage does not belong to the requested analysis job");
+            }
             StageRow stage = parent.stage();
             Instant now = dbNow();
             int inserted = jdbc.update("INSERT IGNORE INTO stage_claim_request (worker_id,claim_request_id,request_hash,stage_id,outcome) VALUES (?,?,?,?,'PENDING')", worker, claimId, requestHash, stageId);

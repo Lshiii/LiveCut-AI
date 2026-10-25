@@ -29,9 +29,10 @@ public class StageController {
 
     @GetMapping("/ready")
     public ReadyPage ready(@RequestParam(value = "stage_type", required = false) String stageType,
+                           @RequestParam(value = "job_id", required = false) String jobId,
                            @RequestParam(defaultValue = "20") String limit) {
         int count = JobController.queryNumber(limit, 1, 100, "limit");
-        return new ReadyPage(service.ready(stageType, count), count);
+        return new ReadyPage(service.ready(stageType, count, jobId), count);
     }
 
     @PostMapping("/claim")

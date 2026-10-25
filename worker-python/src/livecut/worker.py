@@ -15,6 +15,7 @@ import threading
 import time
 import traceback
 from contextlib import contextmanager
+from copy import deepcopy
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path, PurePosixPath
@@ -301,7 +302,7 @@ class StageWorker:
     def __init__(
         self, client: WorkerClient, storage_root: Path, journal_dir: Path,
         worker_id: str, executor: StageExecutor, *, heartbeat_seconds: float = 10,
-        stop: threading.Event | None = None,
+        stop: threading.Event | None = None, target_job_id: str | None = None,
     ) -> None:
         self.client, self.storage_root = client, storage_root.resolve()
         self.journal_dir, self.worker_id, self.executor = journal_dir.resolve(), _identifier(worker_id), executor
@@ -309,13 +310,20 @@ class StageWorker:
             raise WorkerError("INVALID_HEARTBEAT_INTERVAL")
         self.heartbeat_seconds = heartbeat_seconds
         self.stop = stop if stop is not None else threading.Event()
+        self.target_job_id = (WorkerClient._job_id(target_job_id)
+                              if target_job_id is not None else None)
         _native_path(self.journal_dir).mkdir(parents=True, exist_ok=True)
+
+    def _check_target_record(self, value: dict) -> None:
+        if self.target_job_id is not None and value.get("job_id") != self.target_job_id:
+            raise WorkerError("WORKER_JOB_TARGET_MISMATCH")
 
     def _pending_callback(self) -> bool:
         pending = self.journal_dir / "pending-callback.json"
         if not _native_path(pending).exists():
             return False
         value = _read(pending)
+        self._check_target_record(value)
         try:
             response = self.client.callback(value["action"], value["stage_id"], value["payload"])
             if response.get("outcome") not in {"ACCEPTED", "ALREADY_APPLIED"}:
@@ -353,25 +361,34 @@ class StageWorker:
         claim_path = self.journal_dir / "pending-claim.json"
         if _native_path(claim_path).exists():
             pending = _read(claim_path)
+            self._check_target_record(pending)
         else:
-            ready = self.client.ready(stage_type=stage_type, limit=1)
+            target = {"job_id": self.target_job_id} if self.target_job_id is not None else {}
+            ready = self.client.ready(stage_type=stage_type, limit=1, **target)
             items = ready.get("items")
             if not isinstance(items, list):
                 raise WorkerError("INVALID_JAVA_RESPONSE")
             if not items:
                 return "idle"
+            if self.target_job_id is not None and (not isinstance(items[0], dict)
+                                                  or items[0].get("job_id") != self.target_job_id):
+                raise WorkerError("CLAIM_TARGET_CHANGED")
             pending = {"stage_id": _identifier(items[0].get("id")),
                        "worker_id": self.worker_id, "claim_request_id": str(uuid4())}
+            pending.update(target)
             _write(claim_path, pending)
         if pending.get("worker_id") != self.worker_id:
             raise WorkerError("WORKER_ID_MISMATCH")
-        claim = self.client.claim(pending["stage_id"], self.worker_id, pending["claim_request_id"])
+        target = {"job_id": self.target_job_id} if self.target_job_id is not None else {}
+        claim = self.client.claim(pending["stage_id"], self.worker_id, pending["claim_request_id"], **target)
         if claim.get("outcome") in {"NO_WORK", "EXPIRED"}:
             _native_path(claim_path).unlink()
             return "unavailable"
         # A malformed frozen export still has valid fenced credentials. Defer
         # its configuration check into the failure callback boundary below.
         lease = Lease.parse(claim, validate_export=False)
+        if self.target_job_id is not None and lease.job_id != self.target_job_id:
+            raise WorkerError("CLAIM_TARGET_CHANGED")
         if lease.stage_id != pending["stage_id"]:
             raise WorkerError("CLAIM_TARGET_CHANGED")
         if stage_type is not None and lease.stage_type != stage_type:
@@ -384,7 +401,9 @@ class StageWorker:
         result_path = directory / "worker-result.json"
         if _native_path(result_path).exists():
             # Crash after computation but before publishing the local callback.
-            _write(callback_path, _read(result_path))
+            previous = _read(result_path)
+            self._check_target_record(previous)
+            _write(callback_path, previous)
             _native_path(claim_path).unlink()
             self._pending_callback()
             return "callback_replayed"
@@ -444,6 +463,8 @@ class StageWorker:
             thread.join(timeout=12)
         # Write the exact callback before any network mutation. Never regenerate
         # its hash or recompute a stage merely because the response was lost.
+        if self.target_job_id is not None:
+            callback["job_id"] = self.target_job_id
         _write(result_path, callback)
         _write(callback_path, callback)
         _native_path(claim_path).unlink(missing_ok=True)
@@ -475,9 +496,11 @@ class AnalysisStageExecutor:
     """
 
     def __init__(self, *, transport_factory: ProviderTransportFactory | None = None,
-                 ffmpeg_path: str = "ffmpeg", ffprobe_path: str = "ffprobe") -> None:
+                 ffmpeg_path: str = "ffmpeg", ffprobe_path: str = "ffprobe",
+                 asr_reuse_source: dict | None = None) -> None:
         self.transport_factory = transport_factory
         self.ffmpeg_path, self.ffprobe_path = ffmpeg_path, ffprobe_path
+        self.asr_reuse_source = deepcopy(asr_reuse_source)
 
     def __call__(self, context: StageContext) -> dict:
         if context.lease.stage_type == "EXPORT_CLIP":
@@ -506,15 +529,20 @@ class AnalysisStageExecutor:
         elif lease.stage_type == "ASR":
             audio = context.predecessor("MEDIA", "audio")
             context.provider_input_hash = sha256(audio)
-            if self.transport_factory is None:
-                raise WorkerError("DURABLE_BUDGET_REQUIRED")
-            transport = self.transport_factory(context, "asr")
-            transcribe_file(_native_path(audio), _native_path(directory / "asr"), transport=transport,
-                            model=config.get("asr_model", "paraformer-v2"),
-                            timeout_seconds=context.guard.remaining_seconds(),
-                            request_timeout_seconds=min(30, context.guard.remaining_seconds()),
-                            base_url=os.environ.get("LIVECUT_ASR_BASE_URL"))
-            artifacts = [context.artifact("transcript", directory / "asr" / "transcript.json")]
+            if self.asr_reuse_source is not None:
+                from .asr_reuse import reuse_asr
+
+                artifacts = reuse_asr(context, self.asr_reuse_source, audio)
+            else:
+                if self.transport_factory is None:
+                    raise WorkerError("DURABLE_BUDGET_REQUIRED")
+                transport = self.transport_factory(context, "asr")
+                transcribe_file(_native_path(audio), _native_path(directory / "asr"), transport=transport,
+                                model=config.get("asr_model", "paraformer-v2"),
+                                timeout_seconds=context.guard.remaining_seconds(),
+                                request_timeout_seconds=min(30, context.guard.remaining_seconds()),
+                                base_url=os.environ.get("LIVECUT_ASR_BASE_URL"))
+                artifacts = [context.artifact("transcript", directory / "asr" / "transcript.json")]
         elif lease.stage_type == "SEGMENT":
             media = _read(context.predecessor("MEDIA", "media_info"))
             transcript = json.loads(_native_path(context.predecessor("ASR", "transcript")).read_text(encoding="utf-8"))

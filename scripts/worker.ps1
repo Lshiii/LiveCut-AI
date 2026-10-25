@@ -2,11 +2,16 @@ param(
     [string]$EnvFile = '.env.java',
     [string]$JavaUrl = 'http://127.0.0.1:8080',
     [string]$WorkerId = 'worker-local',
+    [string]$JobId = '',
+    [string]$ReuseAsrJob = '',
     [ValidateSet('', 'MEDIA', 'ASR', 'SEGMENT', 'TIMELINE', 'EXPORT_CLIP')]
     [string]$StageType = '',
     [switch]$Once
 )
 $ErrorActionPreference = 'Stop'
+if ($ReuseAsrJob -and (-not $Once -or $StageType -ne 'ASR' -or -not $JobId)) {
+    throw 'ASR reuse requires -JobId, -StageType ASR and -Once.'
+}
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $configPath = if ([IO.Path]::IsPathRooted($EnvFile)) { $EnvFile } else { Join-Path $repoRoot $EnvFile }
 if (-not (Test-Path -LiteralPath $configPath -PathType Leaf)) { throw 'Missing private Worker configuration; see docs/09-Python计算Worker.md.' }
@@ -27,6 +32,8 @@ try {
         '--journal-dir', (Join-Path $repoRoot "data/worker-journals/$WorkerId"))
     if ($WorkerId -notmatch '^[A-Za-z0-9_-]{1,100}$') { throw 'Invalid worker identifier.' }
     if ($StageType) { $launchArgs += @('--stage-type', $StageType) }
+    if ($JobId) { $launchArgs += @('--job-id', $JobId) }
+    if ($ReuseAsrJob) { $launchArgs += @('--reuse-asr-job', $ReuseAsrJob) }
     if ($Once) { $launchArgs += '--once' }
     Push-Location $repoRoot
     try {

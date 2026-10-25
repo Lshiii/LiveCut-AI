@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from urllib.parse import urlsplit
+from uuid import UUID
 
 import httpx
 
@@ -61,16 +62,37 @@ class WorkerClient:
             raise WorkerClientError("INVALID_JAVA_RESPONSE", retryable=True)
         return value
 
-    def ready(self, *, stage_type: str | None = None, limit: int = 10) -> dict:
+    @staticmethod
+    def _job_id(value: str) -> str:
+        try:
+            return str(UUID(value))
+        except (ValueError, TypeError, AttributeError):
+            raise WorkerClientError("INVALID_JOB_ID") from None
+
+    def job(self, job_id: str) -> dict:
+        expected = self._job_id(job_id)
+        snapshot = self._request("GET", "/api/jobs/" + expected)
+        if snapshot.get("id") != expected:
+            raise WorkerClientError("INVALID_JAVA_RESPONSE")
+        return snapshot
+
+    def ready(self, *, stage_type: str | None = None, limit: int = 10,
+              job_id: str | None = None) -> dict:
         params: dict[str, str | int] = {"limit": limit}
         if stage_type is not None:
             params["stage_type"] = stage_type
+        if job_id is not None:
+            params["job_id"] = self._job_id(job_id)
         return self._request("GET", "/internal/stages/ready", params=params)
 
-    def claim(self, stage_id: str, worker_id: str, claim_request_id: str) -> dict:
-        return self._request("POST", "/internal/stages/claim", json={
+    def claim(self, stage_id: str, worker_id: str, claim_request_id: str,
+              *, job_id: str | None = None) -> dict:
+        payload = {
             "stage_id": stage_id, "worker_id": worker_id, "claim_request_id": claim_request_id,
-        })
+        }
+        if job_id is not None:
+            payload["job_id"] = self._job_id(job_id)
+        return self._request("POST", "/internal/stages/claim", json=payload)
 
     def callback(self, action: str, stage_id: str, payload: dict) -> dict:
         if action not in {"heartbeat", "checkpoint", "complete", "fail"}:
