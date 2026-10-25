@@ -188,7 +188,7 @@ def test_recorded_response_hash_mismatch_prevents_replay(tmp_path):
 def test_real_segmentation_adapter_reads_recorded_raw_response_after_attempt_change(tmp_path):
     prediction = {"products": [{"label": "mask", "category": "面膜", "variant_description": ""}],
                   "assignments": {"u1": {"content_kind": "product_talk",
-                                "identity_status": "identified", "product_labels": ["mask"]}}}
+                                "product_labels": ["mask"]}}}
     raw = {"output": {"choices": [{"finish_reason": "stop", "message": {
         "role": "assistant", "content": json.dumps(prediction, ensure_ascii=False)}}]},
         "usage": {"input_tokens": 9, "output_tokens": 4}}
@@ -212,7 +212,7 @@ def test_real_segmentation_adapter_reads_recorded_raw_response_after_attempt_cha
     resumed.close()
 
 
-@pytest.mark.parametrize("legacy_protocol", ["v8-ranges", "v9-arrays"])
+@pytest.mark.parametrize("legacy_protocol", ["v8-ranges", "v9-arrays", "v10-three-fields"])
 def test_keyed_protocol_body_does_not_replay_legacy_response(tmp_path, legacy_protocol):
     # A mocked durable ledger exercises real body hashing and stored-response
     # verification. This is protocol recovery, not a live Provider experiment.
@@ -238,8 +238,11 @@ def test_keyed_protocol_body_does_not_replay_legacy_response(tmp_path, legacy_pr
     if legacy_protocol == "v9-arrays":
         legacy = {"products": [], "assignments": [{"content_kind": "non_product",
                    "identity_status": "not_applicable", "product_labels": []}]}
+    if legacy_protocol == "v10-three-fields":
+        legacy = {"products": [], "assignments": {"u1": {"content_kind": "non_product",
+                   "identity_status": "not_applicable", "product_labels": []}}}
     dense = {"products": [], "assignments": {"u1": {"content_kind": "non_product",
-              "identity_status": "not_applicable", "product_labels": []}}}
+              "product_labels": []}}}
     external = []
     pending = [legacy, dense]
     ledger = Ledger()

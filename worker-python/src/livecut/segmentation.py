@@ -29,8 +29,8 @@ import httpx
 
 from livecut.contracts import validate_analysis_result
 
-PROMPT_VERSION = "catalog-free-v10-keyed-core-assignments"
-OUTPUT_PROTOCOL_VERSION = "keyed-core-assignments-v1"
+PROMPT_VERSION = "catalog-free-v11-derived-identity"
+OUTPUT_PROTOCOL_VERSION = "keyed-classifications-v2"
 DEFAULT_BASE_URL = "https://dashscope.aliyuncs.com/api/v1"
 _KINDS = {"product_talk", "non_product", "mixed", "uncertain"}
 _STATUSES = {"identified", "unknown", "ambiguous", "not_applicable"}
@@ -45,19 +45,18 @@ _SYSTEM = """你是直播商品讲解分段器。输出且只输出 JSON 对象�
 assignments 的键集合必须严格等于 core_utterance_ids；每个核心 ID 必须恰好出现一次。
 全部核心语句都必须分类，包括商品之间的过渡句、闲聊、口头停顿等，严禁省略。
 transcript 中不在 core_utterance_ids 内的句子只是理解上下文，绝不能把它们作为分类键。
-过渡或闲聊可标为 non_product/not_applicable；不确定的核心语句也必须保留一个分类项。
-每个键的分类值只能包含 content_kind、identity_status、product_labels，不得含索引、范围或时间。
+过渡或闲聊可标为 non_product；不确定的核心语句也必须保留一个分类项。
+每个键的分类值只能包含 content_kind、product_labels，严禁输出 identity_status、索引、范围或时间。
 程序按可信 ASR 原顺序读取每个 ID 的分类，再合并相邻且语义相同的分类；你不能生成区间。
 固定输出结构：{"products":[{"label":"tmp1","category":"垃圾袋",
 "variant_description":""}],"assignments":{"u1":{"content_kind":"product_talk",
-"identity_status":"identified","product_labels":["tmp1"]}}}。示例 u1 只有在输入核心 ID 中才可使用。
+"product_labels":["tmp1"]}}}。示例 u1 只有在输入核心 ID 中才可使用。
 products 的 label 是本窗口临时标签，category 是简洁类别名，variant_description 不明确时为空串。
-content_kind 为 product_talk/non_product/mixed/uncertain；identity_status 为
-identified/unknown/ambiguous/not_applicable。明确类别时 identified 且恰好一个商品标签；
-无法判断商品类别为 unknown 且无标签；多个不同身份候选为 ambiguous；
-闲聊为 non_product/not_applicable 且无标签。
-mixed 必须 ambiguous 且至少两个候选。uncertain 可用 unknown 或 ambiguous。不要强行归类。
-同一句不能有多个分类项；有多个商品候选时使用同一项内的 ambiguous/mixed 语义。
+content_kind 为 product_talk/non_product/mixed/uncertain。product_labels 是本句可能归属的商品标签。
+身份由程序按协议唯一推导，模型不输出 identity_status：non_product 必须空标签，表示无商品讲解；
+其他分类空标签表示 unknown，一个标签表示 identified，两个及以上不同标签表示 ambiguous。
+mixed 仍必须至少两个不同候选。uncertain 保留边界待审核，不改变候选数的身份含义。
+同一句不能有多个分类项；多个商品候选放在同一项的 product_labels 中。不要强行归类。
 没有商品可 products=[]，闲聊仍输出对应数量的 non_product 分类项。
 """
 _GROUPING_INSTRUCTIONS = {
@@ -229,31 +228,70 @@ def _parse_response(raw: dict, window: dict, *, grouping: str) -> dict:
     expected = set(core_ids)
     missing = [uid for uid in core_ids if uid not in assignments]
     non_core_count = sum(key not in expected for key in assignments)
-    if missing or non_core_count:
-        samples = [uid for uid in missing if len(_json(uid)) <= 96][:16]
-        detail = {"missing_core_ids": samples, "missing_core_id_count": len(missing),
-                  "omitted_missing_core_id_count": len(missing) - len(samples),
-                  "non_core_key_count": non_core_count}
-        raise SegmentationError("INVALID_MODEL_OUTPUT",
-                                "assignments keys must equal core_utterance_ids exactly; "
-                                "do not omit IDs or include context/unknown keys; "
-                                "assignment_key_diagnostics=" + _json(detail))
-    segments = []
-    for index, uid in enumerate(core_ids):
-        assignment = assignments[uid]
-        if not isinstance(assignment, dict) or set(assignment) != {
-            "content_kind", "identity_status", "product_labels"
-        }:
-            raise SegmentationError("INVALID_MODEL_OUTPUT",
-                                    f"assignments[core_index={index}] must contain only content_kind, "
-                                    "identity_status and product_labels; no IDs/ranges/times")
-        segments.append({**assignment, "utterance_ids": [uid]})
-    bound = {"products": parsed["products"], "segments": segments}
+    # Validate the product registry with the unchanged strict validator first.
+    # Its messages contain fixed constraints/indices, never model field values.
+    product_error = None
     try:
-        _validate_window(bound, window, grouping=grouping)
+        _validate_window({"products": parsed["products"], "segments": []},
+                         {"core_ids": [], "visible": window["visible"]}, grouping=grouping)
     except SegmentationError as exc:
-        raise SegmentationError(exc.code, str(exc).replace("segments[", "assignments[core_index=")) from exc
+        product_error = str(exc).split("; coverage_diagnostics=", 1)[0]
+    known_labels = ({value["label"] for value in parsed["products"]}
+                    if product_error is None else None)
+    segments, errors = [], []
+    for index, uid in enumerate(core_ids):
+        if uid not in assignments:
+            continue
+        segment, error_code = _classification_value(assignments[uid], uid, known_labels)
+        if error_code is not None:
+            issue = {"core_index": index, "error_code": error_code}
+            if len(_json(uid)) <= 96:
+                issue["utterance_id"] = uid
+            errors.append(issue)
+        else:
+            segments.append(segment)
+    if missing or non_core_count or errors or product_error:
+        samples = [uid for uid in missing if len(_json(uid)) <= 96][:16]
+        detail = {"diagnostic_version": "classification-v2",
+                  "missing_core_ids": samples, "missing_core_id_count": len(missing),
+                  "omitted_missing_core_id_count": len(missing) - len(samples),
+                  "non_core_key_count": non_core_count,
+                  "value_error_count": len(errors), "value_errors": errors[:16],
+                  "omitted_value_error_count": max(0, len(errors) - 16)}
+        reason = product_error or ("assignments keys must equal core_utterance_ids exactly"
+                                  if missing or non_core_count else "invalid core classification")
+        if errors:
+            reason += "; " + errors[0]["error_code"]
+        raise SegmentationError("INVALID_MODEL_OUTPUT",
+                                reason + "; assignment_key_diagnostics=" + _json(detail))
+    bound = {"products": parsed["products"], "segments": segments}
+    _validate_window(bound, window, grouping=grouping)
     return bound
+
+
+def _classification_value(
+    value: Any, uid: str, known_labels: set[str] | None,
+) -> tuple[dict | None, str | None]:
+    """Bind only the new two-field protocol; never coerce an older response."""
+    if not isinstance(value, dict) or set(value) != {"content_kind", "product_labels"}:
+        return None, "INVALID_ASSIGNMENT_FIELDS"
+    kind, labels = value["content_kind"], value["product_labels"]
+    if not isinstance(kind, str) or kind not in _KINDS:
+        return None, "INVALID_CONTENT_KIND"
+    if not isinstance(labels, list) or any(not _nonempty(label) for label in labels):
+        return None, "INVALID_PRODUCT_LABELS"
+    if len(set(labels)) != len(labels):
+        return None, "DUPLICATE_PRODUCT_LABEL"
+    if known_labels is not None and any(label not in known_labels for label in labels):
+        return None, "UNKNOWN_PRODUCT_LABEL"
+    if kind == "non_product" and labels:
+        return None, "NON_PRODUCT_WITH_LABELS"
+    if kind == "mixed" and len(labels) < 2:
+        return None, "MIXED_REQUIRES_MULTIPLE_CANDIDATES"
+    status = ("not_applicable" if kind == "non_product" else "unknown" if not labels
+              else "identified" if len(labels) == 1 else "ambiguous")
+    return {"utterance_ids": [uid], "content_kind": kind, "identity_status": status,
+            "product_labels": labels}, None
 
 
 def _unique_model_object(pairs: list[tuple[str, Any]]) -> dict:
@@ -821,7 +859,7 @@ def discover_products(
                                  "上一次 JSON 输出未通过校验：" + str(exc)
                                  + "。必须修复这个具体字段约束，不能原样重复失败输出。"
                                  + _GROUPING_INSTRUCTIONS[grouping]
-                                 + "每个 identified 分类值恰好一个标签；assignments 必须为对象，"
+                                 + "分类值仅含 content_kind/product_labels，不输出identity_status；assignments 必须为对象，"
                                  + "键集合严格等于 core_utterance_ids，每个核心ID恰好一次。"
                                  + "不省略核心ID，不添加上下文/未知键；分类值不得输出范围、时间、索引。"
                                  + "请根据相同输入重新输出符合固定格式的 JSON。只允许这一次修复。"})
@@ -842,7 +880,7 @@ def discover_products(
         "schema_version": "2.0", "data_kind": "model_result", "job_id": job_id,
         "video_id": video_id, "analysis_generation": analysis_generation,
         "duration_ms": duration_ms, "transcript_version": transcript_version,
-        "pipeline_version": "catalog-free-visual-text-v5", "review_status": "DRAFT",
+        "pipeline_version": "catalog-free-visual-text-v6", "review_status": "DRAFT",
         "product_discovery_version": PROMPT_VERSION,
         "provenance": {"asr_model_id": asr_model_id, "text_model_id": model,
                        "vision_model_id": visual_model_id if observations else None, "prompt_version": PROMPT_VERSION,
