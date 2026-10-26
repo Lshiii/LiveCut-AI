@@ -2,10 +2,12 @@
 
 import math
 import os
+import re
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any, Callable
 
+from .ocr_sampling import sampling_timestamps
 from .vision import VisionError, _extract_frame, _hash_file, _lock, _read_json, _write_json
 
 
@@ -30,15 +32,13 @@ def ocr_model_id() -> str:
 def observe_video_ocr(
     source: str | Path, output_dir: str | Path, *, duration_ms: int,
     ffmpeg_path: str = "ffmpeg", interval_ms: int = 45000, max_frames: int = 16,
+    sampling_policy: str = "prefix",
     engine: Callable[[str], Any] | None = None,
     extractor: Callable[..., dict] | None = None,
     guard: Callable[[], None] | None = None,
 ) -> list[dict]:
     """Read actual sampled frames. Categories remain unknown until semantic analysis."""
-    if any(type(x) is not int or x <= 0 for x in (duration_ms, interval_ms, max_frames)):
-        raise VisionError("INVALID_CONFIGURATION", "OCR sampling values must be positive integers")
-    if max_frames > 120:
-        raise VisionError("INVALID_CONFIGURATION", "OCR frame budget cannot exceed 120")
+    requested = sampling_timestamps(duration_ms, interval_ms, max_frames, sampling_policy)
     path = Path(source).expanduser().resolve()
     if not path.is_file():
         raise VisionError("INVALID_SOURCE", "OCR source must be a local file")
@@ -47,20 +47,23 @@ def observe_video_ocr(
     check()
     binding = {"source_sha256": _hash_file(path), "duration_ms": duration_ms,
                "interval_ms": interval_ms, "max_frames": max_frames, "model_id": model_id}
+    if sampling_policy == "uniform":
+        binding["sampling_policy"] = "uniform"
     directory = Path(output_dir).expanduser().resolve()
     (directory / "frames").mkdir(parents=True, exist_ok=True)
     state_path = directory / "ocr-state.json"
     with _lock(directory):
         state = _read_json(state_path) if state_path.exists() else {
             "input": binding, "frames": [], "observations": [],
-            "coverage_truncated": math.ceil(duration_ms / interval_ms) > max_frames,
+            "coverage_truncated": sampling_policy == "prefix" and math.ceil(duration_ms / interval_ms) > max_frames,
         }
         if state.get("input") != binding:
             raise VisionError("CHECKPOINT_INPUT_MISMATCH", "OCR cache belongs to different input/config")
         completed = state["observations"]
-        requested = list(range(0, min(duration_ms, interval_ms * max_frames), interval_ms))
         if len(completed) > len(requested) or len(state["frames"]) != len(completed):
             raise VisionError("INVALID_CHECKPOINT", "OCR cache is incomplete or exceeds budget")
+        if sampling_policy == "uniform" and state.get("coverage_truncated") is not False:
+            raise VisionError("INVALID_CHECKPOINT", "Uniform OCR checkpoint has an incompatible sampling plan")
         if len(completed) < len(requested) and engine is None:
             check()
             try:
@@ -74,6 +77,28 @@ def observe_video_ocr(
             key = f"frames/{frame_id}.jpg"
             target = directory / key
             if index < len(completed):
+                if sampling_policy == "uniform":
+                    frame, observation = state["frames"][index], completed[index]
+                    if (not isinstance(frame, dict) or not isinstance(observation, dict)
+                            or frame.get("requested_timestamp_ms") != requested_ms
+                            or type(frame.get("requested_timestamp_ms")) is not int
+                            or frame.get("frame_id") != frame_id or observation.get("frame_id") != frame_id
+                            or frame.get("object_key") != key or observation.get("object_key") != key
+                            or type(frame.get("timestamp_ms")) is not int
+                            or type(observation.get("timestamp_ms")) is not int
+                            or frame["timestamp_ms"] != observation["timestamp_ms"]
+                            or not 0 <= frame["timestamp_ms"] < duration_ms
+                            or frame["timestamp_ms"] + 1 < requested_ms
+                            or type(frame.get("source_pts")) is not int or frame["source_pts"] < 0
+                            or not isinstance(frame.get("source_time_base"), str)
+                            or not re.fullmatch(r"[1-9][0-9]*/[1-9][0-9]*", frame["source_time_base"])):
+                        raise VisionError("INVALID_CHECKPOINT", "Uniform OCR checkpoint does not match its sampling plan")
+                    try:
+                        numerator, denominator = (int(part) for part in frame["source_time_base"].split("/"))
+                    except ValueError:
+                        raise VisionError("INVALID_CHECKPOINT", "Uniform OCR checkpoint has an invalid time base") from None
+                    if abs(frame["timestamp_ms"] * denominator - frame["source_pts"] * numerator * 1000) > denominator:
+                        raise VisionError("INVALID_CHECKPOINT", "Uniform OCR checkpoint frame time does not match its PTS")
                 if _hash_file(target) != state["frames"][index]["sha256"]:
                     raise VisionError("FRAME_CHANGED", "Cached OCR frame has changed")
                 continue

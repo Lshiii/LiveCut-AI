@@ -5,13 +5,13 @@ from __future__ import annotations
 import hashlib
 import html
 import json
-import math
 import os
 from pathlib import Path
 from uuid import uuid4
 
 from .evaluation import EvaluationError, evaluate_localization
 from .evaluation_inputs import load_json, validate_annotation, validate_evaluation_binding
+from .evidence_audit import audit_timestamps
 from .media import probe_media
 
 
@@ -95,29 +95,7 @@ def _prediction_summary(prediction: dict) -> dict:
 
 
 def _evidence_audit(prediction: dict) -> dict:
-    duration = prediction["duration_ms"]
-    timestamps = sorted({frame["timestamp_ms"] for frame in prediction["frames"]})
-    window_ms = 180000
-    count = math.ceil(duration / window_ms)
-    if count > 10000:
-        raise EvaluationError("EVALUATION_LIMIT_EXCEEDED", "Evidence audit exceeds 10000 time bins")
-    windows = [{"start_ms": index * window_ms, "end_ms": min(duration, (index + 1) * window_ms),
-                "observation_count": 0} for index in range(count)]
-    for timestamp in timestamps:
-        windows[timestamp // window_ms]["observation_count"] += 1
-    anchors = [0, *timestamps, duration]
-    return {"observation_count": len(prediction["frames"]), "unique_timestamp_count": len(timestamps),
-            "first_timestamp_ms": timestamps[0] if timestamps else None,
-            "last_timestamp_ms": timestamps[-1] if timestamps else None,
-            "maximum_gap_including_edges_ms": max(b - a for a, b in zip(anchors, anchors[1:])),
-            "window_ms": window_ms, "window_count": len(windows),
-            "windows_without_observations": sum(not item["observation_count"] for item in windows),
-            "full_windows_without_observations": sum(not item["observation_count"]
-                and item["end_ms"] - item["start_ms"] == window_ms for item in windows),
-            "empty_bin_duration_ms": sum(item["end_ms"] - item["start_ms"]
-                for item in windows if not item["observation_count"]),
-            "windows": windows,
-            "interpretation": "Timestamp density only; isolated sampled frames do not prove continuous visual coverage."}
+    return audit_timestamps(prediction["duration_ms"], [frame["timestamp_ms"] for frame in prediction["frames"]])
 
 
 def evaluate_files(prediction_path: str | Path, annotation_path: str | Path, *, output_dir: str | Path,

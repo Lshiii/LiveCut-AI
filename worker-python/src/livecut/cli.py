@@ -13,6 +13,7 @@ from .contracts import ContractValidationError, validate_analysis_result
 from .evaluation import EvaluationError
 from .evaluation_inputs import EvaluationInputError, load_json, validate_annotation
 from .evaluation_runner import annotation_template, audit_files, evaluate_files
+from .evidence_audit import audit_timestamps
 from .inputs import DatasetValidationError, validate_dataset_manifest
 from .media import MediaError, export_clip, extract_audio, probe_media
 from .model_budget import ModelBudgetError
@@ -101,6 +102,8 @@ def main(argv: list[str] | None = None) -> int:
     ocr.add_argument("--cache-root", type=Path, required=True)
     ocr.add_argument("--interval-ms", type=int, default=45000)
     ocr.add_argument("--max-frames", type=int, default=16)
+    ocr.add_argument("--ocr-sampling", choices=("uniform", "prefix"), default="uniform",
+                     help="Whole-video sampling by default; prefix preserves the legacy baseline")
     ocr.add_argument("--ffprobe", default=os.environ.get("LIVECUT_FFPROBE_PATH", "ffprobe"))
     ocr.add_argument("--ffmpeg", default=os.environ.get("LIVECUT_FFMPEG_PATH", "ffmpeg"))
     analyze = sub.add_parser("analyze", help="Video-only real analysis and DRAFT preview clips")
@@ -121,6 +124,8 @@ def main(argv: list[str] | None = None) -> int:
     analyze.add_argument("--max-preview-clips", type=int, default=6)
     analyze.add_argument("--interval-ms", type=int, default=45000)
     analyze.add_argument("--max-frames", type=int, default=16)
+    analyze.add_argument("--ocr-sampling", choices=("uniform", "prefix"),
+                         help="Local OCR defaults to whole-video sampling; API vision remains prefix-only")
     analyze.add_argument("--ffprobe", default=os.environ.get("LIVECUT_FFPROBE_PATH", "ffprobe"))
     analyze.add_argument("--ffmpeg", default=os.environ.get("LIVECUT_FFMPEG_PATH", "ffmpeg"))
     for name, description in (("probe", "Inspect supported MP4 media"),
@@ -206,18 +211,24 @@ def main(argv: list[str] | None = None) -> int:
             cached = cached_observe_video_ocr(
                 args.source, args.output_dir, cache_root=args.cache_root, duration_ms=info.duration_ms,
                 ffmpeg_path=args.ffmpeg, interval_ms=args.interval_ms, max_frames=args.max_frames,
+                sampling_policy=args.ocr_sampling,
             )
             _write_json(args.output_dir / "cache-provenance.json", cached.provenance)
-            _emit({"status": "ok", "frames": len(cached.observations), "cache": cached.provenance})
+            _emit({"status": "ok", "frames": len(cached.observations), "cache": cached.provenance,
+                   "sampling_audit": audit_timestamps(info.duration_ms,
+                       [item["timestamp_ms"] for item in cached.observations])})
         elif args.command == "analyze":
             observations = None
             observer_id = "unspecified-observer"
+            if args.visual_provider == "api" and args.ocr_sampling == "uniform":
+                raise VisionError("INVALID_CONFIGURATION", "Whole-video sampling is local OCR only")
             if args.visual_provider != "none":
                 info = probe_media(args.source, ffprobe_path=args.ffprobe)
                 visual_dir = args.output_dir.with_name(args.output_dir.name + "-" + args.visual_provider)
                 sampling = {"duration_ms": info.duration_ms, "ffmpeg_path": args.ffmpeg,
                             "interval_ms": args.interval_ms, "max_frames": args.max_frames}
                 if args.visual_provider == "ocr":
+                    sampling["sampling_policy"] = args.ocr_sampling or "uniform"
                     observer_id = ocr_model_id()
                     if args.ocr_cache_root is not None:
                         cached = cached_observe_video_ocr(

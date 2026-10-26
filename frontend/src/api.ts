@@ -17,6 +17,7 @@ export interface JobActions {
   max_attempts: number
 }
 export interface AnalysisJob {
+  config?: Record<string, unknown>
   id: string; video_id: string; generation: number; status: string; stages: Stage[]; created_at: string; state_version: number
   budget: { max_text_calls: number; text_calls_reserved: number; max_asr_submissions: number; asr_calls_reserved: number }
   actions: JobActions

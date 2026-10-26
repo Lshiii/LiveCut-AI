@@ -560,6 +560,7 @@ class AnalysisStageExecutor:
                     _native_path(source), _native_path(directory / "ocr"), duration_ms=media["duration_ms"],
                     cache_root=_native_path(context.storage_root / "cache" / "ocr-v1"),
                     ffmpeg_path=self.ffmpeg_path, guard=context.guard.check,
+                    sampling_policy=config.get("ocr_sampling", "prefix"),
                 )
                 observations = cached.observations
                 context.guard.check()

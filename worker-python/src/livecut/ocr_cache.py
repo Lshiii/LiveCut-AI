@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterator
 
 from .ocr import observe_video_ocr
+from .ocr_sampling import sampling_timestamps
 from .vision import _PROFILE, VisionError
 
 _HASH = re.compile(r"[a-f0-9]{64}")
@@ -31,6 +32,9 @@ _MAX_FRAME = 4 * 1024 * 1024
 _MAX_FILES = 128
 _SCHEMA = 1
 _OBSERVER = "rapidocr-prefix-observer-v1-score045-text2000"
+_UNIFORM_OBSERVER = "rapidocr-uniform-observer-v1-score045-text2000"
+_PREFIX_SAMPLING = "prefix-at-fixed-interval-v1"
+_UNIFORM_SAMPLING = "uniform-bin-centers-v1"
 
 
 @dataclass(frozen=True)
@@ -272,8 +276,13 @@ def _validate_evidence(directory: Path, binding: dict, guard: Callable[[], None]
     expected_input = {"source_sha256": binding["source_sha256"], "duration_ms": binding["duration_ms"],
                       "interval_ms": binding["interval_ms"], "max_frames": binding["max_frames"],
                       "model_id": binding["runtime"]["model_id"]}
-    requested = list(range(0, min(binding["duration_ms"], binding["interval_ms"] * binding["max_frames"]), binding["interval_ms"]))
-    truncated = math.ceil(binding["duration_ms"] / binding["interval_ms"]) > binding["max_frames"]
+    if binding["sampling"] not in {_PREFIX_SAMPLING, _UNIFORM_SAMPLING}:
+        raise _error()
+    policy = "uniform" if binding["sampling"] == _UNIFORM_SAMPLING else "prefix"
+    if policy == "uniform":
+        expected_input["sampling_policy"] = "uniform"
+    requested = sampling_timestamps(binding["duration_ms"], binding["interval_ms"], binding["max_frames"], policy)
+    truncated = policy == "prefix" and math.ceil(binding["duration_ms"] / binding["interval_ms"]) > binding["max_frames"]
     if (not isinstance(state, dict) or set(state) != {"input", "frames", "observations", "coverage_truncated"}
             or _canonical(state["input"]) != _canonical(expected_input) or type(state["coverage_truncated"]) is not bool
             or state["coverage_truncated"] != truncated or not isinstance(frames, list)
@@ -325,6 +334,9 @@ def _validate_evidence(directory: Path, binding: dict, guard: Callable[[], None]
         if (not isinstance(provenance, dict) or provenance.get("cache_key") != hashlib.sha256(_canonical(binding)).hexdigest()
                 or provenance.get("observer_id") != binding["runtime"]["model_id"]
                 or type(provenance.get("frame_count")) is not int or provenance["frame_count"] != len(observations)):
+            raise _error("OCR_CACHE_OUTPUT_CONFLICT")
+        if policy == "uniform" and (provenance.get("sampling_policy") != "uniform"
+                                    or provenance.get("coverage_truncated") is not False):
             raise _error("OCR_CACHE_OUTPUT_CONFLICT")
         paths.remove("cache-provenance.json")
     if paths != expected_paths:
@@ -417,6 +429,7 @@ def cached_observe_video_ocr(
     source: str | Path, output_dir: str | Path, *, cache_root: str | Path,
     duration_ms: int, ffmpeg_path: str | Path = "ffmpeg", interval_ms: int = 45000,
     max_frames: int = 16, guard: Callable[[], None] | None = None,
+    sampling_policy: str = "prefix",
     engine: Callable[[str], Any] | None = None, engine_identity: str | None = None,
     extractor: Callable[..., dict] | None = None, extractor_identity: str | None = None,
     max_cache_bytes: int = 512 * 1024 * 1024, max_entries: int = 128,
@@ -432,6 +445,7 @@ def cached_observe_video_ocr(
             or type(lock_timeout_seconds) not in {int, float} or not math.isfinite(lock_timeout_seconds)
             or not 0 <= lock_timeout_seconds <= 300):
         raise VisionError("INVALID_CONFIGURATION", "OCR cache configuration is outside its supported bounds")
+    sampling_timestamps(duration_ms, interval_ms, max_frames, sampling_policy)
     for custom, identity in ((engine, engine_identity), (extractor, extractor_identity)):
         if custom is not None and not callable(custom):
             raise VisionError("INVALID_CONFIGURATION", "OCR adapters must be callable")
@@ -448,7 +462,9 @@ def cached_observe_video_ocr(
     source_hash = _sha(path, check)
     executable = _executable_identity(ffmpeg_path, check)
     binding = {"source_sha256": source_hash, "duration_ms": duration_ms, "interval_ms": interval_ms,
-               "max_frames": max_frames, "sampling": "prefix-at-fixed-interval-v1", "observer": _OBSERVER,
+               "max_frames": max_frames,
+               "sampling": _UNIFORM_SAMPLING if sampling_policy == "uniform" else _PREFIX_SAMPLING,
+               "observer": _UNIFORM_OBSERVER if sampling_policy == "uniform" else _OBSERVER,
                "ffmpeg": executable, "extractor_identity": extractor_identity}
     try:
         with _locked(root, lock_timeout_seconds, check):
@@ -477,7 +493,7 @@ def cached_observe_video_ocr(
                 try:
                     observe_video_ocr(path, build / "evidence", duration_ms=duration_ms,
                                       ffmpeg_path=str(ffmpeg_path), interval_ms=interval_ms, max_frames=max_frames,
-                                      engine=engine, extractor=extractor, guard=check)
+                                      sampling_policy=sampling_policy, engine=engine, extractor=extractor, guard=check)
                     if engine is None:
                         actual = default_runtime_identity(guard=check)
                         if runtime is not None and actual != runtime:
@@ -514,8 +530,10 @@ def cached_observe_video_ocr(
                           "binding_sha256": hashlib.sha256(_canonical(binding)).hexdigest(),
                           "bundle_manifest_sha256": _sha(bundle / "manifest.json", check),
                           "frame_count": len(observations),
-                          "coverage_truncated": math.ceil(duration_ms / interval_ms) > max_frames,
+                          "coverage_truncated": sampling_policy == "prefix" and math.ceil(duration_ms / interval_ms) > max_frames,
                           "observer_id": binding["runtime"]["model_id"]}
+            if sampling_policy == "uniform":
+                provenance["sampling_policy"] = "uniform"
             return OCRCacheResult(observations, provenance)
     except OSError:
         raise _error("OCR_CACHE_STORAGE_ERROR") from None

@@ -4,6 +4,7 @@ import { api, ApiError, post, type AnalysisJob, type Page, type VideoAsset } fro
 import ReviewPanel from './ReviewPanel.vue'
 import UploadPanel from './UploadPanel.vue'
 import FailureDiagnostic from './FailureDiagnostic.vue'
+import { samplingLabel } from './sampling'
 import { SnapshotError, SnapshotStream, isAnalysisTerminal, newestSnapshot, parseAnalysisSnapshot, streamLabels, type StreamMode } from './snapshotStream'
 import './style.css'
 
@@ -171,7 +172,7 @@ async function createJob() {
   if (!Number.isInteger(maxTextCalls.value) || maxTextCalls.value < 1 || maxTextCalls.value > 100) { errorMessage.value = '文本请求上限须为 1～100 的整数。'; return }
   const version = selectionVersion, videoId = selectedVideoId.value
   pending.value = 'create'; errorMessage.value = ''; notice.value = ''
-  const payload = { video_id: videoId, config: { visual_provider: visualProvider.value, max_text_calls: maxTextCalls.value } }
+  const payload = { video_id: videoId, config: { visual_provider: visualProvider.value, max_text_calls: maxTextCalls.value, ocr_sampling: 'uniform' } }
   const inputKey = JSON.stringify(payload)
   try {
     let saved: { input: string; key: string } | null = null
@@ -258,6 +259,7 @@ onUnmounted(() => { stopped = true; selectionVersion++; window.clearInterval(tim
             <div class="setup-body">
               <label class="field-label" for="source-video">视频来源</label><select id="source-video" v-model="selectedVideoId" :disabled="!!pending" @change="selectVideo"><option value="" disabled>请先上传视频</option><option v-for="video in videos" :key="video.id" :value="video.id">{{ video.original_filename }}</option></select>
               <template v-if="selectedJob">
+                <p class="help" aria-label="画面取证策略">{{ samplingLabel(selectedJob.config) }}</p>
                 <div class="detail-status"><span class="status" :class="selectedJob.status.toLowerCase()">{{ names[selectedJob.status] ?? selectedJob.status }}</span><span>{{ completeCount }} / {{ selectedJob.stages.length }} 阶段完成</span></div>
                 <ol class="stages"><li v-for="(stage, index) in orderedStages" :key="stage.id" :class="stage.status.toLowerCase()"><span class="step">{{ stage.status === 'SUCCEEDED' ? '✓' : index + 1 }}</span><div><b>{{ stageNames[stage.stage_type] ?? stage.stage_type }}</b><small>{{ names[stage.status] ?? stage.status }}<template v-if="stage.attempt"> · 第 {{ stage.attempt }} 次执行</template></small><FailureDiagnostic :diagnostic="stage.diagnostic" :error-code="stage.error_code" :attempt="stage.attempt" /></div></li></ol>
                 <div class="budget"><span>已预留模型请求</span><b>文本 {{ selectedJob.budget.text_calls_reserved }}/{{ selectedJob.budget.max_text_calls }} <i>·</i> ASR {{ selectedJob.budget.asr_calls_reserved }}/{{ selectedJob.budget.max_asr_submissions }}</b><small>次数上限，不代表人民币费用</small></div>
@@ -269,6 +271,7 @@ onUnmounted(() => { stopped = true; selectionVersion++; window.clearInterval(tim
               <template v-else>
                 <p class="help">无需商品清单。模型从语音和画面文字中发现商品。</p>
                 <label class="field-label" for="visual-provider">画面证据</label><select id="visual-provider" v-model="visualProvider"><option value="ocr">本地 OCR · 识别画面文字</option><option value="none">仅使用语音转写</option></select>
+                <p v-if="visualProvider === 'ocr'" class="help">从整段视频取样，最多 16 帧，用画面文字辅助语音判断。</p>
                 <label class="field-label" for="text-budget">文本请求上限</label><div class="number-field"><input id="text-budget" v-model.number="maxTextCalls" type="number" min="1" max="100" step="1"><span>次 / 本次分析</span></div><p class="help">10 分钟视频至少需要约 8 次文本请求，默认 12 次。更长视频需相应提高。ASR 默认最多提交 1 次。</p>
                 <button class="primary create-button" :disabled="!selectedVideoId || !!pending || !online" @click="createJob">{{ pending === 'create' ? '正在创建…' : '创建分析任务' }} <span>→</span></button>
                 <p class="footnote">任务保存到 MySQL，关闭页面后仍可查看进度。</p>

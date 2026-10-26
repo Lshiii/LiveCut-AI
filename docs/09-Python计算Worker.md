@@ -2,6 +2,8 @@
 
 Java 负责状态、租约和请求数预算，单槽 Python Worker 执行媒体、ASR、OCR 和商品分段。复用已有算法，没有为接入后台改写识别策略。固定流程是 MEDIA → ASR → SEGMENT → TIMELINE，成功后进入 REVIEW_READY，输出仍为 DRAFT。
 
+后续新建任务可通过冻结的 `ocr_sampling` 配置选择全片均匀取样；历史任务缺字段时继续 prefix，不在读取或重试时套用新默认。具体采样、缓存和旧创建回执兼容见 [全片采样说明](./24-全片OCR采样与旧任务兼容.md)。
+
 审核确认后，独立的 EXPORT_CLIP 阶段从冻结修订生成正式 MP4。它复用领取、心跳和完成协议，与分析状态隔离，不调用模型。持续 Worker 默认也领取导出；只处理导出可运行 `./scripts/worker.ps1 -StageType EXPORT_CLIP -Once`，每次处理一个片段。详细验证见 [正式导出](./12-正式导出与下载.md)。
 
 ## 启动

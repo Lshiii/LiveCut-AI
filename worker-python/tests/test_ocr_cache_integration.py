@@ -44,11 +44,14 @@ def test_ocr_cli_prepares_evidence_without_asr_or_text_calls(tmp_path, monkeypat
     assert result["frames"] == 1 and result["cache"]["cache_hit"] is True
     assert observed.call_args.kwargs["cache_root"] == tmp_path / "shared"
     assert observed.call_args.kwargs["duration_ms"] == 1000
+    assert observed.call_args.kwargs["sampling_policy"] == "uniform"
+    assert result["sampling_audit"]["observation_count"] == 1
     assert json.loads((tmp_path / "attempt/cache-provenance.json").read_text())["cache_hit"] is True
 
 
 def test_analyze_cli_maps_cached_evidence_to_this_output_directory(tmp_path, monkeypatch):
-    monkeypatch.setattr("livecut.cli.cached_observe_video_ocr", materialize)
+    cached = Mock(side_effect=materialize)
+    monkeypatch.setattr("livecut.cli.cached_observe_video_ocr", cached)
     monkeypatch.setattr("livecut.cli.probe_media", lambda *args, **kwargs: SimpleNamespace(duration_ms=1000))
     monkeypatch.setattr("livecut.cli.ocr_model_id", lambda: "rapidocr-synthetic")
     analyze = Mock(return_value={"status": "preview_disabled"})
@@ -59,6 +62,41 @@ def test_analyze_cli_maps_cached_evidence_to_this_output_directory(tmp_path, mon
     supplied = analyze.call_args.kwargs["visual_observations"]
     assert supplied[0]["object_key"] == str((tmp_path / "analysis-ocr/frames/ocr_000001.jpg").resolve())
     assert supplied[0]["observed_text"] == "合成验证文字"
+    assert cached.call_args.kwargs["sampling_policy"] == "uniform"
+
+
+@pytest.mark.parametrize("strategy", ["prefix", "uniform"])
+def test_ocr_cli_records_explicit_local_sampling_strategy(tmp_path, monkeypatch, strategy):
+    cached = Mock(side_effect=materialize)
+    monkeypatch.setattr("livecut.cli.cached_observe_video_ocr", cached)
+    monkeypatch.setattr("livecut.cli.probe_media", lambda *args, **kwargs: SimpleNamespace(duration_ms=1000))
+    with contextlib.redirect_stdout(io.StringIO()):
+        assert main(["ocr", str(tmp_path / "source.mp4"), "--output-dir", str(tmp_path / "out"),
+                     "--cache-root", str(tmp_path / "cache"), "--ocr-sampling", strategy]) == 0
+    assert cached.call_args.kwargs["sampling_policy"] == strategy
+
+
+def test_uniform_policy_never_changes_paid_vision_sampling(tmp_path, monkeypatch):
+    observed = Mock(side_effect=AssertionError("Uniform is local OCR only"))
+    monkeypatch.setattr("livecut.cli.observe_video", observed)
+    monkeypatch.setattr("livecut.cli.probe_media", Mock(side_effect=AssertionError("Fail before any processing")))
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        assert main(["analyze", str(tmp_path / "source.mp4"), "--output-dir", str(tmp_path / "out"),
+                     "--visual-provider", "api", "--ocr-sampling", "uniform"]) == 2
+    assert json.loads(output.getvalue())["error_code"] == "INVALID_CONFIGURATION"
+    observed.assert_not_called()
+
+
+def test_api_vision_omitted_local_strategy_retains_legacy_arguments(tmp_path, monkeypatch):
+    observed = Mock(return_value=[])
+    monkeypatch.setattr("livecut.cli.observe_video", observed)
+    monkeypatch.setattr("livecut.cli.probe_media", lambda *args, **kwargs: SimpleNamespace(duration_ms=1000))
+    monkeypatch.setattr("livecut.cli.analyze_video", Mock(return_value={"status": "preview_disabled"}))
+    with contextlib.redirect_stdout(io.StringIO()):
+        assert main(["analyze", str(tmp_path / "source.mp4"), "--output-dir", str(tmp_path / "out"),
+                     "--visual-provider", "api"]) == 0
+    assert "sampling_policy" not in observed.call_args.kwargs
 
 
 def segment_context(tmp_path, visual="ocr"):
@@ -90,6 +128,21 @@ def test_worker_anchors_copied_ocr_and_provenance_in_current_attempt_manifest(tm
     assert supplied[0]["object_key"] == ctx.lease.attempt_key + "/ocr/frames/ocr_000001.jpg"
     assert cached.call_args.kwargs["cache_root"] == _native_path(ctx.storage_root / "cache/ocr-v1")
     assert callable(cached.call_args.kwargs["guard"])
+    assert cached.call_args.kwargs["sampling_policy"] == "prefix"
+
+
+@pytest.mark.parametrize("strategy", ["prefix", "uniform"])
+def test_worker_uses_frozen_job_sampling_config(tmp_path, monkeypatch, strategy):
+    ctx = segment_context(tmp_path)
+    ctx.lease.config["ocr_sampling"] = strategy
+    cached = Mock(side_effect=materialize)
+    monkeypatch.setattr("livecut.worker.cached_observe_video_ocr", cached)
+    monkeypatch.setattr("livecut.worker.ocr_model_id", lambda: "rapidocr-synthetic")
+    monkeypatch.setattr("livecut.worker.discover_products", lambda *args, **kwargs:
+                        _write(ctx.directory / "analysis-result.json", {"synthetic_fixture": True}))
+    AnalysisStageExecutor(transport_factory=lambda *args: httpx.MockTransport(
+        lambda request: (_ for _ in ()).throw(AssertionError("Provider path forbidden"))))(ctx)
+    assert cached.call_args.kwargs["sampling_policy"] == strategy
 
 
 def test_worker_corrupt_cache_stops_before_any_model_transport(tmp_path, monkeypatch):
