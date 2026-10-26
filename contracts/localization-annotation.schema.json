@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:livecut:localization-annotation:1.0",
+  "title": "Catalog-free localization reference with explicit annotation provenance",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "data_kind", "video_id", "source_sha256", "duration_ms", "annotation_status", "provenance", "annotated_ranges", "segments"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "data_kind": {"const": "localization_annotation"},
+    "video_id": {"$ref": "#/$defs/id"},
+    "source_sha256": {"type": "string", "minLength": 64, "maxLength": 64, "pattern": "^[a-f0-9]{64}$"},
+    "duration_ms": {"type": "integer", "minimum": 1, "maximum": 9007199254740991},
+    "annotation_status": {"enum": ["not_annotated", "partially_annotated", "fully_annotated"]},
+    "provenance": {
+      "type": "object", "additionalProperties": false,
+      "required": ["label_source", "split", "original_video_id", "independently_reviewed"],
+      "properties": {
+        "label_source": {"enum": ["unlabeled", "human", "agent_assisted", "synthetic_fixture"]},
+        "split": {"enum": ["dev", "test"]},
+        "original_video_id": {"$ref": "#/$defs/id"},
+        "independently_reviewed": {"type": "boolean"}
+      }
+    },
+    "annotated_ranges": {"type": "array", "maxItems": 500, "items": {"$ref": "#/$defs/range"}},
+    "segments": {
+      "type": "array", "maxItems": 500,
+      "items": {
+        "type": "object", "additionalProperties": false, "required": ["id", "start_ms", "end_ms"],
+        "properties": {"id": {"$ref": "#/$defs/id"}, "start_ms": {"$ref": "#/$defs/ms"}, "end_ms": {"$ref": "#/$defs/ms"}}
+      }
+    },
+    "notes": {"type": "string", "maxLength": 2000}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"annotation_status": {"const": "not_annotated"}}},
+      "then": {"properties": {"annotated_ranges": {"maxItems": 0}, "segments": {"maxItems": 0}, "provenance": {"properties": {"label_source": {"const": "unlabeled"}, "independently_reviewed": {"const": false}}}}},
+      "else": {"properties": {"annotated_ranges": {"minItems": 1}, "provenance": {"properties": {"label_source": {"enum": ["human", "agent_assisted", "synthetic_fixture"]}}}}}
+    },
+    {
+      "if": {"properties": {"annotation_status": {"const": "fully_annotated"}}},
+      "then": {"properties": {"annotated_ranges": {"minItems": 1, "maxItems": 1, "items": {"properties": {"start_ms": {"const": 0}}}}}}
+    },
+    {
+      "if": {"properties": {"provenance": {"properties": {"label_source": {"enum": ["unlabeled", "agent_assisted", "synthetic_fixture"]}}}}},
+      "then": {"properties": {"provenance": {"properties": {"independently_reviewed": {"const": false}}}}}
+    }
+  ],
+  "$defs": {
+    "id": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$", "not": {"pattern": "\\s"}},
+    "ms": {"type": "integer", "minimum": 0, "maximum": 9007199254740991},
+    "range": {
+      "type": "object", "additionalProperties": false, "required": ["start_ms", "end_ms"],
+      "properties": {"start_ms": {"$ref": "#/$defs/ms"}, "end_ms": {"$ref": "#/$defs/ms"}}
+    }
+  }
+}

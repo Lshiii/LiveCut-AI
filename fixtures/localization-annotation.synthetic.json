@@ -1,0 +1,21 @@
+{
+  "schema_version": "1.0",
+  "data_kind": "localization_annotation",
+  "video_id": "fixture_video_001",
+  "source_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "duration_ms": 90000,
+  "annotation_status": "fully_annotated",
+  "provenance": {
+    "label_source": "synthetic_fixture",
+    "split": "dev",
+    "original_video_id": "synthetic_original_001",
+    "independently_reviewed": false
+  },
+  "annotated_ranges": [{"start_ms": 0, "end_ms": 90000}],
+  "segments": [
+    {"id": "g_001", "start_ms": 5000, "end_ms": 25000},
+    {"id": "g_002", "start_ms": 35000, "end_ms": 50000},
+    {"id": "g_003", "start_ms": 65000, "end_ms": 85000}
+  ],
+  "notes": "Hand-computable synthetic intervals for contracts/analysis-result.example.json only. The source digest is a placeholder, no media or human gold is claimed."
+}

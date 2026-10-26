@@ -10,6 +10,9 @@ from pathlib import Path
 
 from .asr import ASRError, transcribe_file
 from .contracts import ContractValidationError, validate_analysis_result
+from .evaluation import EvaluationError
+from .evaluation_inputs import EvaluationInputError, load_json, validate_annotation
+from .evaluation_runner import annotation_template, audit_files, evaluate_files
 from .inputs import DatasetValidationError, validate_dataset_manifest
 from .media import MediaError, export_clip, extract_audio, probe_media
 from .model_budget import ModelBudgetError
@@ -42,6 +45,28 @@ def main(argv: list[str] | None = None) -> int:
     dataset = sub.add_parser("validate-dataset", help="Check source tracking and split leakage")
     dataset.add_argument("path", type=Path)
     dataset.add_argument("--metadata-only", action="store_true", help="Do not check local video files")
+    annotation = sub.add_parser("init-annotation", help="Create a source-bound, explicitly unlabeled reference template")
+    annotation.add_argument("source", type=Path)
+    annotation.add_argument("--video-id", required=True)
+    annotation.add_argument("--original-video-id", required=True)
+    annotation.add_argument("--split", choices=("dev", "test"), default="dev")
+    annotation.add_argument("--output", type=Path, required=True)
+    annotation.add_argument("--ffprobe", default=os.environ.get("LIVECUT_FFPROBE_PATH", "ffprobe"))
+    annotation_check = sub.add_parser("validate-annotation", help="Validate reference metadata without inventing missing labels")
+    annotation_check.add_argument("path", type=Path)
+    annotation_check.add_argument("--require-annotated", action="store_true")
+    evaluation = sub.add_parser("evaluate-localization", help="Offline class-agnostic localization against separately annotated intervals")
+    evaluation.add_argument("prediction", type=Path)
+    evaluation.add_argument("annotation", type=Path)
+    evaluation.add_argument("--iou-threshold", action="append", dest="thresholds")
+    audit = sub.add_parser("audit-localization", help="Inspect a bound machine result without computing quality scores")
+    audit.add_argument("prediction", type=Path)
+    for command in (evaluation, audit):
+        command.add_argument("--source", type=Path)
+        command.add_argument("--prediction-manifest", type=Path)
+        command.add_argument("--fixture", action="store_true", help="Synthetic inputs only; no real quality conclusion")
+        command.add_argument("--output-dir", type=Path, required=True)
+        command.add_argument("--ffprobe", default=os.environ.get("LIVECUT_FFPROBE_PATH", "ffprobe"))
     sub.add_parser("doctor", help="Report tools and credential presence, never secret values")
     worker = sub.add_parser("worker", help="Execute leased Java stages with durable model budgets")
     worker.add_argument("--java-url", default=os.environ.get("LIVECUT_JAVA_URL", "http://127.0.0.1:8080"))
@@ -147,6 +172,29 @@ def main(argv: list[str] | None = None) -> int:
             validate_analysis_result(data, schema_path=args.schema)
             _emit({"status": "valid", "schema_version": data["schema_version"],
                    "data_kind": data["data_kind"], "segments": len(data["segments"])})
+        elif args.command == "init-annotation":
+            document = annotation_template(args.source, video_id=args.video_id,
+                                           original_video_id=args.original_video_id, split=args.split,
+                                           ffprobe_path=args.ffprobe)
+            args.output.parent.mkdir(parents=True, exist_ok=True)
+            with args.output.open("x", encoding="utf-8") as output:
+                output.write(json.dumps(document, ensure_ascii=False, indent=2) + "\n")
+            _emit({"status": "created", "annotation_status": "not_annotated", "scorable": False})
+        elif args.command == "validate-annotation":
+            document = load_json(args.path)
+            validate_annotation(document, require_annotated=args.require_annotated)
+            _emit({"status": "valid", "annotation_status": document["annotation_status"],
+                   "scorable": document["annotation_status"] != "not_annotated"})
+        elif args.command in {"evaluate-localization", "audit-localization"}:
+            common = {"output_dir": args.output_dir, "source": args.source,
+                      "prediction_manifest": args.prediction_manifest, "fixture": args.fixture,
+                      "ffprobe_path": args.ffprobe}
+            report = (evaluate_files(args.prediction, args.annotation,
+                                     thresholds=args.thresholds or ("0.3", "0.5", "0.7"), **common)
+                      if args.command == "evaluate-localization" else audit_files(args.prediction, **common))
+            _emit({"status": "ok", "report_kind": report["report_kind"], "data_scope": report["data_scope"],
+                   "report_path": str(args.output_dir / "report.json"),
+                   "html_path": str(args.output_dir / "index.html")})
         elif args.command == "validate-dataset":
             data = _read_json(args.path)
             validate_dataset_manifest(data, base_dir=args.path.resolve().parent,
@@ -231,7 +279,7 @@ def main(argv: list[str] | None = None) -> int:
                    "credentials_verified": False})
         return 0
     except (MediaError, ASRError, SegmentationError, PipelineError, VisionError,
-            WorkerError, WorkerClientError, ModelBudgetError) as exc:
+            WorkerError, WorkerClientError, ModelBudgetError, EvaluationError, EvaluationInputError) as exc:
         _emit({"status": "error", "error_code": exc.code, "message": str(exc)})
         return 2
     except (ContractValidationError, DatasetValidationError, ValueError, OSError) as exc:

@@ -28,3 +28,9 @@ uv run pytest worker-python/tests/test_contracts.py worker-python/tests/test_inp
 ```
 
 数据集示例的媒体路径为占位。去掉 --metadata-only 后会检查本地文件，不能把元数据模板当真实素材验收。
+
+## 独立定位参考
+
+`localization-annotation.schema.json` 定义无 SKU 的离线参考标注，要求实际源 SHA256、时长、原场次、明确的标注范围和来源声明。`fixtures/localization-annotation.synthetic.json` 仅用于合成手算验证；旧 `annotation.example.json` 的空模板仍不代表背景。
+
+`livecut evaluate-localization` 对未经人工修改的 DRAFT 预测做来源绑定及一对一定位评测；没有参考时使用 `livecut audit-localization`，不会输出质量分数。完整命令和部分标注口径见 [离线定位评测](../docs/23-离线定位评测与证据审计.md)。
