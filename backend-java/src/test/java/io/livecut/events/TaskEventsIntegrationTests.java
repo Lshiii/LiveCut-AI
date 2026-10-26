@@ -147,6 +147,32 @@ class TaskEventsIntegrationTests {
         await(() -> events().activeConnections() == 0 && events().resourceCount() == 0, 3000);
     }
 
+    @Test void aFencedFailurePushesItsPersistedDiagnosticAndReconnectRehydratesTheSameTerminalSnapshot() throws Exception {
+        RunningStage fixture = runningTextStage();
+        JsonNode initial = get("/api/jobs/" + fixture.jobId());
+        JsonNode current;
+        try (SseConnection stream = open("jobs", fixture.jobId(), null)) {
+            assertSnapshot(stream.snapshot(), "job", fixture.jobId(), initial);
+            Map<String, Object> diagnostic = Map.of("reason_code", "ASSIGNMENT_KEYS_MISMATCH", "window_index", 8,
+                    "window_count", 10, "extra_context_id_count", 3, "format_repair", "FAILED_VALIDATION");
+            ok(worker("POST", "/internal/stages/" + fixture.stageId() + "/fail", Map.of("attempt", 1,
+                    "run_token", fixture.token(), "error_code", "INVALID_MODEL_OUTPUT", "retryable", false, "diagnostic", diagnostic)));
+            current = get("/api/jobs/" + fixture.jobId());
+            JsonNode summary = stage(current, "SEGMENT").path("diagnostic");
+            assertEquals(8, summary.path("window_index").asInt());
+            assertEquals("CHECK_FORMAT_THEN_RETRY", summary.path("suggestion_code").asText());
+            assertEquals(summary, JSON.readTree(jdbc().queryForObject("SELECT diagnostic_json FROM job_stage WHERE id=?", String.class, fixture.stageId())));
+            assertSnapshot(stream.snapshot(), "job", fixture.jobId(), current);
+            stream.end();
+        }
+        String last = "job:" + fixture.jobId() + ":" + current.path("state_version").asLong();
+        try (SseConnection replay = open("jobs", fixture.jobId(), last)) {
+            assertSnapshot(replay.snapshot(), "job", fixture.jobId(), current);
+            replay.end();
+        }
+        assertFalse(current.toString().contains(fixture.token()));
+    }
+
     @Test void realBudgetReservationPushesAFullSnapshotWithoutCallingAModel() throws Exception {
         RunningStage fixture = runningTextStage();
         JsonNode initial = get("/api/jobs/" + fixture.jobId());

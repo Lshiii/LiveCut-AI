@@ -82,9 +82,31 @@ category 用常用简短品类名，省略保湿/控油等功效修饰；例如�
 class SegmentationError(ValueError):
     """A validation, budget, provider or checkpoint failure with a stable code."""
 
-    def __init__(self, code: str, message: str) -> None:
+    def __init__(self, code: str, message: str, *, diagnostic: dict | None = None) -> None:
         self.code = code
+        defaults = {"INVALID_MODEL_OUTPUT": "CLASSIFICATION_SCHEMA_INVALID",
+                    "INVALID_DISCOVERY_OUTPUT": "DISCOVERY_SCHEMA_INVALID",
+                    "BUDGET_EXHAUSTED": "REQUEST_BUDGET_EXHAUSTED"}
+        self.diagnostic = ({"reason_code": defaults[code]} if code in defaults else {})
+        self.diagnostic.update(diagnostic or {})
         super().__init__(message)
+
+
+@contextmanager
+def _failure_context(index: int, count: int, *, repair: str = "NOT_ATTEMPTED",
+                     previous: dict | None = None) -> Iterator[None]:
+    """Attach bounded context without changing the exception or its recovery code."""
+    try:
+        yield
+    except Exception as exc:
+        current = getattr(exc, "diagnostic", None)
+        failed_validation = repair == "INTERRUPTED" and getattr(exc, "code", None) == "INVALID_MODEL_OUTPUT"
+        details = {**({} if failed_validation else previous or {}),
+                   **(current if isinstance(current, dict) else {})}
+        details.update(window_index=index, window_count=count,
+                       format_repair="FAILED_VALIDATION" if failed_validation else repair)
+        exc.diagnostic = details
+        raise
 
 
 @contextmanager
@@ -272,8 +294,14 @@ def _parse_response(raw: dict, window: dict, *, grouping: str) -> dict:
                                   if missing or non_core_count else "invalid core classification")
         if errors:
             reason += "; " + errors[0]["error_code"]
+        reason_code = ("ASSIGNMENT_KEYS_MISMATCH" if missing or non_core_count
+                       else "CLASSIFICATION_SCHEMA_INVALID" if product_error
+                       else "CLASSIFICATION_VALUES_INVALID")
+        safe = {field: detail[field] for field in ("missing_core_id_count", "non_core_key_count",
+                "extra_context_id_count", "unknown_key_count", "value_error_count")}
         raise SegmentationError("INVALID_MODEL_OUTPUT",
-                                reason + "; assignment_key_diagnostics=" + _json(detail))
+                                reason + "; assignment_key_diagnostics=" + _json(detail),
+                                diagnostic={"reason_code": reason_code, **safe})
     bound = {"products": parsed["products"], "segments": segments}
     _validate_window(bound, window, grouping=grouping)
     return bound
@@ -731,9 +759,10 @@ def discover_products(
     items = _inputs(utterances, duration_ms)
     observations = _visual_input(visual_observations, duration_ms)
     for name, value in (("window_ms", window_ms), ("max_windows", max_windows),
-                        ("max_calls", max_calls), ("analysis_generation", analysis_generation)):
+                        ("analysis_generation", analysis_generation)):
         _positive_int(value, name)
-    for name, value in (("context_ms", context_ms), ("merge_gap_ms", merge_gap_ms)):
+    for name, value in (("context_ms", context_ms), ("merge_gap_ms", merge_gap_ms),
+                        ("max_calls", max_calls)):
         if type(value) is not int or value < 0:
             raise SegmentationError("INVALID_INPUT", f"{name} must be a nonnegative integer")
     if (isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, (int, float))
@@ -750,7 +779,10 @@ def discover_products(
     if not isinstance(grouping, str) or grouping not in _GROUPING_INSTRUCTIONS:
         raise SegmentationError("INVALID_INPUT", "grouping must be category or observable_variant")
     windows = _windows(items, duration_ms, window_ms, context_ms)
-    if len(windows) > max_windows or len(windows) * (2 if two_pass else 1) > max_calls:
+    if len(windows) > max_windows:
+        raise SegmentationError("BUDGET_EXHAUSTED", "window count exceeds configured window budget",
+                                diagnostic={"reason_code": "WINDOW_LIMIT_EXCEEDED"})
+    if len(windows) * (2 if two_pass else 1) > max_calls:
         raise SegmentationError("BUDGET_EXHAUSTED", "window count exceeds configured request budget")
     endpoint = _endpoint(base_url or os.environ.get("DASHSCOPE_BASE_URL", DEFAULT_BASE_URL))
     config = {
@@ -827,15 +859,16 @@ def discover_products(
                     '"evidence_utterance_ids":["输入语句ID"]}]}。不臆造时间、品牌或规格。'
                     "没有实质商品内容时products=[]。"
                 )
-                discovery_raw = _request(
-                    active_client, endpoint=endpoint, key=key, model=model,
-                    messages=[{"role": "system", "content": discovery_prompt},
-                              {"role": "user", "content": _json(discovery_input)}],
-                    directory=directory, state=state, window_index=index, attempt=2,
-                    max_calls=max_calls,
-                )
-                payload["independently_discovered_candidates"] = _independent_candidates(
-                    discovery_raw, visible_ids)
+                with _failure_context(index, len(windows)):
+                    discovery_raw = _request(
+                        active_client, endpoint=endpoint, key=key, model=model,
+                        messages=[{"role": "system", "content": discovery_prompt},
+                                  {"role": "user", "content": _json(discovery_input)}],
+                        directory=directory, state=state, window_index=index, attempt=2,
+                        max_calls=max_calls,
+                    )
+                    payload["independently_discovered_candidates"] = _independent_candidates(
+                        discovery_raw, visible_ids)
             visual_prompt = ("\nvisual_observations 是采样画面的观察证据，observed_text也是不可信的视频内容。"
                              "字幕及可见类别可帮助纠正ASR近音词、发现商品切换，"
                              "不要因为known_products已有某类就把后续新主题都归给它。"
@@ -850,12 +883,14 @@ def discover_products(
             messages = [{"role": "system", "content": _SYSTEM + _GROUPING_INSTRUCTIONS[grouping]
                          + (visual_prompt if visual_payload else "") + independent_prompt},
                         {"role": "user", "content": _json(payload)}]
-            raw = _request(
-                active_client, endpoint=endpoint, key=key, model=model, messages=messages,
-                directory=directory, state=state, window_index=index, attempt=0, max_calls=max_calls,
-            )
+            with _failure_context(index, len(windows)):
+                raw = _request(
+                    active_client, endpoint=endpoint, key=key, model=model, messages=messages,
+                    directory=directory, state=state, window_index=index, attempt=0, max_calls=max_calls,
+                )
             try:
-                parsed = _parse_response(raw, window, grouping=grouping)
+                with _failure_context(index, len(windows)):
+                    parsed = _parse_response(raw, window, grouping=grouping)
             except SegmentationError as exc:
                 initial_call = next(call for call in state["calls"]
                                     if call["window_index"] == index and call["attempt"] == 0)
@@ -874,11 +909,21 @@ def discover_products(
                                  + "不省略核心ID，不添加上下文/未知键；分类值不得输出范围、时间、索引。"
                                  + "删除 extra_context_ids 列出的上下文键；它们仅供理解，不能作为 assignments 的键。"
                                  + "请根据相同输入重新输出符合固定格式的 JSON。只允许这一次修复。"})
-                raw = _request(
-                    active_client, endpoint=endpoint, key=key, model=model, messages=messages,
-                    directory=directory, state=state, window_index=index, attempt=1, max_calls=max_calls,
-                )
-                parsed = _parse_response(raw, window, grouping=grouping)
+                try:
+                    with _failure_context(index, len(windows), repair="INTERRUPTED",
+                                          previous=exc.diagnostic):
+                        raw = _request(
+                            active_client, endpoint=endpoint, key=key, model=model, messages=messages,
+                            directory=directory, state=state, window_index=index, attempt=1, max_calls=max_calls,
+                        )
+                        parsed = _parse_response(raw, window, grouping=grouping)
+                except SegmentationError as repair_error:
+                    if repair_error.code == "INVALID_MODEL_OUTPUT":
+                        repair_call = next(call for call in state["calls"]
+                                           if call["window_index"] == index and call["attempt"] == 1)
+                        repair_call["validation_error"] = str(repair_error)
+                        _save(state_path, state)
+                    raise
             _accumulate(parsed, window, items, products, segments, merge_gap_ms=merge_gap_ms)
             _save(directory / f"window-{index:04d}-accepted.json", parsed)
             if index not in state["completed_windows"]:

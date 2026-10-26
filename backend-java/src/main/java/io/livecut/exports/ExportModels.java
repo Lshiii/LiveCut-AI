@@ -3,8 +3,10 @@ package io.livecut.exports;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.List;
+import java.util.Map;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
+import com.fasterxml.jackson.annotation.JsonInclude;
 
 public final class ExportModels {
     private ExportModels() {}
@@ -20,7 +22,15 @@ public final class ExportModels {
                        @JsonProperty("error_code") String errorCode,
                        @JsonProperty("size_bytes") Long sizeBytes,
                        @JsonProperty("content_url") String contentUrl,
-                       @JsonProperty("download_url") String downloadUrl) {}
+                       @JsonProperty("download_url") String downloadUrl,
+                       @JsonInclude(JsonInclude.Include.NON_NULL) Map<String, Object> diagnostic) {
+        public Clip(String id, String segmentId, String productId, String productName,
+                    long startMs, long endMs, String stageId, String status, int attempt,
+                    String errorCode, Long sizeBytes, String contentUrl, String downloadUrl) {
+            this(id, segmentId, productId, productName, startMs, endMs, stageId, status, attempt,
+                    errorCode, sizeBytes, contentUrl, downloadUrl, null);
+        }
+    }
     public record Snapshot(String id, @JsonProperty("job_id") String jobId,
                            @JsonProperty("video_id") String videoId,
                            @JsonProperty("approved_revision") long approvedRevision,

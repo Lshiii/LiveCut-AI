@@ -20,6 +20,7 @@ import java.util.UUID;
 import io.livecut.jobs.ArtifactVerifier;
 import io.livecut.jobs.JobException;
 import io.livecut.jobs.JobModels.StageRow;
+import io.livecut.jobs.StageDiagnostics;
 import io.livecut.review.ReviewModels;
 import io.livecut.review.ReviewService;
 import org.springframework.beans.factory.annotation.Value;
@@ -158,7 +159,7 @@ public class ExportService {
             Map<String, Object> clip = clip(id, clipId, true);
             if (!"FAILED".equals(clip.get("status"))) { throw conflict("EXPORT_CLIP_NOT_RETRYABLE", "Only this export's failed clip may be retried"); }
             if (((Number) clip.get("attempt")).intValue() >= maxAttempts) { throw conflict("ATTEMPTS_EXHAUSTED", "Clip execution attempts are exhausted"); }
-            jdbc.update("UPDATE job_stage SET status='READY',run_token=NULL,worker_id=NULL,lease_until=NULL,hard_deadline_at=NULL,next_run_at=CURRENT_TIMESTAMP(6),error_code=NULL,updated_at=CURRENT_TIMESTAMP(6) WHERE id=?",
+            jdbc.update("UPDATE job_stage SET status='READY',run_token=NULL,worker_id=NULL,lease_until=NULL,hard_deadline_at=NULL,next_run_at=CURRENT_TIMESTAMP(6),error_code=NULL,diagnostic_json=NULL,updated_at=CURRENT_TIMESTAMP(6) WHERE id=?",
                     clip.get("stage_id"));
             refreshLocked(id);
             return snapshot(lockOwner(id, String.valueOf(owner.get("job_id"))));
@@ -257,14 +258,15 @@ public class ExportService {
 
     private Snapshot snapshot(Map<String, Object> owner) {
         String id = String.valueOf(owner.get("id"));
-        List<Clip> clips = jdbc.query("SELECT c.*,s.status,s.attempt,s.error_code FROM export_clip c JOIN job_stage s ON s.id=c.stage_id WHERE c.export_id=? ORDER BY c.start_ms,c.id",
+        List<Clip> clips = jdbc.query("SELECT c.*,s.status,s.attempt,s.error_code,s.diagnostic_json FROM export_clip c JOIN job_stage s ON s.id=c.stage_id WHERE c.export_id=? ORDER BY c.start_ms,c.id",
                 (row, index) -> {
                     boolean ready = "SUCCEEDED".equals(row.getString("status"));
                     String url = ready ? "/api/exports/" + id + "/clips/" + row.getString("id") + "/content" : null;
                     Number size = (Number) row.getObject("size_bytes");
                     return new Clip(row.getString("id"), row.getString("segment_id"), row.getString("product_id"), row.getString("product_name"),
                             row.getLong("start_ms"), row.getLong("end_ms"), row.getString("stage_id"), row.getString("status"), row.getInt("attempt"),
-                            row.getString("error_code"), size == null ? null : size.longValue(), url, url == null ? null : url + "?download=true");
+                            row.getString("error_code"), size == null ? null : size.longValue(), url, url == null ? null : url + "?download=true",
+                            StageDiagnostics.read(row.getString("diagnostic_json"), row.getString("error_code"), row.getInt("attempt")));
                 }, id);
         return new Snapshot(id, String.valueOf(owner.get("job_id")), String.valueOf(owner.get("video_id")), ((Number) owner.get("approved_revision")).longValue(),
                 String.valueOf(owner.get("snapshot_hash")), String.valueOf(owner.get("encoding_profile")), String.valueOf(owner.get("status")),
@@ -282,7 +284,8 @@ public class ExportService {
                 row.getString("shard_key"), row.getString("status"), row.getInt("attempt"), row.getString("run_token"), row.getString("worker_id"),
                 timestampInstant(row.getTimestamp("lease_until")), timestampInstant(row.getTimestamp("hard_deadline_at")), timestampInstant(row.getTimestamp("next_run_at")),
                 row.getString("input_hash"), row.getString("checkpoint_key"), row.getString("checkpoint_hash"), row.getString("manifest_key"), row.getString("manifest_hash"), row.getString("error_code"),
-                row.getString("owner_type"), row.getString("owner_id")), id);
+                row.getString("owner_type"), row.getString("owner_id"),
+                StageDiagnostics.read(row.getString("diagnostic_json"), row.getString("error_code"), row.getInt("attempt"))), id);
     }
 
     private static Instant timestampInstant(Timestamp value) { return value == null ? null : value.toInstant(); }

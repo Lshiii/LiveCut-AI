@@ -107,6 +107,7 @@ select { border: 1px solid #e0e7d9; border-radius: 5px; background: #fff; paddin
 .detail-status > span:last-child { font-size: 10px; color: #8fa580; }
 .stages { padding: 0; list-style: none; margin: 24px 0; }
 .stages li { display: flex; gap: 13px; padding-bottom: 22px; position: relative; }
+.stages li > div { min-width: 0; flex: 1; }
 .stages li:not(:last-child):before { content: ''; position: absolute; left: 11px; top: 23px; width: 1px; height: 100%; background: #e4eddb; }
 .step { width: 23px; height: 23px; border-radius: 50%; background: #eff4e9; color: #99af89; display: flex; align-items: center; justify-content: center; font-size: 10px; flex-shrink: 0; z-index: 1; }
 .succeeded .step { background: #e6f0e1; color: #6f935e; }

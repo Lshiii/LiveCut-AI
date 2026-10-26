@@ -1,3 +1,5 @@
+import type { StageDiagnostic } from './diagnostics'
+
 export interface VideoAsset {
   id: string
   original_filename: string
@@ -7,7 +9,7 @@ export interface VideoAsset {
   media_validation_status: string
   created_at: string
 }
-export interface Stage { id: string; stage_type: string; status: string; attempt: number; error_code: string | null }
+export interface Stage { id: string; stage_type: string; status: string; attempt: number; error_code: string | null; diagnostic?: StageDiagnostic }
 export interface JobActions {
   can_cancel: boolean
   can_retry: boolean
@@ -22,7 +24,7 @@ export interface AnalysisJob {
 export interface ExportClip {
   id: string; segment_id: string; product_id: string; product_name: string
   start_ms: number; end_ms: number; stage_id: string; status: string; attempt: number
-  error_code: string | null; size_bytes: number | null; content_url: string | null; download_url: string | null
+  error_code: string | null; size_bytes: number | null; content_url: string | null; download_url: string | null; diagnostic?: StageDiagnostic
 }
 export interface ExportJob {
   id: string; job_id: string; video_id: string; approved_revision: number; snapshot_hash: string

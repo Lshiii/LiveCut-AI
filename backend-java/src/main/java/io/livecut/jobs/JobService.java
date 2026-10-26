@@ -45,7 +45,8 @@ public class JobService {
             instant(row, "lease_until"), instant(row, "hard_deadline_at"), instant(row, "next_run_at"),
             row.getString("input_hash"), row.getString("checkpoint_key"), row.getString("checkpoint_hash"),
             row.getString("manifest_key"), row.getString("manifest_hash"), row.getString("error_code"),
-            row.getString("owner_type"), row.getString("owner_id"));
+            row.getString("owner_type"), row.getString("owner_id"),
+            StageDiagnostics.read(row.getString("diagnostic_json"), row.getString("error_code"), row.getInt("attempt")));
     private final JdbcTemplate jdbc;
     private final TransactionTemplate transaction;
     private final ArtifactVerifier artifactVerifier;
@@ -154,7 +155,7 @@ public class JobService {
                         : "Only failed jobs with failed stages can be retried";
                 throw conflict(actions.retryBlockReason(), message);
             }
-            jdbc.update("UPDATE job_stage SET status='READY',run_token=NULL,worker_id=NULL,lease_until=NULL,hard_deadline_at=NULL,next_run_at=CURRENT_TIMESTAMP(6),error_code=NULL,updated_at=CURRENT_TIMESTAMP(6) WHERE job_id=? AND owner_type='ANALYSIS' AND status='FAILED'", id);
+            jdbc.update("UPDATE job_stage SET status='READY',run_token=NULL,worker_id=NULL,lease_until=NULL,hard_deadline_at=NULL,next_run_at=CURRENT_TIMESTAMP(6),error_code=NULL,diagnostic_json=NULL,updated_at=CURRENT_TIMESTAMP(6) WHERE job_id=? AND owner_type='ANALYSIS' AND status='FAILED'", id);
             touch(id, "RUNNING");
             return snapshot(job(id, true));
         });
@@ -224,7 +225,7 @@ public class JobService {
             String token = UUID.randomUUID().toString();
             Instant deadline = now.plusSeconds(hardDeadlineSeconds);
             Instant lease = minimum(now.plusSeconds(leaseSeconds), deadline);
-            jdbc.update("UPDATE job_stage SET status='RUNNING',attempt=attempt+1,run_token=?,worker_id=?,lease_until=?,hard_deadline_at=?,error_code=NULL,updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND status='READY'",
+            jdbc.update("UPDATE job_stage SET status='RUNNING',attempt=attempt+1,run_token=?,worker_id=?,lease_until=?,hard_deadline_at=?,error_code=NULL,diagnostic_json=NULL,updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND status='READY'",
                     token, worker, timestamp(lease), timestamp(deadline), stageId);
             StageRow current = stage(stageId, true);
             jdbc.update("UPDATE stage_claim_request SET outcome='CLAIMED',attempt=?,run_token=? WHERE worker_id=? AND claim_request_id=?", current.attempt(), token, worker, claimId);
@@ -288,7 +289,7 @@ public class JobService {
             artifactKey(stage, request.manifestKey(), true);
             hash(request.manifestHash(), "INVALID_MANIFEST_HASH");
             var manifest = verifyResult(stage, job, request);
-            jdbc.update("UPDATE job_stage SET status='SUCCEEDED',lease_until=NULL,manifest_key=?,manifest_hash=?,error_code=NULL,updated_at=CURRENT_TIMESTAMP(6) WHERE id=?", request.manifestKey(), request.manifestHash(), id);
+            jdbc.update("UPDATE job_stage SET status='SUCCEEDED',lease_until=NULL,manifest_key=?,manifest_hash=?,error_code=NULL,diagnostic_json=NULL,updated_at=CURRENT_TIMESTAMP(6) WHERE id=?", request.manifestKey(), request.manifestHash(), id);
             if (isExport(stage)) { exports.recordSuccess(stage, manifest); }
             else { advance(jobId, stage.stageType()); }
             touchParent(stage, null);
@@ -302,10 +303,11 @@ public class JobService {
         }
         return transaction.execute(status -> {
             LockedStage locked = lockActiveStage(stageId, request.credential());
+            Map<String, Object> diagnostic = StageDiagnostics.create(request.diagnostic(), request.errorCode(), locked.stage().attempt());
             if (request.retryable() && locked.stage().attempt() < maxAttempts) {
-                retryWait(locked.stage(), request.errorCode(), locked.dbNow());
+                retryWait(locked.stage(), request.errorCode(), locked.dbNow(), diagnostic);
                 touchParent(locked.stage(), null);
-            } else { terminalFailure(locked.stage(), request.errorCode()); }
+            } else { terminalFailure(locked.stage(), request.errorCode(), diagnostic); }
             return action("ACCEPTED", locked.stage().id());
         });
     }
@@ -353,16 +355,29 @@ public class JobService {
     }
 
     private void retryWait(StageRow stage, String code, Instant now) {
-        jdbc.update("UPDATE job_stage SET status='RETRY_WAIT',run_token=NULL,worker_id=NULL,lease_until=NULL,hard_deadline_at=NULL,next_run_at=?,error_code=?,last_retryable=TRUE,updated_at=CURRENT_TIMESTAMP(6) WHERE id=?", timestamp(now.plusSeconds(retryDelaySeconds)), code, stage.id());
+        retryWait(stage, code, now, StageDiagnostics.create(null, code, stage.attempt()));
+    }
+
+    private void retryWait(StageRow stage, String code, Instant now, Map<String, Object> diagnostic) {
+        jdbc.update("UPDATE job_stage SET status='RETRY_WAIT',run_token=NULL,worker_id=NULL,lease_until=NULL,hard_deadline_at=NULL,next_run_at=?,error_code=?,diagnostic_json=?,last_retryable=TRUE,updated_at=CURRENT_TIMESTAMP(6) WHERE id=?", timestamp(now.plusSeconds(retryDelaySeconds)), code, StageDiagnostics.json(diagnostic), stage.id());
     }
 
     private void terminalFailure(StageRow stage, String code) {
-        if (!isExport(stage)) { stages(stage.jobId(), true); }
-        jdbc.update("UPDATE job_stage SET status='FAILED',run_token=NULL,worker_id=NULL,lease_until=NULL,hard_deadline_at=NULL,error_code=?,last_retryable=FALSE,updated_at=CURRENT_TIMESTAMP(6) WHERE id=?", code, stage.id());
+        terminalFailure(stage, code, StageDiagnostics.create(null, code, stage.attempt()));
+    }
+
+    private void terminalFailure(StageRow stage, String code, Map<String, Object> diagnostic) {
+        List<StageRow> siblings = isExport(stage) ? List.of() : stages(stage.jobId(), true);
+        jdbc.update("UPDATE job_stage SET status='FAILED',run_token=NULL,worker_id=NULL,lease_until=NULL,hard_deadline_at=NULL,error_code=?,diagnostic_json=?,last_retryable=FALSE,updated_at=CURRENT_TIMESTAMP(6) WHERE id=?", code, StageDiagnostics.json(diagnostic), stage.id());
         if (isExport(stage)) { exports.refreshLocked(stage.ownerId()); return; }
         // Fence sibling work when the parent is terminal; manual retry only
         // revives explicit FAILED rows, never a still-live previous token.
-        jdbc.update("UPDATE job_stage SET status='FAILED',run_token=NULL,worker_id=NULL,lease_until=NULL,hard_deadline_at=NULL,error_code='PARENT_STAGE_FAILED',updated_at=CURRENT_TIMESTAMP(6) WHERE job_id=? AND owner_type='ANALYSIS' AND id<>? AND status IN ('RUNNING','READY','RETRY_WAIT')", stage.jobId(), stage.id());
+        for (StageRow sibling : siblings) {
+            if (!sibling.id().equals(stage.id()) && Set.of("RUNNING", "READY", "RETRY_WAIT").contains(sibling.status())) {
+                jdbc.update("UPDATE job_stage SET status='FAILED',run_token=NULL,worker_id=NULL,lease_until=NULL,hard_deadline_at=NULL,error_code='PARENT_STAGE_FAILED',diagnostic_json=?,updated_at=CURRENT_TIMESTAMP(6) WHERE id=?",
+                        StageDiagnostics.json(StageDiagnostics.create(null, "PARENT_STAGE_FAILED", sibling.attempt())), sibling.id());
+            }
+        }
         touch(stage.jobId(), "FAILED");
     }
 
@@ -440,7 +455,7 @@ public class JobService {
     private static StageSnapshot stageSnapshot(StageRow row, boolean publicView) {
         return new StageSnapshot(row.id(), row.stageType(), row.shardKey(), row.status(), row.attempt(),
                 row.leaseUntil(), row.hardDeadlineAt(), row.nextRunAt(), row.inputHash(),
-                publicView ? null : row.checkpointKey(), publicView ? null : row.manifestKey(), row.manifestHash(), row.errorCode());
+                publicView ? null : row.checkpointKey(), publicView ? null : row.manifestKey(), row.manifestHash(), row.errorCode(), row.diagnostic());
     }
 
     private StageActionResult action(String outcome, String stageId) { return new StageActionResult(outcome, stageSnapshot(stage(stageId, true), false)); }

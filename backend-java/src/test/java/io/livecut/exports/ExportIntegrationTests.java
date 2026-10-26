@@ -265,6 +265,40 @@ class ExportIntegrationTests {
     }
 
     @Test
+    void failedClipDiagnosticIsPersistedAndClearedOnRetryWithoutChangingFrozenReviewOrOlderBatchBytes() throws Exception {
+        Fixture fixture = fixture(true);
+        byte[] approved = send("GET", review(fixture) + "/download?revision=0", null).body();
+        byte[] analysis = send("GET", "/api/jobs/" + fixture.jobId(), null).body();
+        JsonNode older = create(fixture, 0, List.of(FIRST));
+        String olderPath = "/api/exports/" + older.path("id").asText();
+        byte[] olderBytes = send("GET", olderPath, null).body();
+        JsonNode batch = create(fixture, 0, List.of(SECOND));
+        String batchId = batch.path("id").asText(), clipId = batch.path("clips").get(0).path("id").asText();
+        String frozen = jdbc.queryForObject("SELECT frozen_json FROM export_job WHERE id=?", String.class, batchId);
+        JsonNode first = claim(batch.path("clips").get(0));
+        Map<String, Object> body = with(first, "error_code", "PROCESS_TIMEOUT", "retryable", false);
+        body.put("diagnostic", Map.of());
+        ok(worker("POST", action(first, "fail"), body));
+        JsonNode failed = get("/api/exports/" + batchId);
+        assertEquals("FAILED", failed.path("status").asText());
+        JsonNode diagnostic = failed.path("clips").get(0).path("diagnostic");
+        assertEquals("EXECUTION_TIMEOUT", diagnostic.path("reason_code").asText());
+        assertEquals(diagnostic, JSON.readTree(jdbc.queryForObject("SELECT diagnostic_json FROM job_stage WHERE id=?", String.class, first.path("stage_id").asText())));
+        JsonNode ready = ok(send("POST", "/api/exports/" + batchId + "/clips/" + clipId + "/retry", null));
+        assertFalse(ready.path("clips").get(0).has("diagnostic"));
+        assertNull(jdbc.queryForObject("SELECT diagnostic_json FROM job_stage WHERE id=?", String.class, first.path("stage_id").asText()));
+        JsonNode second = claim(batch.path("clips").get(0));
+        error(worker("POST", action(first, "fail"), body), 409, "STALE_ATTEMPT");
+        ok(worker("POST", action(second, "complete"), completion(second)));
+        assertFalse(get("/api/exports/" + batchId).path("clips").get(0).has("diagnostic"));
+        assertEquals(frozen, jdbc.queryForObject("SELECT frozen_json FROM export_job WHERE id=?", String.class, batchId));
+        assertArrayEquals(approved, send("GET", review(fixture) + "/download?revision=0", null).body());
+        assertArrayEquals(analysis, send("GET", "/api/jobs/" + fixture.jobId(), null).body());
+        assertArrayEquals(olderBytes, send("GET", olderPath, null).body());
+        assertEquals(fixture.rawHash(), sha(Files.readAllBytes(fixture.rawPath())));
+    }
+
+    @Test
     void failedClipDoesNotAffectSiblingOrAnalysisAndOnlyFailedClipRetries() throws Exception {
         Fixture fixture = fixture(true);
         long analysisVersion = get("/api/jobs/" + fixture.jobId()).path("state_version").longValue();

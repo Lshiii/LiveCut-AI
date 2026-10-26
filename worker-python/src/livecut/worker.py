@@ -446,7 +446,7 @@ class StageWorker:
             callback = {"action": "complete", "stage_id": lease.stage_id, "payload": payload}
         except Exception as exc:
             code = getattr(exc, "code", "WORKER_EXECUTION_FAILED")
-            if not isinstance(code, str) or not re.fullmatch(r"[A-Z][A-Z0-9_]{0,79}", code):
+            if not isinstance(code, str) or not re.fullmatch(r"[A-Z][A-Z0-9_]{0,63}", code):
                 code = "WORKER_EXECUTION_FAILED"
             try:
                 _write(directory / "worker-error.json", {
@@ -459,6 +459,11 @@ class StageWorker:
             callback = {"action": "fail", "stage_id": lease.stage_id,
                         "payload": {**lease.credentials, "error_code": code,
                                     "retryable": bool(getattr(exc, "retryable", False))}}
+            from .diagnostics import failure_diagnostic
+
+            diagnostic = failure_diagnostic(exc, code)
+            if diagnostic is not None:
+                callback["payload"]["diagnostic"] = diagnostic
         finally:
             finished.set()
             thread.join(timeout=12)

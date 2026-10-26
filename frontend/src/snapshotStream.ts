@@ -1,4 +1,5 @@
 import type { AnalysisJob, ExportJob } from './api'
+import { parseDiagnostic } from './diagnostics.ts'
 
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/
 const STAGE_STATUS = new Set(['BLOCKED', 'READY', 'RUNNING', 'RETRY_WAIT', 'SUCCEEDED', 'FAILED', 'CANCELLED', 'SKIPPED'])
@@ -35,7 +36,12 @@ export function parseAnalysisSnapshot(raw: unknown, id: string): AnalysisJob {
       || !integer(budget.max_asr_submissions) || !integer(budget.asr_calls_reserved) || budget.asr_calls_reserved > budget.max_asr_submissions
       || typeof actions.can_cancel !== 'boolean' || typeof actions.can_retry !== 'boolean' || !integer(actions.max_attempts, 1)
       || ![null, 'JOB_NOT_RETRYABLE', 'ATTEMPTS_EXHAUSTED'].includes(actions.retry_block_reason as string | null)) invalid()
-  return raw as unknown as AnalysisJob
+  const stages = raw.stages.map(stage => {
+    const { diagnostic: rawDiagnostic, ...rest } = stage
+    const diagnostic = parseDiagnostic(rawDiagnostic, stage.attempt, stage.error_code)
+    return diagnostic ? { ...rest, diagnostic } : rest
+  })
+  return { ...raw, stages } as unknown as AnalysisJob
 }
 export function parseExportSnapshot(raw: unknown, id: string, jobId?: string): ExportJob {
   base(raw, id, EXPORT_STATUS)
@@ -55,7 +61,12 @@ export function parseExportSnapshot(raw: unknown, id: string, jobId?: string): E
     } else if (clip.content_url !== null || clip.download_url !== null) invalid()
     ids.add(clip.id); segments.add(clip.segment_id)
   }
-  return raw as unknown as ExportJob
+  const clips = raw.clips.map(clip => {
+    const { diagnostic: rawDiagnostic, ...rest } = clip
+    const diagnostic = parseDiagnostic(rawDiagnostic, clip.attempt, clip.error_code)
+    return diagnostic ? { ...rest, diagnostic } : rest
+  })
+  return { ...raw, clips } as unknown as ExportJob
 }
 export function isAnalysisTerminal(value: VersionedSnapshot) { return !['QUEUED', 'RUNNING'].includes(value.status) }
 export function isExportTerminal(value: VersionedSnapshot) { return !['QUEUED', 'RUNNING'].includes(value.status) }
