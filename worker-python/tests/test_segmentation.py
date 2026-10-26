@@ -102,7 +102,8 @@ def test_catalog_free_categories_global_anchors_and_native_http(tmp_path: Path) 
     assert payload["parameters"]["enable_thinking"] is False
     model_input = json.loads(payload["input"]["messages"][1]["content"])
     assert model_input["known_products"] == []
-    assert all(set(u) == {"utterance_id", "text"} for u in model_input["transcript"])
+    assert all(set(u) == {"utterance_id", "start_ms", "end_ms", "text"}
+               for u in model_input["transcript"])
     saved = json.loads((tmp_path / "analysis-result.json").read_text(encoding="utf-8"))
     assert saved == result
     ledger_text = (tmp_path / "segmentation/state.json").read_text(encoding="utf-8")
@@ -871,15 +872,15 @@ def test_changed_protocol_refuses_old_checkpoint_but_keeps_schema2_result(
     assert old_result["schema_version"] == "2.0"
 
 
-def test_context_feedback_version_isolates_v11_checkpoint_but_preserves_initial_request(
+def test_prompt_version_isolates_checkpoint_even_with_identical_payload_builder(
     tmp_path: Path, monkeypatch,
 ) -> None:
-    assert PROMPT_VERSION == "catalog-free-v11.1-context-feedback"
+    assert PROMPT_VERSION == "catalog-free-v12-time-aligned-evidence"
     items = [utterance("u1", 0, 1000)]
     response = {"products": [], "assignments": {"u1": assignment(kind="non_product")}}
     old_client, old_requests = mock_client(response)
     with old_client, monkeypatch.context() as prior_prompt:
-        prior_prompt.setattr(segmentation, "PROMPT_VERSION", "catalog-free-v11-derived-identity")
+        prior_prompt.setattr(segmentation, "PROMPT_VERSION", "catalog-free-v11.1-context-feedback")
         run(items, 1000, tmp_path / "old", old_client)
     old_state = (tmp_path / "old/segmentation/state.json").read_bytes()
     old_raw = (tmp_path / "old/segmentation/window-0000-attempt-0.json").read_bytes()
@@ -894,7 +895,7 @@ def test_context_feedback_version_isolates_v11_checkpoint_but_preserves_initial_
         result = run(items, 1000, tmp_path / "new", new_client)
     assert new_requests == old_requests
     assert result["provenance"]["prompt_version"] == PROMPT_VERSION
-    assert result["pipeline_version"] == "catalog-free-visual-text-v6"
+    assert result["pipeline_version"] == "catalog-free-visual-text-v7"
     validate_analysis_result(result)
 
 
