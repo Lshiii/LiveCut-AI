@@ -14,9 +14,10 @@ from .inputs import DatasetValidationError, validate_dataset_manifest
 from .media import MediaError, export_clip, extract_audio, probe_media
 from .model_budget import ModelBudgetError
 from .ocr import observe_video_ocr, ocr_model_id
+from .ocr_cache import cached_observe_video_ocr
 from .pipeline import PipelineError, analyze_video
 from .segmentation import SegmentationError, discover_products
-from .vision import VisionError, observe_video
+from .vision import VisionError, _write_json, observe_video
 from .worker import WorkerError
 from .worker_client import WorkerClientError
 
@@ -69,6 +70,14 @@ def main(argv: list[str] | None = None) -> int:
     discover.add_argument("--base-url")
     discover.add_argument("--grouping", choices=("category", "observable_variant"), default="category")
     discover.add_argument("--max-calls", type=int, default=8)
+    ocr = sub.add_parser("ocr", help="Prepare or reuse local OCR evidence without ASR or model API calls")
+    ocr.add_argument("source", type=Path)
+    ocr.add_argument("--output-dir", type=Path, required=True)
+    ocr.add_argument("--cache-root", type=Path, required=True)
+    ocr.add_argument("--interval-ms", type=int, default=45000)
+    ocr.add_argument("--max-frames", type=int, default=16)
+    ocr.add_argument("--ffprobe", default=os.environ.get("LIVECUT_FFPROBE_PATH", "ffprobe"))
+    ocr.add_argument("--ffmpeg", default=os.environ.get("LIVECUT_FFMPEG_PATH", "ffmpeg"))
     analyze = sub.add_parser("analyze", help="Video-only real analysis and DRAFT preview clips")
     analyze.add_argument("source", type=Path)
     analyze.add_argument("--output-dir", type=Path, required=True)
@@ -81,6 +90,8 @@ def main(argv: list[str] | None = None) -> int:
     analyze.add_argument("--text-base-url")
     analyze.add_argument("--vision-base-url")
     analyze.add_argument("--asr-cache-dir", type=Path)
+    analyze.add_argument("--ocr-cache-root", type=Path,
+                         help="Share verified local OCR evidence between separate analysis directories")
     analyze.add_argument("--max-calls", type=int, default=8)
     analyze.add_argument("--max-preview-clips", type=int, default=6)
     analyze.add_argument("--interval-ms", type=int, default=45000)
@@ -142,6 +153,14 @@ def main(argv: list[str] | None = None) -> int:
                                       check_files=not args.metadata_only)
             _emit({"status": "valid", "videos": len(data["videos"]),
                    "file_existence_checked": not args.metadata_only})
+        elif args.command == "ocr":
+            info = probe_media(args.source, ffprobe_path=args.ffprobe)
+            cached = cached_observe_video_ocr(
+                args.source, args.output_dir, cache_root=args.cache_root, duration_ms=info.duration_ms,
+                ffmpeg_path=args.ffmpeg, interval_ms=args.interval_ms, max_frames=args.max_frames,
+            )
+            _write_json(args.output_dir / "cache-provenance.json", cached.provenance)
+            _emit({"status": "ok", "frames": len(cached.observations), "cache": cached.provenance})
         elif args.command == "analyze":
             observations = None
             observer_id = "unspecified-observer"
@@ -152,7 +171,14 @@ def main(argv: list[str] | None = None) -> int:
                             "interval_ms": args.interval_ms, "max_frames": args.max_frames}
                 if args.visual_provider == "ocr":
                     observer_id = ocr_model_id()
-                    observations = observe_video_ocr(args.source, visual_dir, **sampling)
+                    if args.ocr_cache_root is not None:
+                        cached = cached_observe_video_ocr(
+                            args.source, visual_dir, cache_root=args.ocr_cache_root, **sampling,
+                        )
+                        observations = cached.observations
+                        _write_json(visual_dir / "cache-provenance.json", cached.provenance)
+                    else:
+                        observations = observe_video_ocr(args.source, visual_dir, **sampling)
                 else:
                     observer_id = args.vision_model
                     observations = observe_video(args.source, visual_dir, **sampling,

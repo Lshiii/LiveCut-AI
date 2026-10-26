@@ -1,11 +1,23 @@
 """Explicit local OCR observer; it never substitutes a fake VLM response."""
 
 import math
+import os
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any, Callable
 
 from .vision import VisionError, _extract_frame, _hash_file, _lock, _read_json, _write_json
+
+
+def _native_path(path: Path) -> Path:
+    if os.name != "nt":
+        return path
+    absolute = os.path.abspath(path)
+    if absolute.startswith("\\\\?\\"):
+        return Path(absolute)
+    if absolute.startswith("\\\\"):
+        return Path("\\\\?\\UNC\\" + absolute[2:])
+    return Path("\\\\?\\" + absolute)
 
 
 def ocr_model_id() -> str:
@@ -19,6 +31,8 @@ def observe_video_ocr(
     source: str | Path, output_dir: str | Path, *, duration_ms: int,
     ffmpeg_path: str = "ffmpeg", interval_ms: int = 45000, max_frames: int = 16,
     engine: Callable[[str], Any] | None = None,
+    extractor: Callable[..., dict] | None = None,
+    guard: Callable[[], None] | None = None,
 ) -> list[dict]:
     """Read actual sampled frames. Categories remain unknown until semantic analysis."""
     if any(type(x) is not int or x <= 0 for x in (duration_ms, interval_ms, max_frames)):
@@ -29,6 +43,8 @@ def observe_video_ocr(
     if not path.is_file():
         raise VisionError("INVALID_SOURCE", "OCR source must be a local file")
     model_id = "custom-ocr-engine" if engine is not None else ocr_model_id()
+    check = guard or (lambda: None)
+    check()
     binding = {"source_sha256": _hash_file(path), "duration_ms": duration_ms,
                "interval_ms": interval_ms, "max_frames": max_frames, "model_id": model_id}
     directory = Path(output_dir).expanduser().resolve()
@@ -46,12 +62,14 @@ def observe_video_ocr(
         if len(completed) > len(requested) or len(state["frames"]) != len(completed):
             raise VisionError("INVALID_CHECKPOINT", "OCR cache is incomplete or exceeds budget")
         if len(completed) < len(requested) and engine is None:
+            check()
             try:
                 from rapidocr import RapidOCR
             except ImportError:
                 raise VisionError("OCR_NOT_INSTALLED", "Install local OCR with: uv sync --extra ocr") from None
             engine = RapidOCR()
         for index, requested_ms in enumerate(requested):
+            check()
             frame_id = f"ocr_{index + 1:06d}"
             key = f"frames/{frame_id}.jpg"
             target = directory / key
@@ -61,11 +79,14 @@ def observe_video_ocr(
                 continue
             if target.is_symlink() or target.resolve() == path:
                 raise VisionError("OUTPUT_CONFLICT", "OCR frames must not overwrite source")
-            timing = _extract_frame(path, target, requested_ms, ffmpeg_path=ffmpeg_path)
+            timing = (extractor or _extract_frame)(
+                _native_path(path), _native_path(target), requested_ms, ffmpeg_path=ffmpeg_path)
+            check()
             if not 0 <= timing["timestamp_ms"] < duration_ms:
                 raise VisionError("INVALID_FRAME_TIME", "OCR frame time is outside video")
             assert engine is not None
-            result = engine(str(target))
+            result = engine(str(_native_path(target)))
+            check()
             texts = getattr(result, "txts", None)
             scores = getattr(result, "scores", None)
             lines = []
@@ -80,6 +101,7 @@ def observe_video_ocr(
             state["frames"].append({"frame_id": frame_id, "requested_timestamp_ms": requested_ms,
                                     **timing, "object_key": key, "sha256": _hash_file(target)})
             _write_json(state_path, state)
+        check()
         _write_json(directory / "observations.json", completed)
         _write_json(directory / "frames.json", state["frames"])
         return completed

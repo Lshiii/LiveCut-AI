@@ -27,7 +27,8 @@ import httpx
 from .asr import transcribe_file
 from .contracts import validate_analysis_result
 from .media import extract_audio, probe_media
-from .ocr import observe_video_ocr, ocr_model_id
+from .ocr import ocr_model_id
+from .ocr_cache import cached_observe_video_ocr
 from .segmentation import discover_products
 from .worker_client import WorkerClient, WorkerClientError
 
@@ -547,12 +548,27 @@ class AnalysisStageExecutor:
             media = _read(context.predecessor("MEDIA", "media_info"))
             transcript = json.loads(_native_path(context.predecessor("ASR", "transcript")).read_text(encoding="utf-8"))
             observations = []
+            visual_artifacts: list[dict] = []
             observer_id = "unspecified-observer"
             if config.get("visual_provider", "ocr") == "ocr":
-                observations = observe_video_ocr(
+                cached = cached_observe_video_ocr(
                     _native_path(source), _native_path(directory / "ocr"), duration_ms=media["duration_ms"],
-                    ffmpeg_path=self.ffmpeg_path,
+                    cache_root=_native_path(context.storage_root / "cache" / "ocr-v1"),
+                    ffmpeg_path=self.ffmpeg_path, guard=context.guard.check,
                 )
+                observations = cached.observations
+                context.guard.check()
+                provenance_path = directory / "ocr" / "cache-provenance.json"
+                _write(provenance_path, cached.provenance)
+                visual_artifacts = [
+                    context.artifact("ocr_cache_provenance", provenance_path),
+                    context.artifact("ocr_observations", directory / "ocr" / "observations.json"),
+                    context.artifact("ocr_frames", directory / "ocr" / "frames.json"),
+                    context.artifact("ocr_state", directory / "ocr" / "ocr-state.json"),
+                ]
+                visual_artifacts.extend(context.artifact(
+                    f"ocr_frame_{index + 1:06d}", directory / "ocr" / item["object_key"])
+                    for index, item in enumerate(observations))
                 observer_id = ocr_model_id()
             elif config.get("visual_provider") != "none":
                 raise WorkerError("UNSUPPORTED_VISUAL_PROVIDER")
@@ -575,7 +591,8 @@ class AnalysisStageExecutor:
                     visual_model_id=observer_id, two_pass=True,
                     base_url=os.environ.get("LIVECUT_TEXT_BASE_URL"),
                 )
-            artifacts = [context.artifact("analysis_result", directory / "analysis-result.json")]
+            artifacts = [context.artifact("analysis_result", directory / "analysis-result.json"),
+                         *visual_artifacts]
         elif lease.stage_type == "TIMELINE":
             result_path = context.predecessor("SEGMENT", "analysis_result")
             result = _read(result_path)
