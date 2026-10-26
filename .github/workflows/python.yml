@@ -29,9 +29,34 @@ jobs:
           version: '0.13.5'
           enable-cache: true
       - name: Install FFmpeg
+        timeout-minutes: 4
         run: |
-          sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends ffmpeg
+          set -euo pipefail
+          if [ -x "$LIVECUT_FFMPEG_PATH" ] && [ -x "$LIVECUT_FFPROBE_PATH" ] \
+            && "$LIVECUT_FFMPEG_PATH" -version >/dev/null 2>&1 \
+            && "$LIVECUT_FFPROBE_PATH" -version >/dev/null 2>&1; then
+            echo "Using existing FFmpeg and ffprobe."
+          else
+            # Only Ubuntu packages are needed; unrelated runner repositories must
+            # not block real-media tests or consume the entire job timeout.
+            ubuntu_sources=/etc/apt/sources.list.d/ubuntu.sources
+            if [ ! -f "$ubuntu_sources" ]; then
+              echo "::error::Expected Ubuntu 24.04 package sources are missing."
+              exit 1
+            fi
+            apt_options=(
+              -o "Dir::Etc::sourcelist=$ubuntu_sources"
+              -o Dir::Etc::sourceparts=-
+              -o APT::Get::List-Cleanup=0
+              -o APT::Update::Error-Mode=any
+              -o Acquire::Retries=2
+              -o Acquire::http::Timeout=15
+              -o Acquire::https::Timeout=15
+              -o DPkg::Lock::Timeout=30
+            )
+            sudo apt-get "${apt_options[@]}" update
+            sudo apt-get "${apt_options[@]}" install --yes --no-install-recommends ffmpeg
+          fi
           "$LIVECUT_FFMPEG_PATH" -version
           "$LIVECUT_FFPROBE_PATH" -version
       - name: Install locked dependencies
