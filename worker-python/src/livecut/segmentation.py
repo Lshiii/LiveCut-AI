@@ -30,8 +30,11 @@ import httpx
 
 from livecut.contracts import validate_analysis_result
 
-PROMPT_VERSION = "catalog-free-v12-time-aligned-evidence"
-OUTPUT_PROTOCOL_VERSION = "keyed-classifications-v2"
+PROMPT_VERSION = "catalog-free-v13-product-references"
+OUTPUT_PROTOCOL_VERSION = "keyed-classifications-v3-product-references"
+PRODUCT_REFERENCE_VERSION = "bounded-canonical-references-v1"
+MAX_KNOWN_PRODUCTS = 64
+MAX_KNOWN_ALIASES = 8
 VISUAL_ALIGNMENT_VERSION = "window-time-and-utterance-gap-v1"
 VISUAL_MAX_GAP_MS = 5000
 DEFAULT_BASE_URL = "https://dashscope.aliyuncs.com/api/v1"
@@ -48,7 +51,10 @@ _SYSTEM = """你是直播商品讲解分段器。输出且只输出 JSON 对象�
 没有预先商品清单；从讲解中发现商品类别，如垃圾袋、面膜。
 严格按照本次 grouping 粒度发现商品，不能臆造品牌、规格、真实 SKU。
 没有直接图像，不能宣称已看到画面；OCR/视觉观察可作为文字证据，款式不能臆造。
-参考 known_products 的 canonical category/variant_description 以延续已发现的类别/款式，
+known_products 是本次分析之前已接受的有限商品快照，只用于身份延续，不能作为当前讲解的证据。
+如当前提议与其中类别相同，canonical_product_id 精确填写该项 product_id，保留当前提议的名称；
+新类别或不能确认相同则填写 null。不得编造 ID、引用当前新建商品或用多个临时标签引用同一既有 ID。
+只有本窗口证据支持时才能引用；宽泛相关、用途相关或共同出现不等于同一商品类别。
 返场仍须保留不同区间。不要把某商品前后之间的其他商品或闲聊吞并为一个区间。
 分类结果写入 assignments 对象，每个核心语句的原始 ID 是一个键，值是该句的分类。
 assignments 的键集合必须严格等于 core_utterance_ids；每个核心 ID 必须恰好出现一次。
@@ -58,9 +64,10 @@ transcript 中不在 core_utterance_ids 内的句子只是理解上下文，绝�
 每个键的分类值只能包含 content_kind、product_labels，严禁输出 identity_status、索引、范围或时间。
 程序按可信 ASR 原顺序读取每个 ID 的分类，再合并相邻且语义相同的分类；你不能生成区间。
 固定输出结构：{"products":[{"label":"tmp1","category":"垃圾袋",
-"variant_description":""}],"assignments":{"u1":{"content_kind":"product_talk",
+"variant_description":"","canonical_product_id":null}],"assignments":{"u1":{"content_kind":"product_talk",
 "product_labels":["tmp1"]}}}。示例 u1 只有在输入核心 ID 中才可使用。
 products 的 label 是本窗口临时标签，category 是简洁类别名，variant_description 不明确时为空串。
+products 每项严格只有 label、category、variant_description、canonical_product_id 四个字段。
 content_kind 为 product_talk/non_product/mixed/uncertain。product_labels 是本句可能归属的商品标签。
 身份由程序按协议唯一推导，模型不输出 identity_status：non_product 必须空标签，表示无商品讲解；
 其他分类空标签表示 unknown，一个标签表示 identified，两个及以上不同标签表示 ambiguous。
@@ -83,6 +90,8 @@ category 用常用简短品类名，省略保湿/控油等功效修饰；例如�
     "observable_variant": """本次 grouping=observable_variant，可细分讲话明确描述的可观察款式。
 例如抽绳垃圾袋与平口垃圾袋可用不同临时标签，并填写不同 variant_description。
 只有讲话明确给出足够区分信息时才细分；不明确时 variant_description 为空串并保留类别粒度。
+canonical_product_id 只允许引用 category 和 variant_description 规范化后都精确相同的已有项；
+不同款式、仅类别粒度与明确款式之间不得复用，语义近似但不能精确对齐时填 null。
 识别到可观察款式也不等于验证了外部真实 SKU；每段 identified 仍只能有一个 product_labels。
 """,
 }
@@ -264,7 +273,9 @@ def _visual_payload(observations: list[dict], window: dict) -> list[dict]:
     return result
 
 
-def _parse_response(raw: dict, window: dict, *, grouping: str) -> dict:
+def _parse_response(raw: dict, window: dict, *, grouping: str,
+                    known_products: list[dict] | None = None,
+                    allowed_product_ids: set[str] | None = None) -> dict:
     try:
         choices = raw["output"]["choices"]
         if (not isinstance(choices, list) or len(choices) != 1
@@ -299,7 +310,8 @@ def _parse_response(raw: dict, window: dict, *, grouping: str) -> dict:
     product_error = None
     try:
         _validate_window({"products": parsed["products"], "segments": []},
-                         {"core_ids": [], "visible": window["visible"]}, grouping=grouping)
+                         {"core_ids": [], "visible": window["visible"]}, grouping=grouping,
+                         known_products=known_products, allowed_product_ids=allowed_product_ids)
     except SegmentationError as exc:
         product_error = str(exc).split("; coverage_diagnostics=", 1)[0]
     known_labels = ({value["label"] for value in parsed["products"]}
@@ -342,7 +354,8 @@ def _parse_response(raw: dict, window: dict, *, grouping: str) -> dict:
                                 reason + "; assignment_key_diagnostics=" + _json(detail),
                                 diagnostic={"reason_code": reason_code, **safe})
     bound = {"products": parsed["products"], "segments": segments}
-    _validate_window(bound, window, grouping=grouping)
+    _validate_window(bound, window, grouping=grouping,
+                     known_products=known_products, allowed_product_ids=allowed_product_ids)
     return bound
 
 
@@ -447,7 +460,52 @@ def _coverage_diagnostics(parsed: dict, window: dict) -> str:
     return "; coverage_diagnostics=" + _json(detail)
 
 
-def _validate_window(parsed: Any, window: dict, *, grouping: str) -> None:
+def _registry_index(products: list[dict], *, grouping: str) -> tuple[dict, dict]:
+    by_id, by_key = {}, {}
+    for product in products:
+        by_id[product["product_id"]] = product
+        variant = product["attributes"].get("variant_description", "")
+        by_key[(_normal(product["attributes"]["category"]), _normal(variant))] = product
+        if grouping == "category" and not variant:
+            for alias in product["aliases"]:
+                by_key[(_normal(alias), "")] = product
+    return by_id, by_key
+
+
+def _resolve_product(value: dict, by_id: dict, by_key: dict, *,
+                     grouping: str, allowed_product_ids: set[str]) -> dict | None:
+    key = (_normal(value["category"]), _normal(value["variant_description"]))
+    exact = by_key.get(key)
+    reference = value["canonical_product_id"]
+    if reference is None:
+        return exact
+    if not _nonempty(reference) or reference not in allowed_product_ids or reference not in by_id:
+        raise SegmentationError("INVALID_MODEL_OUTPUT",
+                                "canonical_product_id must be null or an ID offered in known_products")
+    target = by_id[reference]
+    target_key = (_normal(target["attributes"]["category"]),
+                  _normal(target["attributes"].get("variant_description", "")))
+    if grouping == "observable_variant" and key != target_key:
+        raise SegmentationError("INVALID_MODEL_OUTPUT",
+                                "observable_variant references require exact category and variant identity")
+    if exact is not None and exact["product_id"] != reference:
+        raise SegmentationError("INVALID_MODEL_OUTPUT",
+                                "proposed name already belongs to a different canonical product")
+    return target
+
+
+def _known_product_snapshot(products: list[dict]) -> list[dict]:
+    return [{"product_id": product["product_id"],
+             "category": product["attributes"]["category"],
+             "variant_description": product["attributes"].get("variant_description", ""),
+             "aliases": list(product["aliases"][-MAX_KNOWN_ALIASES:]),
+             "identity_granularity": product["identity_granularity"]}
+            for product in products[-MAX_KNOWN_PRODUCTS:]]
+
+
+def _validate_window(parsed: Any, window: dict, *, grouping: str,
+                     known_products: list[dict] | None = None,
+                     allowed_product_ids: set[str] | None = None) -> None:
     def invalid(reason: str) -> None:
         if isinstance(parsed, dict) and isinstance(parsed.get("segments"), list):
             reason += _coverage_diagnostics(parsed, window)
@@ -459,15 +517,20 @@ def _validate_window(parsed: Any, window: dict, *, grouping: str) -> None:
         invalid("products and segments must be arrays")
     labels: set[str] = set()
     categories: set[str] = set()
+    resolved_ids: set[str] = set()
+    by_id, by_key = _registry_index(known_products or [], grouping=grouping)
+    allowed_ids = set(by_id) if allowed_product_ids is None else allowed_product_ids
     for index, product in enumerate(parsed["products"]):
         if not isinstance(product, dict) or set(product) != {
-            "label", "category", "variant_description"
+            "label", "category", "variant_description", "canonical_product_id"
         }:
-            invalid("product must contain only label, category and variant_description")
+            invalid("product must contain only label, category, variant_description and canonical_product_id")
         if not _nonempty(product["label"]) or not _nonempty(product["category"]):
             invalid("product label/category must be nonempty strings")
         if not isinstance(product["variant_description"], str):
             invalid("variant_description must be a string")
+        if len(product["category"]) > 100 or len(product["variant_description"]) > 200:
+            invalid("category and variant_description exceed the product name limits")
         if grouping == "category":
             if product["variant_description"] != "":
                 invalid(
@@ -484,6 +547,15 @@ def _validate_window(parsed: Any, window: dict, *, grouping: str) -> None:
         if product["label"] in labels:
             invalid("duplicate temporary product label")
         labels.add(product["label"])
+        try:
+            target = _resolve_product(product, by_id, by_key, grouping=grouping,
+                                      allowed_product_ids=allowed_ids)
+        except SegmentationError as exc:
+            invalid(str(exc))
+        if target is not None:
+            if target["product_id"] in resolved_ids:
+                invalid("multiple temporary labels resolve to the same canonical product")
+            resolved_ids.add(target["product_id"])
     order = {item["utterance_id"]: index for index, item in enumerate(window["visible"])}
     seen: set[str] = set()
     last_order = -1
@@ -612,12 +684,9 @@ def _request(
 
 def _accumulate(
     parsed: dict, window: dict, items: list[dict], products: list[dict], segments: list[dict],
-    *, merge_gap_ms: int,
+    *, merge_gap_ms: int, grouping: str,
 ) -> None:
-    registry = {
-        (_normal(p["attributes"]["category"]), _normal(p["attributes"].get("variant_description", ""))): p
-        for p in products
-    }
+    by_id, registry = _registry_index(products, grouping=grouping)
     labels: dict[str, str] = {}
     core = set(window["core_ids"])
     used = {
@@ -629,7 +698,8 @@ def _accumulate(
             continue
         category, variant = value["category"].strip(), value["variant_description"].strip()
         key = (_normal(category), _normal(variant))
-        product = registry.get(key)
+        product = _resolve_product(value, by_id, registry, grouping=grouping,
+                                   allowed_product_ids=set(by_id))
         if product is None:
             product = {
                 "product_id": f"product-{len(products) + 1:04d}",
@@ -640,6 +710,12 @@ def _accumulate(
             if variant:
                 product["attributes"]["variant_description"] = variant
             products.append(product)
+            registry[key] = product
+        else:
+            proposed_name = category + (f"（{variant}）" if variant else "")
+            existing_names = {_normal(product["name"]), *(_normal(alias) for alias in product["aliases"])}
+            if _normal(proposed_name) not in existing_names:
+                product["aliases"].append(proposed_name)
             registry[key] = product
         labels[value["label"]] = product["product_id"]
     by_id = {item["utterance_id"]: item for item in items}
@@ -834,6 +910,10 @@ def discover_products(
         "grouping": grouping,
         "visual_observations": observations, "visual_model_id": visual_model_id if observations else None,
         "visual_alignment": {"version": VISUAL_ALIGNMENT_VERSION, "max_gap_ms": VISUAL_MAX_GAP_MS},
+        "product_references": {"version": PRODUCT_REFERENCE_VERSION,
+                               "max_known_products": MAX_KNOWN_PRODUCTS,
+                               "max_known_aliases": MAX_KNOWN_ALIASES,
+                               "variant_policy": "exact-category-and-variant"},
         "two_pass": two_pass,
     }
     fingerprint = hashlib.sha256(_json(config).encode()).hexdigest()
@@ -860,15 +940,13 @@ def discover_products(
     active_client = client or httpx.Client(timeout=timeout_seconds, follow_redirects=False)
     try:
         for index, window in enumerate(windows):
+            known_snapshot = _known_product_snapshot(products)
+            allowed_product_ids = {product["product_id"] for product in known_snapshot}
             payload = {
                 "output_protocol": OUTPUT_PROTOCOL_VERSION,
                 "assignment_count": len(window["core_ids"]),
                 "grouping": grouping,
-                "known_products": [
-                    {"category": p["attributes"]["category"],
-                     "variant_description": p["attributes"].get("variant_description", "")}
-                    for p in products
-                ],
+                "known_products": known_snapshot,
                 "core_utterance_ids": window["core_ids"],
                 "time_context": {key: window[key] for key in
                                  ("core_start_ms", "core_end_ms", "context_start_ms", "context_end_ms")},
@@ -924,7 +1002,8 @@ def discover_products(
                 )
             try:
                 with _failure_context(index, len(windows)):
-                    parsed = _parse_response(raw, window, grouping=grouping)
+                    parsed = _parse_response(raw, window, grouping=grouping,
+                                             known_products=products, allowed_product_ids=allowed_product_ids)
             except SegmentationError as exc:
                 initial_call = next(call for call in state["calls"]
                                     if call["window_index"] == index and call["attempt"] == 0)
@@ -950,7 +1029,8 @@ def discover_products(
                             active_client, endpoint=endpoint, key=key, model=model, messages=messages,
                             directory=directory, state=state, window_index=index, attempt=1, max_calls=max_calls,
                         )
-                        parsed = _parse_response(raw, window, grouping=grouping)
+                        parsed = _parse_response(raw, window, grouping=grouping,
+                                                 known_products=products, allowed_product_ids=allowed_product_ids)
                 except SegmentationError as repair_error:
                     if repair_error.code == "INVALID_MODEL_OUTPUT":
                         repair_call = next(call for call in state["calls"]
@@ -958,7 +1038,8 @@ def discover_products(
                         repair_call["validation_error"] = str(repair_error)
                         _save(state_path, state)
                     raise
-            _accumulate(parsed, window, items, products, segments, merge_gap_ms=merge_gap_ms)
+            _accumulate(parsed, window, items, products, segments, merge_gap_ms=merge_gap_ms,
+                        grouping=grouping)
             _save(directory / f"window-{index:04d}-accepted.json", parsed)
             if index not in state["completed_windows"]:
                 state["completed_windows"].append(index)
@@ -970,7 +1051,7 @@ def discover_products(
         "schema_version": "2.0", "data_kind": "model_result", "job_id": job_id,
         "video_id": video_id, "analysis_generation": analysis_generation,
         "duration_ms": duration_ms, "transcript_version": transcript_version,
-        "pipeline_version": "catalog-free-visual-text-v7", "review_status": "DRAFT",
+        "pipeline_version": "catalog-free-visual-text-v8", "review_status": "DRAFT",
         "product_discovery_version": PROMPT_VERSION,
         "provenance": {"asr_model_id": asr_model_id, "text_model_id": model,
                        "vision_model_id": visual_model_id if observations else None, "prompt_version": PROMPT_VERSION,

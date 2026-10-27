@@ -33,7 +33,8 @@ def utterance(uid: str, start: int, end: int, text: str = "商品讲解") -> dic
 
 
 def product(label: str, category: str, variant: str = "") -> dict:
-    return {"label": label, "category": category, "variant_description": variant}
+    return {"label": label, "category": category, "variant_description": variant,
+            "canonical_product_id": None}
 
 
 def assignment(labels: list[str] | None = None, *,
@@ -222,7 +223,9 @@ def test_context_dedup_and_cross_window_state(tmp_path: Path) -> None:
     assert prompts[0]["assignment_count"] == prompts[1]["assignment_count"] == 2
     assert all(payload["output_protocol"] == OUTPUT_PROTOCOL_VERSION for payload in prompts)
     assert all(len(payload["transcript"]) == 4 for payload in prompts)
-    assert prompts[1]["known_products"] == [{"category": "垃圾袋", "variant_description": ""}]
+    assert prompts[1]["known_products"] == [{"product_id": "product-0001", "category": "垃圾袋",
+                                             "variant_description": "", "aliases": [],
+                                             "identity_granularity": "category"}]
 
 
 def test_resume_uses_recorded_calls_without_second_provider_call(tmp_path: Path) -> None:
@@ -875,12 +878,12 @@ def test_changed_protocol_refuses_old_checkpoint_but_keeps_schema2_result(
 def test_prompt_version_isolates_checkpoint_even_with_identical_payload_builder(
     tmp_path: Path, monkeypatch,
 ) -> None:
-    assert PROMPT_VERSION == "catalog-free-v12-time-aligned-evidence"
+    assert PROMPT_VERSION == "catalog-free-v13-product-references"
     items = [utterance("u1", 0, 1000)]
     response = {"products": [], "assignments": {"u1": assignment(kind="non_product")}}
     old_client, old_requests = mock_client(response)
     with old_client, monkeypatch.context() as prior_prompt:
-        prior_prompt.setattr(segmentation, "PROMPT_VERSION", "catalog-free-v11.1-context-feedback")
+        prior_prompt.setattr(segmentation, "PROMPT_VERSION", "catalog-free-v12-time-aligned-evidence")
         run(items, 1000, tmp_path / "old", old_client)
     old_state = (tmp_path / "old/segmentation/state.json").read_bytes()
     old_raw = (tmp_path / "old/segmentation/window-0000-attempt-0.json").read_bytes()
@@ -895,7 +898,7 @@ def test_prompt_version_isolates_checkpoint_even_with_identical_payload_builder(
         result = run(items, 1000, tmp_path / "new", new_client)
     assert new_requests == old_requests
     assert result["provenance"]["prompt_version"] == PROMPT_VERSION
-    assert result["pipeline_version"] == "catalog-free-visual-text-v7"
+    assert result["pipeline_version"] == "catalog-free-visual-text-v8"
     validate_analysis_result(result)
 
 

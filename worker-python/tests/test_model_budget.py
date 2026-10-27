@@ -186,7 +186,8 @@ def test_recorded_response_hash_mismatch_prevents_replay(tmp_path):
 
 
 def test_real_segmentation_adapter_reads_recorded_raw_response_after_attempt_change(tmp_path):
-    prediction = {"products": [{"label": "mask", "category": "面膜", "variant_description": ""}],
+    prediction = {"products": [{"label": "mask", "category": "面膜", "variant_description": "",
+                                "canonical_product_id": None}],
                   "assignments": {"u1": {"content_kind": "product_talk",
                                 "product_labels": ["mask"]}}}
     raw = {"output": {"choices": [{"finish_reason": "stop", "message": {
