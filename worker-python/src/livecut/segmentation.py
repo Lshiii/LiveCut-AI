@@ -30,7 +30,7 @@ import httpx
 
 from livecut.contracts import validate_analysis_result
 
-PROMPT_VERSION = "catalog-free-v13-product-references"
+PROMPT_VERSION = "catalog-free-v13.1-product-registry-feedback"
 OUTPUT_PROTOCOL_VERSION = "keyed-classifications-v3-product-references"
 PRODUCT_REFERENCE_VERSION = "bounded-canonical-references-v1"
 MAX_KNOWN_PRODUCTS = 64
@@ -273,6 +273,25 @@ def _visual_payload(observations: list[dict], window: dict) -> list[dict]:
     return result
 
 
+def _product_registry_feedback(products: Any, *, grouping: str) -> dict:
+    """Bounded integer-only feedback; never promote model category/label text."""
+    grouped: dict[str, list[int]] = {}
+    if grouping == "category" and isinstance(products, list):
+        for index, product in enumerate(products):
+            category = product.get("category") if isinstance(product, dict) else None
+            if _nonempty(category) and len(category) <= 100:
+                grouped.setdefault(_normal(category), []).append(index)
+    duplicates = [indices for indices in grouped.values() if len(indices) > 1]
+    return {
+        "duplicate_category_groups": [
+            {"first_product_index": indices[0], "product_indices": indices[:16],
+             "product_count": len(indices), "omitted_product_index_count": max(0, len(indices) - 16)}
+            for indices in duplicates[:8]],
+        "duplicate_category_group_count": len(duplicates),
+        "omitted_duplicate_category_group_count": max(0, len(duplicates) - 8),
+    }
+
+
 def _parse_response(raw: dict, window: dict, *, grouping: str,
                     known_products: list[dict] | None = None,
                     allowed_product_ids: set[str] | None = None) -> dict:
@@ -340,7 +359,8 @@ def _parse_response(raw: dict, window: dict, *, grouping: str,
                   "omitted_extra_context_id_count": len(extra_context) - len(context_samples),
                   "unknown_key_count": unknown_count,
                   "value_error_count": len(errors), "value_errors": errors[:16],
-                  "omitted_value_error_count": max(0, len(errors) - 16)}
+                  "omitted_value_error_count": max(0, len(errors) - 16),
+                  **_product_registry_feedback(parsed["products"], grouping=grouping)}
         reason = product_error or ("assignments keys must equal core_utterance_ids exactly"
                                   if missing or non_core_count else "invalid core classification")
         if errors:
@@ -1017,6 +1037,12 @@ def discover_products(
                                  "上一次 JSON 输出未通过校验：" + str(exc)
                                  + "。必须修复这个具体字段约束，不能原样重复失败输出。"
                                  + _GROUPING_INSTRUCTIONS[grouping]
+                                 + "duplicate_category_groups 是上次 products 重复项的有界索引诊断；"
+                                 + "first_product_index 标记每组首项，product_indices 标记同类别声明。"
+                                 + "必须先按 grouping 合并商品声明，再同步重写所有 assignments 的 product_labels，"
+                                 + "让同类别语句引用同一个保留标签；不能只改名称而保留重复临时条目，"
+                                 + "也不能改成近义名称来规避去重。不同类别不得强行合并。"
+                                 + "归并后重新检查 content_kind：non_product 必须无标签，mixed 必须有至少两个不同商品。"
                                  + "分类值仅含 content_kind/product_labels，不输出identity_status；assignments 必须为对象，"
                                  + "键集合严格等于 core_utterance_ids，每个核心ID恰好一次。"
                                  + "不省略核心ID，不添加上下文/未知键；分类值不得输出范围、时间、索引。"

@@ -878,12 +878,12 @@ def test_changed_protocol_refuses_old_checkpoint_but_keeps_schema2_result(
 def test_prompt_version_isolates_checkpoint_even_with_identical_payload_builder(
     tmp_path: Path, monkeypatch,
 ) -> None:
-    assert PROMPT_VERSION == "catalog-free-v13-product-references"
+    assert PROMPT_VERSION == "catalog-free-v13.1-product-registry-feedback"
     items = [utterance("u1", 0, 1000)]
     response = {"products": [], "assignments": {"u1": assignment(kind="non_product")}}
     old_client, old_requests = mock_client(response)
     with old_client, monkeypatch.context() as prior_prompt:
-        prior_prompt.setattr(segmentation, "PROMPT_VERSION", "catalog-free-v12-time-aligned-evidence")
+        prior_prompt.setattr(segmentation, "PROMPT_VERSION", "catalog-free-v13-product-references")
         run(items, 1000, tmp_path / "old", old_client)
     old_state = (tmp_path / "old/segmentation/state.json").read_bytes()
     old_raw = (tmp_path / "old/segmentation/window-0000-attempt-0.json").read_bytes()
