@@ -238,7 +238,7 @@ def test_repair_merges_and_remaps_with_same_initial_input_and_replays_without_ne
     assert any(word in repair for word in ("改名", "重命名"))
     assert len(result["products"]) == 1
     assert [uid for segment in result["segments"] for uid in segment["audio_evidence_utterance_ids"]] == ["u1", "u2"]
-    assert result["provenance"]["prompt_version"] == "catalog-free-v13.1-product-registry-feedback"
+    assert result["provenance"]["prompt_version"] == "catalog-free-v13.2-grounded-registry-feedback"
     assert result["pipeline_version"] == "catalog-free-visual-text-v8"
     validate_analysis_result(result)
     saved = json.loads((tmp_path / "segmentation/window-0000-attempt-0.json").read_text(encoding="utf-8"))

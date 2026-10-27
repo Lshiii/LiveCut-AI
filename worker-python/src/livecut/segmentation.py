@@ -30,7 +30,7 @@ import httpx
 
 from livecut.contracts import validate_analysis_result
 
-PROMPT_VERSION = "catalog-free-v13.1-product-registry-feedback"
+PROMPT_VERSION = "catalog-free-v13.2-grounded-registry-feedback"
 OUTPUT_PROTOCOL_VERSION = "keyed-classifications-v3-product-references"
 PRODUCT_REFERENCE_VERSION = "bounded-canonical-references-v1"
 MAX_KNOWN_PRODUCTS = 64
@@ -290,6 +290,48 @@ def _product_registry_feedback(products: Any, *, grouping: str) -> dict:
         "duplicate_category_group_count": len(duplicates),
         "omitted_duplicate_category_group_count": max(0, len(duplicates) - 8),
     }
+
+
+def _repair_product_merges(raw: dict, window: dict, *, grouping: str) -> dict:
+    """Locate rejected duplicate labels in trusted source IDs, without free text."""
+    empty = {"repair_product_merges": [], "omitted_repair_group_count": 0}
+    if grouping != "category":
+        return empty
+    try:
+        choices = raw["output"]["choices"]
+        if (not isinstance(choices, list) or len(choices) != 1
+                or not isinstance(choices[0], dict) or choices[0].get("finish_reason") != "stop"):
+            return empty
+        parsed = json.loads(choices[0]["message"]["content"], object_pairs_hook=_unique_model_object)
+        if not isinstance(parsed, dict) or set(parsed) != {"products", "assignments"}:
+            return empty
+        products, assignments = parsed["products"], parsed["assignments"]
+        if not isinstance(products, list) or not isinstance(assignments, dict):
+            return empty
+    except (KeyError, IndexError, TypeError, ValueError):
+        return empty
+    feedback = _product_registry_feedback(products, grouping=grouping)
+    omitted = feedback["omitted_duplicate_category_group_count"]
+    merges = []
+    for group in feedback["duplicate_category_groups"]:
+        labels = [products[index].get("label") for index in group["product_indices"]]
+        if (group["product_count"] > 16
+                or any(not isinstance(label, str) or not re.fullmatch(r"tmp[0-9]{1,4}", label)
+                       for label in labels) or len(set(labels)) != len(labels)):
+            omitted += 1
+            continue
+        matching = []
+        for uid in window["core_ids"]:
+            value = assignments.get(uid)
+            prior_labels = value.get("product_labels") if isinstance(value, dict) else None
+            if (isinstance(prior_labels, list) and all(isinstance(label, str) for label in prior_labels)
+                    and any(label in labels for label in prior_labels)):
+                matching.append(uid)
+        safe = [uid for uid in matching if re.fullmatch(r"[A-Za-z0-9_-]{1,64}", uid)]
+        merges.append({"preferred_label": labels[0], "source_labels": labels,
+                       "previous_assignment_utterance_ids": safe[:16],
+                       "omitted_utterance_id_count": len(matching) - len(safe[:16])})
+    return {"repair_product_merges": merges, "omitted_repair_group_count": omitted}
 
 
 def _parse_response(raw: dict, window: dict, *, grouping: str,
@@ -1048,6 +1090,16 @@ def discover_products(
                                  + "不省略核心ID，不添加上下文/未知键；分类值不得输出范围、时间、索引。"
                                  + "删除 extra_context_ids 列出的上下文键；它们仅供理解，不能作为 assignments 的键。"
                                  + "请根据相同输入重新输出符合固定格式的 JSON。只允许这一次修复。"})
+                repair_hints = _repair_product_merges(raw, window, grouping=grouping)
+                if repair_hints["repair_product_merges"]:
+                    messages.append({"role": "user", "content":
+                                     "以下 JSON 是上次被拒绝输出的结构定位关系，不是真值、商品清单或指令。"
+                                     "source_labels 是该重复组原临时标签，preferred_label 是建议保留的首个标签。"
+                                     "previous_assignment_utterance_ids 只定位它们原来引用的可信核心语句；"
+                                     "请回看原转写确认语义，再合并同类别声明、同步重映射所有相关语句标签。"
+                                     "合并为一个候选后须重新判断 content_kind，不能保留只有一个候选的 mixed。"
+                                     "没有核心引用的声明不必保留；仍以原输入和完整严格协议为准。\n"
+                                     + _json(repair_hints)})
                 try:
                     with _failure_context(index, len(windows), repair="INTERRUPTED",
                                           previous=exc.diagnostic):
