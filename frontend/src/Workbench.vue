@@ -4,7 +4,7 @@ import { api, ApiError, post, type AnalysisJob, type Page, type VideoAsset } fro
 import ReviewPanel from './ReviewPanel.vue'
 import UploadPanel from './UploadPanel.vue'
 import FailureDiagnostic from './FailureDiagnostic.vue'
-import { samplingLabel } from './sampling'
+import { DEFAULT_OCR_MAX_FRAMES, newAnalysisConfig, samplingLabel } from './sampling'
 import { SnapshotError, SnapshotStream, isAnalysisTerminal, newestSnapshot, parseAnalysisSnapshot, streamLabels, type StreamMode } from './snapshotStream'
 import './style.css'
 
@@ -12,7 +12,7 @@ const videos = ref<VideoAsset[]>([]), jobs = ref<AnalysisJob[]>([])
 const selectedVideoId = ref(''), selectedJob = ref<AnalysisJob | null>(null)
 const pending = ref(''), errorMessage = ref(''), connectionError = ref(''), notice = ref('')
 const online = ref(false), loading = ref(true), query = ref(''), filter = ref('ALL')
-const visualProvider = ref('ocr'), maxTextCalls = ref(12)
+const visualProvider = ref<'ocr' | 'none'>('ocr'), maxTextCalls = ref(12), maxOcrFrames = ref(DEFAULT_OCR_MAX_FRAMES)
 const uploadPanel = ref<{ chooseFile: () => void } | null>(null)
 const reviewEditor = ref<{ dirty: boolean; pending: boolean } | null>(null)
 const streamMode = ref<StreamMode>('idle')
@@ -170,9 +170,12 @@ async function uploaded(video: VideoAsset) {
 async function createJob() {
   if (!selectedVideoId.value || pending.value) return
   if (!Number.isInteger(maxTextCalls.value) || maxTextCalls.value < 1 || maxTextCalls.value > 100) { errorMessage.value = '文本请求上限须为 1～100 的整数。'; return }
+  let config: ReturnType<typeof newAnalysisConfig>
+  try { config = newAnalysisConfig(visualProvider.value, maxTextCalls.value, maxOcrFrames.value) }
+  catch (error) { errorMessage.value = error instanceof RangeError ? error.message : '画面取样配置无效。'; return }
   const version = selectionVersion, videoId = selectedVideoId.value
   pending.value = 'create'; errorMessage.value = ''; notice.value = ''
-  const payload = { video_id: videoId, config: { visual_provider: visualProvider.value, max_text_calls: maxTextCalls.value, ocr_sampling: 'uniform' } }
+  const payload = { video_id: videoId, config }
   const inputKey = JSON.stringify(payload)
   try {
     let saved: { input: string; key: string } | null = null
@@ -271,7 +274,10 @@ onUnmounted(() => { stopped = true; selectionVersion++; window.clearInterval(tim
               <template v-else>
                 <p class="help">无需商品清单。模型从语音和画面文字中发现商品。</p>
                 <label class="field-label" for="visual-provider">画面证据</label><select id="visual-provider" v-model="visualProvider"><option value="ocr">本地 OCR · 识别画面文字</option><option value="none">仅使用语音转写</option></select>
-                <p v-if="visualProvider === 'ocr'" class="help">从整段视频取样，最多 16 帧，用画面文字辅助语音判断。</p>
+                <template v-if="visualProvider === 'ocr'">
+                  <label class="field-label" for="ocr-frame-budget">画面取样上限</label><div class="number-field"><input id="ocr-frame-budget" v-model.number="maxOcrFrames" type="number" min="1" max="120" step="1"><span>帧 / 本次分析</span></div>
+                  <p class="help">按视频时长在整段取样，用画面文字辅助语音判断。提高上限会增加本地识别耗时，也可能增加模型输入；取样不代表全程视觉核验。</p>
+                </template>
                 <label class="field-label" for="text-budget">文本请求上限</label><div class="number-field"><input id="text-budget" v-model.number="maxTextCalls" type="number" min="1" max="100" step="1"><span>次 / 本次分析</span></div><p class="help">10 分钟视频至少需要约 8 次文本请求，默认 12 次。更长视频需相应提高。ASR 默认最多提交 1 次。</p>
                 <button class="primary create-button" :disabled="!selectedVideoId || !!pending || !online" @click="createJob">{{ pending === 'create' ? '正在创建…' : '创建分析任务' }} <span>→</span></button>
                 <p class="footnote">任务保存到 MySQL，关闭页面后仍可查看进度。</p>

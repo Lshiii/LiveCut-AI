@@ -129,12 +129,16 @@ def test_worker_anchors_copied_ocr_and_provenance_in_current_attempt_manifest(tm
     assert cached.call_args.kwargs["cache_root"] == _native_path(ctx.storage_root / "cache/ocr-v1")
     assert callable(cached.call_args.kwargs["guard"])
     assert cached.call_args.kwargs["sampling_policy"] == "prefix"
+    assert cached.call_args.kwargs["max_frames"] == 16
 
 
 @pytest.mark.parametrize("strategy", ["prefix", "uniform"])
-def test_worker_uses_frozen_job_sampling_config(tmp_path, monkeypatch, strategy):
+@pytest.mark.parametrize("frame_budget", [None, 1, 48, 120])
+def test_worker_uses_frozen_job_sampling_config(tmp_path, monkeypatch, strategy, frame_budget):
     ctx = segment_context(tmp_path)
     ctx.lease.config["ocr_sampling"] = strategy
+    if frame_budget is not None:
+        ctx.lease.config["ocr_max_frames"] = frame_budget
     cached = Mock(side_effect=materialize)
     monkeypatch.setattr("livecut.worker.cached_observe_video_ocr", cached)
     monkeypatch.setattr("livecut.worker.ocr_model_id", lambda: "rapidocr-synthetic")
@@ -143,6 +147,7 @@ def test_worker_uses_frozen_job_sampling_config(tmp_path, monkeypatch, strategy)
     AnalysisStageExecutor(transport_factory=lambda *args: httpx.MockTransport(
         lambda request: (_ for _ in ()).throw(AssertionError("Provider path forbidden"))))(ctx)
     assert cached.call_args.kwargs["sampling_policy"] == strategy
+    assert cached.call_args.kwargs["max_frames"] == (16 if frame_budget is None else frame_budget)
 
 
 def test_worker_corrupt_cache_stops_before_any_model_transport(tmp_path, monkeypatch):
@@ -153,6 +158,18 @@ def test_worker_corrupt_cache_stops_before_any_model_transport(tmp_path, monkeyp
     with pytest.raises(VisionError, match="Synthetic corruption"):
         AnalysisStageExecutor(transport_factory=factory)(ctx)
     factory.assert_not_called()
+
+
+@pytest.mark.parametrize("invalid_budget", [0, 121, True, "120", 120.0, None])
+def test_worker_rejects_invalid_frozen_frame_budget_before_ocr_or_provider(tmp_path, invalid_budget):
+    ctx = segment_context(tmp_path)
+    ctx.lease.config["ocr_max_frames"] = invalid_budget
+    factory = Mock(side_effect=AssertionError("Provider path forbidden"))
+    with pytest.raises(VisionError) as caught:
+        AnalysisStageExecutor(transport_factory=factory)(ctx)
+    assert caught.value.code == "INVALID_CONFIGURATION"
+    factory.assert_not_called()
+    assert not (ctx.directory / "analysis-result.json").exists()
 
 
 def test_voice_only_worker_does_not_touch_ocr_cache(tmp_path, monkeypatch):

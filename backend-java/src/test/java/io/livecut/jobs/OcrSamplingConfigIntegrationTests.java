@@ -82,10 +82,12 @@ class OcrSamplingConfigIntegrationTests {
         String video = video(), key = key();
         JsonNode job = created(create(video, key, Map.of()));
         Map<String, Object> expected = new TreeMap<>(legacyConfig()); expected.put("ocr_sampling", "uniform");
+        expected.put("ocr_max_frames", 120);
         assertEquals(JSON.valueToTree(expected), job.path("config"));
         assertEquals(job.path("config"), JSON.readTree(jdbc().queryForObject("SELECT config_json FROM analysis_job WHERE id=?", String.class, job.path("id").asText())));
         byte[] before = getBytes(job.path("id").asText());
         assertArrayEquals(before, create(video, key, Map.of("ocr_sampling", "uniform")).body());
+        assertArrayEquals(before, create(video, key, Map.of("ocr_max_frames", 120)).body());
         assertEquals(1, jdbc().queryForObject("SELECT COUNT(*) FROM analysis_job WHERE video_id=?", Integer.class, video));
         error(create(video, key, Map.of("ocr_sampling", "prefix")), 409, "IDEMPOTENCY_CONFLICT");
     }
@@ -101,6 +103,7 @@ class OcrSamplingConfigIntegrationTests {
         for (JsonNode job : List.of(prefix, uniform)) {
             Map<String, Object> normalized = new TreeMap<>(legacyConfig());
             normalized.put("ocr_sampling", job.path("config").path("ocr_sampling").asText());
+            normalized.put("ocr_max_frames", 120);
             assertEquals(hash(JSON.writeValueAsString(normalized)), job.path("config_hash").asText());
             for (JsonNode stage : job.path("stages")) {
                 assertEquals(hash(source + "\n" + job.path("config_hash").asText() + "\n" + stage.path("stage_type").asText() + "\n0"), stage.path("input_hash").asText());
@@ -114,6 +117,7 @@ class OcrSamplingConfigIntegrationTests {
         JsonNode claimed = claim(stage(job, "MEDIA").path("id").asText());
         assertEquals("none", claimed.path("config").path("visual_provider").asText());
         assertEquals("uniform", claimed.path("config").path("ocr_sampling").asText());
+        assertEquals(120, claimed.path("config").path("ocr_max_frames").asInt());
         assertEquals(0, jdbc().queryForObject("SELECT COUNT(*) FROM model_call WHERE job_id=?", Integer.class, job.path("id").asText()));
     }
 
@@ -179,16 +183,98 @@ class OcrSamplingConfigIntegrationTests {
     }
 
     @Test void retryOfNewPrefixTaskKeepsTheFrozenExplicitPolicyAndItsInputHashes() throws Exception {
-        JsonNode job = created(create(video(), key(), Map.of("ocr_sampling", "prefix")));
+        JsonNode job = created(create(video(), key(), Map.of("ocr_sampling", "prefix", "ocr_max_frames", 72)));
         String id = job.path("id").asText(); var before = metadata(id); var inputs = inputHashes(id);
         JsonNode old = claim(stage(job, "MEDIA").path("id").asText());
         ok(send("POST", action(old, "fail"), Map.of("attempt", old.path("attempt").asInt(), "run_token", old.path("run_token").asText(), "error_code", "SYNTHETIC_RETRY", "retryable", false), null, true));
         JsonNode ready = ok(send("POST", "/api/jobs/" + id + "/retry", null, null, false));
         assertEquals("prefix", ready.path("config").path("ocr_sampling").asText());
+        assertEquals(72, ready.path("config").path("ocr_max_frames").asInt());
         JsonNode next = claim(stage(ready, "MEDIA").path("id").asText());
         assertEquals("prefix", next.path("config").path("ocr_sampling").asText());
+        assertEquals(72, next.path("config").path("ocr_max_frames").asInt());
         assertEquals(before.get("config_hash"), metadata(id).get("config_hash"));
         assertEquals(before.get("config_json"), metadata(id).get("config_json")); assertEquals(inputs, inputHashes(id));
+    }
+
+    @Test void frameBudgetsAreBoundedIntegersAndInvalidValuesDoNotCreateJobs() throws Exception {
+        String video = video();
+        for (String value : List.of("null", "true", "false", "0", "-1", "121", "1.0", "1.5", "[]", "{}", "\"16\"", "9223372036854775807")) {
+            error(create(video, key(), JSON.readTree("{\"ocr_max_frames\":" + value + "}")), 400, "INVALID_ARGUMENT");
+        }
+        assertEquals(0, jdbc().queryForObject("SELECT COUNT(*) FROM analysis_job WHERE video_id=?", Integer.class, video));
+    }
+
+    @Test void explicitFrameBudgetsAffectTheFrozenConfigAndEveryInitialStageHash() throws Exception {
+        String video = video(), source = jdbc().queryForObject("SELECT content_hash FROM video_asset WHERE id=?", String.class, video);
+        Set<String> hashes = new LinkedHashSet<>();
+        for (int frames : List.of(1, 16, 120)) {
+            String key = key();
+            JsonNode job = created(create(video, key, Map.of("ocr_max_frames", frames)));
+            String id = job.path("id").asText();
+            assertEquals(frames, job.path("config").path("ocr_max_frames").asInt());
+            Map<String, Object> expected = new TreeMap<>(legacyConfig());
+            expected.put("ocr_sampling", "uniform"); expected.put("ocr_max_frames", frames);
+            String configHash = hash(JSON.writeValueAsString(expected));
+            assertEquals(configHash, job.path("config_hash").asText());
+            assertTrue(hashes.add(configHash));
+            for (JsonNode stage : job.path("stages")) {
+                assertEquals(hash(source + "\n" + configHash + "\n" + stage.path("stage_type").asText() + "\n0"), stage.path("input_hash").asText());
+            }
+            byte[] before = getBytes(id);
+            assertArrayEquals(before, create(video, key, Map.of("ocr_max_frames", frames)).body());
+            error(create(video, key, Map.of("ocr_max_frames", frames == 120 ? 16 : 120)), 409, "IDEMPOTENCY_CONFLICT");
+            assertArrayEquals(before, getBytes(id));
+        }
+    }
+
+    @Test void preBudgetPolicyReceiptsReplayOnlyWhenTheFrameFieldIsOmitted() throws Exception {
+        for (String policy : List.of("uniform", "prefix")) {
+            Legacy legacy = legacy(policy);
+            byte[] before = getBytes(legacy.job()); var frozen = metadata(legacy.job()); var stages = stageRows(legacy.job());
+            assertArrayEquals(before, create(legacy.video(), legacy.key(), Map.of("ocr_sampling", policy)).body());
+            if (policy.equals("uniform")) {
+                assertArrayEquals(before, create(legacy.video(), legacy.key(), Map.of()).body());
+                var noConfig = send("POST", "/api/jobs", Map.of("video_id", legacy.video()), legacy.key(), false);
+                assertEquals(201, noConfig.statusCode(), text(noConfig)); assertArrayEquals(before, noConfig.body());
+            } else { error(create(legacy.video(), legacy.key(), Map.of()), 409, "IDEMPOTENCY_CONFLICT"); }
+            for (int frames : List.of(16, 120)) {
+                error(create(legacy.video(), legacy.key(), Map.of("ocr_sampling", policy, "ocr_max_frames", frames)), 409, "IDEMPOTENCY_CONFLICT");
+            }
+            error(create(legacy.video(), legacy.key(), Map.of("ocr_sampling", policy, "max_text_calls", 13)), 409, "IDEMPOTENCY_CONFLICT");
+            error(create(video(), legacy.key(), Map.of("ocr_sampling", policy)), 409, "IDEMPOTENCY_CONFLICT");
+            assertArrayEquals(before, getBytes(legacy.job())); assertEquals(frozen, metadata(legacy.job())); assertEquals(stages, stageRows(legacy.job()));
+        }
+    }
+
+    @Test void preBudgetTaskNeverBackfillsFramesAcrossRestartClaimAndRetry() throws Exception {
+        Legacy legacy = legacy("uniform");
+        byte[] before = getBytes(legacy.job()); var frozen = metadata(legacy.job()); var inputs = inputHashes(legacy.job());
+        context.close(); startContext();
+        assertArrayEquals(before, getBytes(legacy.job()));
+        JsonNode old = claim(stage(JSON.readTree(before), "MEDIA").path("id").asText());
+        assertFalse(old.path("config").has("ocr_max_frames"));
+        assertEquals("uniform", old.path("config").path("ocr_sampling").asText());
+        ok(send("POST", action(old, "fail"), Map.of("attempt", old.path("attempt").asInt(), "run_token", old.path("run_token").asText(), "error_code", "SYNTHETIC_RETRY", "retryable", false), null, true));
+        JsonNode ready = ok(send("POST", "/api/jobs/" + legacy.job() + "/retry", null, null, false));
+        assertFalse(ready.path("config").has("ocr_max_frames"));
+        JsonNode next = claim(stage(ready, "MEDIA").path("id").asText());
+        assertEquals(2, next.path("attempt").asInt()); assertFalse(next.path("config").has("ocr_max_frames"));
+        for (String field : List.of("config_hash", "request_hash", "config_json")) { assertEquals(frozen.get(field), metadata(legacy.job()).get(field)); }
+        assertEquals(inputs, inputHashes(legacy.job()));
+    }
+
+    @Test void duplicateKeyRecoveryAlsoPreservesPreBudgetPolicyReceiptsAndRejectsExplicitFrames() throws Exception {
+        Legacy legacy = legacy("uniform");
+        byte[] before = getBytes(legacy.job()); var frozen = metadata(legacy.job()); var stages = stageRows(legacy.job());
+        MISS_RECEIPT_ONCE.set(legacy.key());
+        var replay = create(legacy.video(), legacy.key(), Map.of());
+        assertEquals(201, replay.statusCode(), text(replay)); assertArrayEquals(before, replay.body());
+        assertEquals(1, HIDDEN_RECEIPTS.get());
+        MISS_RECEIPT_ONCE.set(legacy.key());
+        error(create(legacy.video(), legacy.key(), Map.of("ocr_max_frames", 16)), 409, "IDEMPOTENCY_CONFLICT");
+        assertEquals(2, HIDDEN_RECEIPTS.get());
+        assertEquals(frozen, metadata(legacy.job())); assertEquals(stages, stageRows(legacy.job()));
     }
 
     private String video() {
@@ -197,9 +283,12 @@ class OcrSamplingConfigIntegrationTests {
         var result = context.getBean(VideoService.class).upload(new MockMultipartFile("file", "sampling.mp4", "video/mp4", header));
         videos.add(result.id()); return result.id();
     }
-    private Legacy legacy() {
+    private Legacy legacy() { return legacy(null); }
+    private Legacy legacy(String policy) {
         String video = video(), job = UUID.randomUUID().toString(), key = key();
-        String config = JSON.writeValueAsString(legacyConfig()), configHash = hash(config);
+        Map<String, Object> values = legacyConfig();
+        if (policy != null) { values.put("ocr_sampling", policy); }
+        String config = JSON.writeValueAsString(values), configHash = hash(config);
         jdbc().update("INSERT INTO analysis_job (id,video_id,generation,idempotency_key,request_hash,config_hash,config_json,status,max_text_calls,max_asr_submissions) VALUES (?,?,1,?,?,?,?,'QUEUED',12,1)", job, video, key, hash(video + "\n" + configHash), configHash, config);
         jobs.add(job);
         String source = jdbc().queryForObject("SELECT content_hash FROM video_asset WHERE id=?", String.class, video);

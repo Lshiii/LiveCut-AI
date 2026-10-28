@@ -561,6 +561,7 @@ class AnalysisStageExecutor:
                     cache_root=_native_path(context.storage_root / "cache" / "ocr-v1"),
                     ffmpeg_path=self.ffmpeg_path, guard=context.guard.check,
                     sampling_policy=config.get("ocr_sampling", "prefix"),
+                    max_frames=config.get("ocr_max_frames", 16),
                 )
                 observations = cached.observations
                 context.guard.check()

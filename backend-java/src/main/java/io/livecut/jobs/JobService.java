@@ -37,7 +37,7 @@ import tools.jackson.databind.ObjectMapper;
 @EnableScheduling
 public class JobService {
     private static final List<String> FLOW = List.of("MEDIA", "ASR", "SEGMENT", "TIMELINE");
-    private static final Set<String> CONFIG_FIELDS = Set.of("asr_model", "text_model", "visual_provider", "max_text_calls", "max_asr_submissions", "ocr_sampling");
+    private static final Set<String> CONFIG_FIELDS = Set.of("asr_model", "text_model", "visual_provider", "max_text_calls", "max_asr_submissions", "ocr_sampling", "ocr_max_frames");
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final RowMapper<StageRow> STAGE = (row, index) -> new StageRow(
             row.getString("id"), row.getString("job_id"), row.getString("stage_type"), row.getString("shard_key"),
@@ -88,18 +88,13 @@ public class JobService {
         String configJson = JSON.writeValueAsString(config);
         String configHash = sha256(configJson);
         String requestHash = sha256(videoId + "\n" + configHash);
-        String legacyRequestHash;
-        if (request.config() == null || !request.config().containsKey("ocr_sampling")) {
-            Map<String, Object> legacyConfig = new TreeMap<>(config);
-            legacyConfig.remove("ocr_sampling");
-            legacyRequestHash = sha256(videoId + "\n" + sha256(JSON.writeValueAsString(legacyConfig)));
-        } else { legacyRequestHash = null; }
+        Set<String> suppliedFields = request.config() == null ? Set.of() : Set.copyOf(request.config().keySet());
         try {
             return transaction.execute(status -> {
                 List<Map<String, Object>> videos = jdbc.queryForList("SELECT id, content_hash FROM video_asset WHERE id=? FOR UPDATE", videoId);
                 if (videos.isEmpty()) { throw missing("VIDEO_NOT_FOUND", "Video was not found"); }
                 List<String> existing = jdbc.queryForList("SELECT id FROM analysis_job WHERE idempotency_key=?", String.class, key);
-                if (!existing.isEmpty()) { return existingCreate(existing.getFirst(), requestHash, legacyRequestHash); }
+                if (!existing.isEmpty()) { return existingCreate(existing.getFirst(), videoId, config, suppliedFields, requestHash); }
                 int generation = jdbc.queryForObject("SELECT COALESCE(MAX(generation),0)+1 FROM analysis_job WHERE video_id=?", Integer.class, videoId);
                 String id = UUID.randomUUID().toString();
                 jdbc.update("INSERT INTO analysis_job (id,video_id,generation,idempotency_key,request_hash,config_hash,config_json,status,max_text_calls,max_asr_submissions) VALUES (?,?,?,?,?,?,?,'QUEUED',?,?)",
@@ -118,7 +113,7 @@ public class JobService {
             return transaction.execute(status -> {
                 List<String> existing = jdbc.queryForList("SELECT id FROM analysis_job WHERE idempotency_key=?", String.class, key);
                 if (existing.isEmpty()) { throw concurrentCreate; }
-                return existingCreate(existing.getFirst(), requestHash, legacyRequestHash);
+                return existingCreate(existing.getFirst(), videoId, config, suppliedFields, requestHash);
             });
         }
     }
@@ -403,13 +398,22 @@ public class JobService {
         }
     }
 
-    private JobSnapshot existingCreate(String id, String requestHash, String legacyRequestHash) {
+    private JobSnapshot existingCreate(String id, String videoId, Map<String, Object> normalized,
+                                       Set<String> suppliedFields, String requestHash) {
         Map<String, Object> row = job(id, true);
-        // Missing-field retries can recover a pre-policy receipt. Explicit new
-        // policies and existing policy-bearing jobs never take this fallback.
-        if (!requestHash.equals(row.get("request_hash")) && (legacyRequestHash == null
-                || !legacyRequestHash.equals(row.get("request_hash")) || readConfig(row).containsKey("ocr_sampling"))) {
-            throw conflict("IDEMPOTENCY_CONFLICT", "Idempotency key belongs to different job input");
+        if (!requestHash.equals(row.get("request_hash"))) {
+            // Only omitted fields absent from this locked historical receipt may
+            // use their old shape. Never backfill stored config or reinterpret an
+            // explicit policy/frame budget, including duplicate-key recovery.
+            Map<String, Object> historicalShape = new TreeMap<>(normalized);
+            Map<String, Object> frozen = readConfig(row);
+            for (String field : List.of("ocr_sampling", "ocr_max_frames")) {
+                if (!suppliedFields.contains(field) && !frozen.containsKey(field)) { historicalShape.remove(field); }
+            }
+            String historicalRequestHash = sha256(videoId + "\n" + sha256(JSON.writeValueAsString(historicalShape)));
+            if (!historicalRequestHash.equals(row.get("request_hash"))) {
+                throw conflict("IDEMPOTENCY_CONFLICT", "Idempotency key belongs to different job input");
+            }
         }
         return snapshot(row);
     }
@@ -539,6 +543,7 @@ public class JobService {
         result.put("asr_model", "paraformer-v2"); result.put("text_model", "qwen-plus");
         result.put("visual_provider", "ocr"); result.put("max_text_calls", 12); result.put("max_asr_submissions", 1);
         result.put("ocr_sampling", "uniform");
+        result.put("ocr_max_frames", 120);
         if (supplied != null) {
             if (supplied.keySet().stream().anyMatch(key -> key == null || !CONFIG_FIELDS.contains(key))) { throw bad("INVALID_ARGUMENT", "Unknown analysis configuration field"); }
             result.putAll(supplied);
@@ -548,6 +553,9 @@ public class JobService {
         }
         if (!(result.get("visual_provider") instanceof String provider) || !Set.of("ocr", "none").contains(provider)) { throw bad("INVALID_ARGUMENT", "visual_provider must be ocr or none"); }
         if (!(result.get("ocr_sampling") instanceof String sampling) || !Set.of("prefix", "uniform").contains(sampling)) { throw bad("INVALID_ARGUMENT", "ocr_sampling must be prefix or uniform"); }
+        Object frames = result.get("ocr_max_frames");
+        if (!(frames instanceof Integer || frames instanceof Long) || ((Number) frames).longValue() < 1 || ((Number) frames).longValue() > 120) { throw bad("INVALID_ARGUMENT", "ocr_max_frames must be an integer from 1 to 120"); }
+        result.put("ocr_max_frames", ((Number) frames).intValue());
         result.put("max_text_calls", quota(result.get("max_text_calls"), 100));
         result.put("max_asr_submissions", quota(result.get("max_asr_submissions"), 10));
         return Map.copyOf(result).entrySet().stream().collect(java.util.stream.Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue, (a, b) -> a, TreeMap::new));

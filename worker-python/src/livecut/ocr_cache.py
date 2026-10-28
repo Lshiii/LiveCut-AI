@@ -432,7 +432,7 @@ def cached_observe_video_ocr(
     sampling_policy: str = "prefix",
     engine: Callable[[str], Any] | None = None, engine_identity: str | None = None,
     extractor: Callable[..., dict] | None = None, extractor_identity: str | None = None,
-    max_cache_bytes: int = 512 * 1024 * 1024, max_entries: int = 128,
+    max_cache_bytes: int = 1024 * 1024 * 1024, max_entries: int = 128,
     lock_timeout_seconds: float = 30.0,
 ) -> OCRCacheResult:
     """Reuse validated evidence, or generate one bounded complete bundle.
