@@ -66,6 +66,169 @@ def test_window_edges_merge_only_on_explicit_model_continuation(tmp_path, contin
     assert [uid for s in result["segments"] for uid in s["audio_evidence_utterance_ids"]] == ["u0", "u1", "u2", "u3"]
 
 
+def test_continuation_cannot_replace_the_first_title_and_gets_one_controlled_repair(tmp_path):
+    title = "HTML文档类型、属性与DOM结构"
+    narrowed = "只谈DOM交互的自由模型标题"
+    repaired = {**topic("u2", "u3", title, continues=True),
+                "summary": "前段介绍文档类型和属性，本窗继续讲DOM关系。"}
+    result, requests = run(tmp_path, [
+        {"topics": [topic("u0", "u1", title)]},
+        {"topics": [topic("u2", "u3", narrowed, continues=True)]},
+        {"topics": [repaired]}], window_ms=2000)
+    assert len(result["segments"]) == 1 and result["segments"][0]["title"] == title
+    assert result["segments"][0]["summary"] == repaired["summary"]
+    assert result["segments"][0]["end_ms"] == 3900 and len(requests) == 3
+    message = json.loads(requests[2]["input"]["messages"][-1]["content"])
+    assert message["validation_feedback"] == {"rule": "CONTINUATION_TITLE_CHANGED", "topic_index": 0}
+    assert narrowed not in requests[2]["input"]["messages"][-1]["content"]
+    saved_raw = json.loads((tmp_path / "topics/window-0001-attempt-0.json").read_text(encoding="utf-8"))
+    assert narrowed in saved_raw["output"]["choices"][0]["message"]["content"], "Original response stays intact"
+
+
+def test_repeated_continuation_title_change_fails_without_a_second_repair(tmp_path):
+    responses = [
+        {"topics": [topic("u0", "u1", "完整讨论标题")]},
+        {"topics": [topic("u2", "u3", "缩窄后的标题", continues=True)]},
+        {"topics": [topic("u2", "u3", "再次缩窄的标题", continues=True)]},
+    ]
+    sent = []
+    def provider(request):
+        sent.append(request)
+        assert len(sent) <= 3, "No second repair allowed"
+        return httpx.Response(200, json=raw(responses[len(sent) - 1]))
+    with httpx.Client(transport=httpx.MockTransport(provider)) as client:
+        with pytest.raises(SegmentationError) as error:
+            discover_topics(utterances(), 4000, tmp_path, client=client, api_key="fixture",
+                            job_id="j", video_id="v", window_ms=2000, max_calls=8)
+    assert error.value.feedback == {"rule": "CONTINUATION_TITLE_CHANGED", "topic_index": 0}
+    assert error.value.diagnostic["window_index"] == 1
+    assert error.value.diagnostic["format_repair"] == "FAILED_VALIDATION"
+    assert len(sent) == 3 and not (tmp_path / "analysis-result.json").exists()
+
+
+def test_keyword_overflow_feedback_reports_only_the_program_measured_limit(tmp_path):
+    unsafe_text = "model-text-that-must-not-enter-repair"
+    invalid = {**topic("u0", "u3", unsafe_text),
+               "keywords": [f"{unsafe_text}-{index}" for index in range(10)]}
+    _, requests = run(tmp_path, [{"topics": [invalid]}, {"topics": [topic("u0", "u3")]}])
+    content = requests[1]["input"]["messages"][-1]["content"]
+    feedback = json.loads(content)["validation_feedback"]
+    assert feedback == {"rule": "KEYWORD_LIMIT", "topic_index": 0, "actual_count": 10, "max_count": 8}
+    assert unsafe_text not in content and len(requests) == 2
+    state = json.loads((tmp_path / "topics/state.json").read_text(encoding="utf-8"))
+    assert state["calls"][0]["validation_feedback"] == feedback
+    assert unsafe_text not in json.dumps(state)
+
+
+def test_metadata_repair_locks_the_whole_valid_partition_without_echoing_model_text(tmp_path):
+    first = {**topic("u0", "u1", "untrusted-original-title"),
+             "summary": "untrusted-original-summary",
+             "keywords": [f"untrusted-keyword-{i}" for i in range(10)]}
+    second = topic("u2", "u3", "untrusted-second-title")
+    repaired_first = {**topic("u0", "u1", "修复后的缓存穿透标题"), "keywords": ["模型重新选择的关键词"]}
+    repaired_second = topic("u2", "u3", "修复后的缓存击穿标题")
+    result, requests = run(tmp_path, [
+        {"topics": [first, second]}, {"topics": [repaired_first, repaired_second]}])
+    repair = json.loads(requests[1]["input"]["messages"][-1]["content"])
+    assert repair["core_first_utterance_id"] == "u0" and repair["core_last_utterance_id"] == "u3"
+    assert repair["core_utterance_ids"] == ["u0", "u1", "u2", "u3"]
+    assert repair["validated_topic_ranges"] == [
+        {"start_utterance_id": "u0", "end_utterance_id": "u1", "continues_previous": False},
+        {"start_utterance_id": "u2", "end_utterance_id": "u3", "continues_previous": False},
+    ]
+    assert "untrusted-" not in requests[1]["input"]["messages"][-1]["content"]
+    assert [s["keywords"] for s in result["segments"]] == [["模型重新选择的关键词"], ["缓存"]]
+    saved = json.loads((tmp_path / "topics/window-0000-attempt-0.json").read_text(encoding="utf-8"))
+    assert json.loads(saved["output"]["choices"][0]["message"]["content"])["topics"][0] == first
+
+
+@pytest.mark.parametrize("changed", [
+    [topic("u0", "u3")],
+    [topic("u0", "u0"), topic("u1", "u3")],
+])
+def test_repair_cannot_replace_a_validated_partition_with_another_valid_partition(tmp_path, changed):
+    responses = [{"topics": [{**topic("u0", "u1"), "keywords": [f"关键词{i}" for i in range(10)]},
+                             topic("u2", "u3")]}, {"topics": changed}]
+    requests = []
+    def provider(request):
+        requests.append(request)
+        assert len(requests) <= 2, "A range-changing repair must not trigger another repair"
+        return httpx.Response(200, json=raw(responses[len(requests) - 1]))
+    with httpx.Client(transport=httpx.MockTransport(provider)) as client:
+        with pytest.raises(SegmentationError) as error:
+            discover_topics(utterances(), 4000, tmp_path, client=client, api_key="fixture",
+                            job_id="j", video_id="v", max_calls=8)
+    assert error.value.feedback == {"rule": "REPAIR_RANGES_CHANGED"}
+    assert error.value.diagnostic["format_repair"] == "FAILED_VALIDATION"
+    assert len(requests) == 2 and not (tmp_path / "analysis-result.json").exists()
+    state = json.loads((tmp_path / "topics/state.json").read_text(encoding="utf-8"))
+    assert [call["validation_feedback"]["rule"] for call in state["calls"]] == [
+        "KEYWORD_LIMIT", "REPAIR_RANGES_CHANGED"]
+
+
+def test_repair_cannot_change_a_validated_continuation_flag(tmp_path):
+    responses = [
+        {"topics": [topic("u0", "u1")]},
+        {"topics": [{**topic("u2", "u3", continues=True), "keywords": [f"关键词{i}" for i in range(10)]}]},
+        {"topics": [topic("u2", "u3", continues=False)]},
+    ]
+    requests = []
+    def provider(request):
+        requests.append(request)
+        assert len(requests) <= 3
+        return httpx.Response(200, json=raw(responses[len(requests) - 1]))
+    with httpx.Client(transport=httpx.MockTransport(provider)) as client:
+        with pytest.raises(SegmentationError) as error:
+            discover_topics(utterances(), 4000, tmp_path, client=client, api_key="fixture",
+                            job_id="j", video_id="v", window_ms=2000, max_calls=8)
+    assert error.value.feedback == {"rule": "REPAIR_RANGES_CHANGED"}
+    repair = json.loads(json.loads(requests[2].content)["input"]["messages"][-1]["content"])
+    assert repair["validated_topic_ranges"][0]["continues_previous"] is True
+    assert len(requests) == 3 and not (tmp_path / "analysis-result.json").exists()
+
+
+def test_context_id_range_gets_core_bounds_without_any_validated_range_anchor(tmp_path):
+    result, requests = run(tmp_path, [
+        {"topics": [topic("u0", "u2", "untrusted-outside-core-title")]},
+        {"topics": [topic("u0", "u1")]},
+        {"topics": [topic("u2", "u3")]},
+    ], window_ms=2000)
+    initial = json.loads(requests[0]["input"]["messages"][1]["content"])
+    assert "u2" in {u["utterance_id"] for u in initial["transcript"]}, "u2 is visible context, not core"
+    repair = json.loads(requests[1]["input"]["messages"][-1]["content"])
+    assert repair["core_first_utterance_id"] == "u0" and repair["core_last_utterance_id"] == "u1"
+    assert repair["core_utterance_ids"] == ["u0", "u1"]
+    assert "validated_topic_ranges" not in repair
+    assert repair["validation_feedback"]["rule"] == "UNKNOWN_CORE_ID"
+    assert "untrusted-outside-core-title" not in requests[1]["input"]["messages"][-1]["content"]
+    assert len(result["segments"]) == 2 and len(requests) == 3
+
+
+def test_any_invalid_later_range_prevents_partial_anchors_for_a_metadata_failure(tmp_path):
+    result, requests = run(tmp_path, [
+        {"topics": [{**topic("u0", "u1"), "keywords": [f"关键词{i}" for i in range(10)]},
+                    topic("u3", "u3")]},
+        {"topics": [topic("u0", "u3")]},
+    ])
+    repair = json.loads(requests[1]["input"]["messages"][-1]["content"])
+    assert "validated_topic_ranges" not in repair and repair["validation_feedback"]["rule"] == "CORE_ORDER"
+    assert len(result["segments"]) == 1
+
+
+@pytest.mark.parametrize("mutation,rule", [
+    ({"start_utterance_id": "unknown-model-free-text"}, "UNKNOWN_CORE_ID"),
+    ({"summary": "x" * 1001}, "SUMMARY_INVALID"),
+    ({"keywords": ["相同", "相同"]}, "KEYWORD_DUPLICATE"),
+])
+def test_validation_feedback_never_echoes_invalid_model_content(mutation, rule):
+    with pytest.raises(SegmentationError) as error:
+        _parse(raw({"topics": [{**topic("u0", "u3"), **mutation}]}), ["u0", "u1", "u2", "u3"], None)
+    assert error.value.feedback["rule"] == rule and error.value.feedback["topic_index"] == 0
+    assert set(error.value.feedback) <= {"rule", "topic_index", "actual_count", "max_count"}
+    assert "unknown-model-free-text" not in json.dumps(error.value.feedback)
+    assert "x" * 10 not in json.dumps(error.value.feedback)
+
+
 @pytest.mark.parametrize("bad", [
     {"topics": []}, {"topics": [topic("u0", "u2")]},
     {"topics": [topic("context", "u3")]},
@@ -191,7 +354,25 @@ def test_uncertain_topic_request_never_automatically_spends_again(tmp_path):
     assert len(requests) == 1
 
 
-def test_topic_requests_replay_verified_durable_budget_across_worker_attempts(tmp_path):
+def test_uncertain_repair_never_repeats_the_initial_or_repair_provider_request(tmp_path):
+    requests = []
+    def lost_repair(request):
+        requests.append(request)
+        if len(requests) == 1:
+            return httpx.Response(200, json=raw({"topics": [{**topic("u0", "u3"),
+                "keywords": [f"关键词{i}" for i in range(10)]}]}))
+        raise httpx.ReadTimeout("synthetic repair failure", request=request)
+    with httpx.Client(transport=httpx.MockTransport(lost_repair)) as client:
+        for expected in ("PROVIDER_ERROR", "CALL_STATE_UNCERTAIN"):
+            with pytest.raises(SegmentationError) as error:
+                discover_topics(utterances(), 4000, tmp_path, client=client, api_key="synthetic-key",
+                                job_id="j", video_id="v", max_calls=8)
+            assert error.value.code == expected
+    assert len(requests) == 2
+
+
+@pytest.mark.parametrize("needs_repair", [False, True])
+def test_topic_requests_replay_verified_durable_budget_across_worker_attempts(tmp_path, needs_repair):
     class Ledger:
         def __init__(self):
             self.calls, self.events = {}, []
@@ -212,6 +393,9 @@ def test_topic_requests_replay_verified_durable_budget_across_worker_attempts(tm
     def provider(request):
         external.append(request)
         ledger.events.append("provider")
+        if needs_repair and len(external) == 1:
+            return httpx.Response(200, json=raw({"topics": [{**topic("u0", "u3"),
+                "keywords": [f"关键词{i}" for i in range(10)]}]}))
         return httpx.Response(200, json=raw({"topics": [topic("u0", "u3")]}))
 
     results = []
@@ -222,11 +406,12 @@ def test_topic_requests_replay_verified_durable_budget_across_worker_attempts(tm
         with httpx.Client(transport=BudgetTransport(ledger, ctx, inner=httpx.MockTransport(provider))) as client:
             results.append(discover_topics(utterances(), 4000, ctx.directory, client=client,
                 api_key="synthetic-secret-not-for-ledger", job_id=lease.job_id, video_id=lease.video_id))
-    assert results[0] == results[1] and len(external) == len(ledger.calls) == 1
-    assert ledger.events == ["reserve", "DISPATCHING", "provider", "SUCCEEDED", "reserve"]
-    call = next(iter(ledger.calls.values()))
-    assert call["kind"] == "TEXT" and call["status"] == "SUCCEEDED"
-    assert sha256(tmp_path / call["response_key"]) == call["response_hash"]
+    expected_calls = 2 if needs_repair else 1
+    assert results[0] == results[1] and len(external) == len(ledger.calls) == expected_calls
+    assert ledger.events == ["reserve", "DISPATCHING", "provider", "SUCCEEDED"] * expected_calls + ["reserve"] * expected_calls
+    for call in ledger.calls.values():
+        assert call["kind"] == "TEXT" and call["status"] == "SUCCEEDED"
+        assert sha256(tmp_path / call["response_key"]) == call["response_hash"]
     assert "synthetic-secret" not in json.dumps(ledger.calls)
 
 
