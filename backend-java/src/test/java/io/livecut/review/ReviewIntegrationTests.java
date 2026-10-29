@@ -56,7 +56,7 @@ class ReviewIntegrationTests {
 
     @BeforeAll
     void start() {
-        assertTrue(System.getenv("LIVECUT_DB_URL").matches("jdbc:mysql://[^/]+/livecut_test(?:\\?.*)?"),
+        assertTrue(System.getenv("LIVECUT_DB_URL").matches("jdbc:mysql://[^/]+/livecut_test(?:_topics)?(?:\\?.*)?"),
                 "Review tests require the dedicated livecut_test database");
         context = new SpringApplicationBuilder(LivecutBackendApplication.class).run(
                 "--server.port=0", "--server.address=127.0.0.1", "--livecut.jobs.scan-enabled=false",

@@ -28,11 +28,11 @@ test('persisted budgets are displayed independently of current new-task defaults
 test('new analysis payload freezes an integer frame cap only for local OCR', () => {
   assert.equal(DEFAULT_OCR_MAX_FRAMES, 120)
   assert.deepEqual(newAnalysisConfig('ocr', 100), {
-    visual_provider: 'ocr', max_text_calls: 100, ocr_sampling: 'uniform', ocr_max_frames: 120,
+    analysis_mode: 'topics', visual_provider: 'ocr', max_text_calls: 100, ocr_sampling: 'uniform', ocr_max_frames: 120,
   })
   for (const budget of [1, 16, 48, 120]) {
     assert.deepEqual(newAnalysisConfig('ocr', 30, budget), {
-      visual_provider: 'ocr', max_text_calls: 30, ocr_sampling: 'uniform', ocr_max_frames: budget,
+      analysis_mode: 'topics', visual_provider: 'ocr', max_text_calls: 30, ocr_sampling: 'uniform', ocr_max_frames: budget,
     })
   }
   for (const budget of [undefined, null, '', 0, -1, 1.25, 121, true, false, NaN, Infinity, '120', [], {}]) {
@@ -41,7 +41,7 @@ test('new analysis payload freezes an integer frame cap only for local OCR', () 
   }
   for (const unusedBudget of [0, 'invalid', 120]) {
     const speechOnly = newAnalysisConfig('none', 12, unusedBudget)
-    assert.deepEqual(speechOnly, { visual_provider: 'none', max_text_calls: 12, ocr_sampling: 'uniform' })
+    assert.deepEqual(speechOnly, { analysis_mode: 'topics', visual_provider: 'none', max_text_calls: 12, ocr_sampling: 'uniform' })
     assert.ok(!Object.hasOwn(speechOnly, 'ocr_max_frames'))
   }
 })

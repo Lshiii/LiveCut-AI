@@ -23,12 +23,19 @@ public final class ExportModels {
                        @JsonProperty("size_bytes") Long sizeBytes,
                        @JsonProperty("content_url") String contentUrl,
                        @JsonProperty("download_url") String downloadUrl,
-                       @JsonInclude(JsonInclude.Include.NON_NULL) Map<String, Object> diagnostic) {
+                       @JsonInclude(JsonInclude.Include.NON_NULL) Map<String, Object> diagnostic,
+                       @JsonInclude(JsonInclude.Include.NON_NULL) String title) {
         public Clip(String id, String segmentId, String productId, String productName,
                     long startMs, long endMs, String stageId, String status, int attempt,
                     String errorCode, Long sizeBytes, String contentUrl, String downloadUrl) {
             this(id, segmentId, productId, productName, startMs, endMs, stageId, status, attempt,
-                    errorCode, sizeBytes, contentUrl, downloadUrl, null);
+                    errorCode, sizeBytes, contentUrl, downloadUrl, null, null);
+        }
+        public Clip(String id, String segmentId, String productId, String productName,
+                    long startMs, long endMs, String stageId, String status, int attempt,
+                    String errorCode, Long sizeBytes, String contentUrl, String downloadUrl,
+                    Map<String, Object> diagnostic) {
+            this(id,segmentId,productId,productName,startMs,endMs,stageId,status,attempt,errorCode,sizeBytes,contentUrl,downloadUrl,diagnostic,null);
         }
     }
     public record Snapshot(String id, @JsonProperty("job_id") String jobId,
@@ -47,7 +54,12 @@ public final class ExportModels {
                                @JsonProperty("product_name") String productName,
                                @JsonProperty("start_ms") long startMs, @JsonProperty("end_ms") long endMs,
                                String status, int attempt, @JsonProperty("error_code") String errorCode,
-                               ManifestFile file) {}
+                               ManifestFile file, @JsonInclude(JsonInclude.Include.NON_NULL) String title) {
+        public ManifestClip(String clipId,String segmentId,String productId,String productName,long startMs,long endMs,
+                            String status,int attempt,String errorCode,ManifestFile file) {
+            this(clipId,segmentId,productId,productName,startMs,endMs,status,attempt,errorCode,file,null);
+        }
+    }
     /** A state-versioned inventory, distinct from the private worker manifest. */
     public record Manifest(@JsonProperty("schema_version") String schemaVersion,
                            @JsonProperty("data_kind") String dataKind,

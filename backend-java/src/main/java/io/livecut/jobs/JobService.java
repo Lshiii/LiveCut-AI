@@ -37,7 +37,7 @@ import tools.jackson.databind.ObjectMapper;
 @EnableScheduling
 public class JobService {
     private static final List<String> FLOW = List.of("MEDIA", "ASR", "SEGMENT", "TIMELINE");
-    private static final Set<String> CONFIG_FIELDS = Set.of("asr_model", "text_model", "visual_provider", "max_text_calls", "max_asr_submissions", "ocr_sampling", "ocr_max_frames");
+    private static final Set<String> CONFIG_FIELDS = Set.of("asr_model", "text_model", "visual_provider", "max_text_calls", "max_asr_submissions", "ocr_sampling", "ocr_max_frames", "analysis_mode");
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final RowMapper<StageRow> STAGE = (row, index) -> new StageRow(
             row.getString("id"), row.getString("job_id"), row.getString("stage_type"), row.getString("shard_key"),
@@ -407,7 +407,7 @@ public class JobService {
             // explicit policy/frame budget, including duplicate-key recovery.
             Map<String, Object> historicalShape = new TreeMap<>(normalized);
             Map<String, Object> frozen = readConfig(row);
-            for (String field : List.of("ocr_sampling", "ocr_max_frames")) {
+            for (String field : List.of("ocr_sampling", "ocr_max_frames", "analysis_mode")) {
                 if (!suppliedFields.contains(field) && !frozen.containsKey(field)) { historicalShape.remove(field); }
             }
             String historicalRequestHash = sha256(videoId + "\n" + sha256(JSON.writeValueAsString(historicalShape)));
@@ -544,6 +544,7 @@ public class JobService {
         result.put("visual_provider", "ocr"); result.put("max_text_calls", 12); result.put("max_asr_submissions", 1);
         result.put("ocr_sampling", "uniform");
         result.put("ocr_max_frames", 120);
+        result.put("analysis_mode", "topics");
         if (supplied != null) {
             if (supplied.keySet().stream().anyMatch(key -> key == null || !CONFIG_FIELDS.contains(key))) { throw bad("INVALID_ARGUMENT", "Unknown analysis configuration field"); }
             result.putAll(supplied);
@@ -552,6 +553,7 @@ public class JobService {
             if (!(result.get(field) instanceof String model) || !model.matches("[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}")) { throw bad("INVALID_ARGUMENT", "Invalid model identifier"); }
         }
         if (!(result.get("visual_provider") instanceof String provider) || !Set.of("ocr", "none").contains(provider)) { throw bad("INVALID_ARGUMENT", "visual_provider must be ocr or none"); }
+        if (!(result.get("analysis_mode") instanceof String mode) || !Set.of("topics", "commerce").contains(mode)) { throw bad("INVALID_ARGUMENT", "analysis_mode must be topics or commerce"); }
         if (!(result.get("ocr_sampling") instanceof String sampling) || !Set.of("prefix", "uniform").contains(sampling)) { throw bad("INVALID_ARGUMENT", "ocr_sampling must be prefix or uniform"); }
         Object frames = result.get("ocr_max_frames");
         if (!(frames instanceof Integer || frames instanceof Long) || ((Number) frames).longValue() < 1 || ((Number) frames).longValue() > 120) { throw bad("INVALID_ARGUMENT", "ocr_max_frames must be an integer from 1 to 120"); }

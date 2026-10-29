@@ -30,6 +30,8 @@ from .media import extract_audio, probe_media
 from .ocr import ocr_model_id
 from .ocr_cache import cached_observe_video_ocr
 from .segmentation import discover_products
+from .topic_contracts import validate_topic_result
+from .topics import discover_topics
 from .worker_client import WorkerClient, WorkerClientError
 
 STAGES = ("MEDIA", "ASR", "SEGMENT", "TIMELINE", "EXPORT_CLIP")
@@ -589,21 +591,37 @@ class AnalysisStageExecutor:
             with httpx.Client(transport=self.transport_factory(context, "text"),
                               timeout=min(120, context.guard.remaining_seconds()),
                               follow_redirects=False) as client:
-                discover_products(
-                    transcript, media["duration_ms"], _native_path(directory), client=client,
-                    model=config.get("text_model", "qwen-plus"), video_id=lease.video_id,
-                    job_id=lease.job_id, asr_model_id=config.get("asr_model", "paraformer-v2"),
-                    analysis_generation=lease.generation,
-                    max_calls=config.get("max_text_calls", 12), visual_observations=observations,
-                    visual_model_id=observer_id, two_pass=True,
-                    base_url=os.environ.get("LIVECUT_TEXT_BASE_URL"),
-                )
+                if config.get("analysis_mode", "commerce") == "topics":
+                    discover_topics(
+                        transcript, media["duration_ms"], _native_path(directory), client=client,
+                        model=config.get("text_model", "qwen-plus"), video_id=lease.video_id,
+                        job_id=lease.job_id, asr_model_id=config.get("asr_model", "paraformer-v2"),
+                        analysis_generation=lease.generation,
+                        max_calls=config.get("max_text_calls", 12), visual_observations=observations,
+                        base_url=os.environ.get("LIVECUT_TEXT_BASE_URL"))
+                elif config.get("analysis_mode", "commerce") == "commerce":
+                    discover_products(
+                        transcript, media["duration_ms"], _native_path(directory), client=client,
+                        model=config.get("text_model", "qwen-plus"), video_id=lease.video_id,
+                        job_id=lease.job_id, asr_model_id=config.get("asr_model", "paraformer-v2"),
+                        analysis_generation=lease.generation,
+                        max_calls=config.get("max_text_calls", 12), visual_observations=observations,
+                        visual_model_id=observer_id, two_pass=True,
+                        base_url=os.environ.get("LIVECUT_TEXT_BASE_URL"),
+                    )
+                else:
+                    raise WorkerError("UNSUPPORTED_ANALYSIS_MODE")
             artifacts = [context.artifact("analysis_result", directory / "analysis-result.json"),
                          *visual_artifacts]
         elif lease.stage_type == "TIMELINE":
             result_path = context.predecessor("SEGMENT", "analysis_result")
             result = _read(result_path)
-            validate_analysis_result(result)
+            if config.get("analysis_mode", "commerce") == "topics":
+                validate_topic_result(result)
+            elif config.get("analysis_mode", "commerce") == "commerce":
+                validate_analysis_result(result)
+            else:
+                raise WorkerError("UNSUPPORTED_ANALYSIS_MODE")
             if (result.get("data_kind") != "model_result" or result.get("job_id") != lease.job_id
                     or result.get("video_id") != lease.video_id
                     or result.get("analysis_generation") != lease.generation

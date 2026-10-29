@@ -1,0 +1,241 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:livecut:topic-analysis:1.0",
+  "title": "Transcript-anchored video topic chapters",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "analysis_mode",
+    "data_kind",
+    "job_id",
+    "video_id",
+    "analysis_generation",
+    "duration_ms",
+    "transcript_version",
+    "pipeline_version",
+    "review_status",
+    "provenance",
+    "utterances",
+    "frames",
+    "segments"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "analysis_mode": {
+      "const": "topics"
+    },
+    "data_kind": {
+      "enum": [
+        "model_result",
+        "synthetic_fixture"
+      ]
+    },
+    "job_id": {
+      "$ref": "#/$defs/id"
+    },
+    "video_id": {
+      "$ref": "#/$defs/id"
+    },
+    "analysis_generation": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "duration_ms": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "transcript_version": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "\\S"
+    },
+    "pipeline_version": {
+      "const": "topics-text-v1"
+    },
+    "review_status": {
+      "const": "DRAFT"
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "asr_model_id",
+        "text_model_id",
+        "prompt_version",
+        "config_hash"
+      ],
+      "properties": {
+        "asr_model_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "\\S"
+        },
+        "text_model_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "\\S"
+        },
+        "prompt_version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "\\S"
+        },
+        "config_hash": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      }
+    },
+    "utterances": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/utterance"
+      }
+    },
+    "frames": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "frame_id",
+          "timestamp_ms",
+          "object_key"
+        ],
+        "properties": {
+          "frame_id": {
+            "$ref": "#/$defs/id"
+          },
+          "timestamp_ms": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "object_key": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024,
+            "pattern": "\\S"
+          }
+        }
+      }
+    },
+    "segments": {
+      "type": "array",
+      "maxItems": 10000,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "segment_id",
+          "title",
+          "summary",
+          "keywords",
+          "start_ms",
+          "end_ms",
+          "start_utterance_id",
+          "end_utterance_id",
+          "audio_evidence_utterance_ids"
+        ],
+        "properties": {
+          "segment_id": {
+            "$ref": "#/$defs/id"
+          },
+          "title": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 120,
+            "pattern": "\\S"
+          },
+          "summary": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1000,
+            "pattern": "\\S"
+          },
+          "keywords": {
+            "type": "array",
+            "maxItems": 8,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 40,
+              "pattern": "\\S"
+            }
+          },
+          "start_ms": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "end_ms": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "start_utterance_id": {
+            "$ref": "#/$defs/id"
+          },
+          "end_utterance_id": {
+            "$ref": "#/$defs/id"
+          },
+          "audio_evidence_utterance_ids": {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": {
+              "$ref": "#/$defs/id"
+            }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$"
+    },
+    "utterance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "utterance_id",
+        "start_ms",
+        "end_ms",
+        "text",
+        "source_chunk_id"
+      ],
+      "properties": {
+        "utterance_id": {
+          "$ref": "#/$defs/id"
+        },
+        "start_ms": {
+          "$ref": "#/$defs/milliseconds"
+        },
+        "end_ms": {
+          "$ref": "#/$defs/milliseconds"
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S"
+        },
+        "source_chunk_id": {
+          "$ref": "#/$defs/id"
+        }
+      }
+    },
+    "milliseconds": {
+      "type": "integer",
+      "minimum": 0
+    }
+  }
+}

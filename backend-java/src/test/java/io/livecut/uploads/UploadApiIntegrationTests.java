@@ -72,7 +72,7 @@ class UploadApiIntegrationTests {
 
     @BeforeAll
     void start() {
-        assertTrue(System.getenv("LIVECUT_DB_URL").matches("jdbc:mysql://[^/]+/livecut_test(?:\\?.*)?"),
+        assertTrue(System.getenv("LIVECUT_DB_URL").matches("jdbc:mysql://[^/]+/livecut_test(?:_topics)?(?:\\?.*)?"),
                 "Upload tests require the dedicated livecut_test database");
         startContext();
     }

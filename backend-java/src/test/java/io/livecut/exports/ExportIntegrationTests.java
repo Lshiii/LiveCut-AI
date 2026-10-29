@@ -60,7 +60,7 @@ class ExportIntegrationTests {
 
     @BeforeAll
     void start() {
-        assertTrue(System.getenv("LIVECUT_DB_URL").matches("jdbc:mysql://[^/]+/livecut_test(?:\\?.*)?"), "Export tests require dedicated livecut_test");
+        assertTrue(System.getenv("LIVECUT_DB_URL").matches("jdbc:mysql://[^/]+/livecut_test(?:_topics)?(?:\\?.*)?"), "Export tests require dedicated livecut_test");
         startContext();
     }
 
@@ -135,6 +135,10 @@ class ExportIntegrationTests {
     void manifestDownloadListsCurrentStateAndOnlyVerifiedSuccessfulFiles() throws Exception {
         Fixture fixture = fixture(true);
         JsonNode batch = create(fixture, 0, List.of(FIRST, SECOND));
+        for (JsonNode clip : batch.path("clips")) {
+            assertFalse(clip.has("title"), "Existing commerce clip JSON omits the new optional topic title");
+            assertEquals("p1", clip.path("product_id").asText());
+        }
         String batchId = batch.path("id").stringValue();
         String inventoryPath = "/api/exports/" + batchId + "/manifest";
         HttpResponse<byte[]> queuedResponse = send("GET", inventoryPath, null);

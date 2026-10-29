@@ -21,6 +21,7 @@ from .ocr import observe_video_ocr, ocr_model_id
 from .ocr_cache import cached_observe_video_ocr
 from .pipeline import PipelineError, analyze_video
 from .segmentation import SegmentationError, discover_products
+from .topic_contracts import validate_topic_result
 from .vision import VisionError, _write_json, observe_video
 from .worker import WorkerError
 from .worker_client import WorkerClientError
@@ -174,7 +175,12 @@ def main(argv: list[str] | None = None) -> int:
                 client.close()
         elif args.command == "validate-result":
             data = _read_json(args.path)
-            validate_analysis_result(data, schema_path=args.schema)
+            if data.get("analysis_mode") == "topics":
+                if args.schema is not None:
+                    raise ValueError("Topic results use the fixed topic-analysis-result contract")
+                validate_topic_result(data)
+            else:
+                validate_analysis_result(data, schema_path=args.schema)
             _emit({"status": "valid", "schema_version": data["schema_version"],
                    "data_kind": data["data_kind"], "segments": len(data["segments"])})
         elif args.command == "init-annotation":

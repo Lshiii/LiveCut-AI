@@ -8,6 +8,7 @@ import threading
 import wave
 from dataclasses import dataclass
 
+import httpx
 import pytest
 from livecut.worker import (
     AnalysisStageExecutor,
@@ -188,3 +189,56 @@ def test_real_ffmpeg_worker_media_supports_deep_attempt_directory(tmp_path):
         # AAC decoding in FFmpeg builds can retain trailing packet padding.
         # The one-second signal must remain, with at most one 1024-sample frame.
         assert 16000 <= audio.getnframes() <= 16000 + 1024
+
+
+def test_topic_stage_uses_budgeted_text_client_and_publishes_independent_contract(tmp_path, monkeypatch):
+    from livecut.topic_contracts import validate_topic_result
+    from test_topics import raw, topic, utterances
+
+    ctx = context(tmp_path, "SEGMENT")
+    ctx.lease.config.update(analysis_mode="topics", visual_provider="none", max_text_calls=2)
+    predecessor(ctx, "MEDIA", "media_info", {"duration_ms": 4000})
+    predecessor(ctx, "ASR", "transcript", utterances())
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "synthetic-key")
+    monkeypatch.setattr("livecut.worker.cached_observe_video_ocr", lambda *a, **k: pytest.fail("OCR disabled"))
+    requests, factories = [], []
+    def provider(request):
+        requests.append(json.loads(request.content))
+        return httpx.Response(200, json=raw({"topics": [topic("u0", "u1"), topic("u2", "u3", "缓存击穿")]}))
+    def transport(stage_context, kind):
+        factories.append((stage_context, kind))
+        return httpx.MockTransport(provider)
+
+    executor = AnalysisStageExecutor(transport_factory=transport)
+    manifest = executor(ctx)
+    assert executor(ctx) == manifest
+    assert factories == [(ctx, "text"), (ctx, "text")] and len(requests) == 1
+    assert [item["kind"] for item in manifest["artifacts"]] == ["analysis_result"]
+    artifact = manifest["artifacts"][0]
+    prediction = json.loads((tmp_path / artifact["key"]).read_text(encoding="utf-8"))
+    validate_topic_result(prediction)
+    assert prediction["analysis_mode"] == "topics" and "products" not in prediction
+    assert len(prediction["segments"]) == 2 and prediction["job_id"] == ctx.lease.job_id
+    timeline = context(tmp_path / "timeline", "TIMELINE")
+    timeline.lease.config["analysis_mode"] = "topics"
+    predecessor(timeline, "SEGMENT", "analysis_result", prediction)
+    final = AnalysisStageExecutor()(timeline)
+    result = json.loads((timeline.storage_root / final["artifacts"][0]["key"]).read_text(encoding="utf-8"))
+    assert result == prediction
+
+
+def test_topic_stage_still_requires_durable_budget(tmp_path):
+    ctx = context(tmp_path, "SEGMENT")
+    ctx.lease.config.update(analysis_mode="topics", visual_provider="none")
+    predecessor(ctx, "MEDIA", "media_info", {"duration_ms": 4000})
+    predecessor(ctx, "ASR", "transcript", [])
+    with pytest.raises(WorkerError, match="DURABLE_BUDGET_REQUIRED"):
+        AnalysisStageExecutor()(ctx)
+
+
+def test_timeline_does_not_interpret_unknown_analysis_mode_as_commerce(tmp_path):
+    ctx = context(tmp_path, "TIMELINE")
+    ctx.lease.config["analysis_mode"] = "unknown"
+    predecessor(ctx, "SEGMENT", "analysis_result", {})
+    with pytest.raises(WorkerError, match="UNSUPPORTED_ANALYSIS_MODE"):
+        AnalysisStageExecutor()(ctx)

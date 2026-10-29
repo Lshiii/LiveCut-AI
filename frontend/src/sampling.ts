@@ -6,7 +6,7 @@ function validFrameBudget(value: unknown): value is number {
 
 /** Only OCR tasks submit a frame budget; speech-only analysis never consumes it. */
 export function newAnalysisConfig(visualProvider: 'ocr' | 'none', maxTextCalls: number, ocrMaxFrames: unknown = DEFAULT_OCR_MAX_FRAMES) {
-  const common = { visual_provider: visualProvider, max_text_calls: maxTextCalls, ocr_sampling: 'uniform' as const }
+  const common = { analysis_mode: 'topics' as const, visual_provider: visualProvider, max_text_calls: maxTextCalls, ocr_sampling: 'uniform' as const }
   if (visualProvider === 'none') return common
   if (!validFrameBudget(ocrMaxFrames)) throw new RangeError('画面取样上限须为 1～120 的整数。')
   return { ...common, ocr_max_frames: ocrMaxFrames }
