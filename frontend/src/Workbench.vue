@@ -7,11 +7,13 @@ import UploadPanel from './UploadPanel.vue'
 import FailureDiagnostic from './FailureDiagnostic.vue'
 import { DEFAULT_OCR_MAX_FRAMES, newAnalysisConfig, samplingLabel } from './sampling'
 import { SnapshotError, SnapshotStream, isAnalysisTerminal, newestSnapshot, parseAnalysisSnapshot, streamLabels, type StreamMode } from './snapshotStream'
+import { DetailRecovery, isConnectionErrorCode } from './connectionRecovery'
 import './style.css'
 
 const videos = ref<VideoAsset[]>([]), jobs = ref<AnalysisJob[]>([])
 const selectedVideoId = ref(''), selectedJob = ref<AnalysisJob | null>(null)
-const pending = ref(''), errorMessage = ref(''), connectionError = ref(''), notice = ref('')
+const pending = ref(''), errorMessage = ref(''), listConnectionError = ref(''), detailConnectionError = ref(''), notice = ref('')
+const connectionError = computed(() => detailConnectionError.value || listConnectionError.value)
 const online = ref(false), loading = ref(true), query = ref(''), filter = ref('ALL')
 const visualProvider = ref<'ocr' | 'none'>('none'), maxTextCalls = ref(24), maxOcrFrames = ref(DEFAULT_OCR_MAX_FRAMES)
 const uploadPanel = ref<{ chooseFile: () => void } | null>(null)
@@ -19,6 +21,7 @@ const reviewEditor = ref<{ dirty: boolean; pending: boolean } | null>(null)
 const streamMode = ref<StreamMode>('idle')
 let timer: number | undefined, refreshing = false, stopped = false, selectionVersion = 0
 let uploadSelectionVersion = 0
+const detailRecovery = new DetailRecovery()
 const taskStream = new SnapshotStream<AnalysisJob>({
   kind: 'job', parse: parseAnalysisSnapshot, terminal: isAnalysisTerminal,
   fetchSnapshot: (id, signal) => api<unknown>(`/api/jobs/${id}`, { signal }),
@@ -88,9 +91,12 @@ function formatError(error: unknown) {
   return error instanceof ApiError && error.requestId ? `${message}（请求 ${error.requestId}）` : message
 }
 function showError(error: unknown) { errorMessage.value = formatError(error) }
+function connectionFailure(error: unknown) { return error instanceof ApiError && isConnectionErrorCode(error.code) }
+function dismissErrors() { errorMessage.value = ''; listConnectionError.value = ''; detailConnectionError.value = '' }
 async function loadDetail(id: string, background = false) {
   if (stopped || !canSelect(id)) return
-  const version = ++selectionVersion
+  const version = background ? selectionVersion : ++selectionVersion
+  if (!background) { detailRecovery.cancel(); detailConnectionError.value = '' }
   if (selectedJob.value?.id !== id) taskStream.select(null)
   try {
     const raw = await api<unknown>(`/api/jobs/${encodeURIComponent(id)}`)
@@ -102,10 +108,16 @@ async function loadDetail(id: string, background = false) {
       const video = await api<VideoAsset>(`/api/videos/${encodeURIComponent(result.video_id)}`)
       if (!stopped && !videos.value.some(v => v.id === video.id)) videos.value.push(video)
     }
+    if (stopped || version !== selectionVersion) return
+    detailConnectionError.value = ''; detailRecovery.cancel()
   } catch (error) {
     if (version === selectionVersion) {
-      if (background) connectionError.value = formatError(error)
-      else showError(error)
+      if (connectionFailure(error)) {
+        detailConnectionError.value = formatError(error)
+        if (!background) detailRecovery.queue(id, version)
+      } else {
+        detailConnectionError.value = ''; detailRecovery.cancel(); showError(error)
+      }
     }
   } finally {
     if (!stopped && version === selectionVersion && selectedJob.value && taskStream.resourceId === null) taskStream.select(selectedJob.value.id, selectedJob.value)
@@ -127,13 +139,19 @@ async function refresh() {
     const selected = currentVideo.value
     videos.value = videoPage.items
     if (selected && !videos.value.some(v => v.id === selected.id)) videos.value.push(selected)
-    jobs.value = jobPage.items.map(item => latestSnapshot(parseAnalysisSnapshot(item, item.id))); online.value = true; connectionError.value = ''
+    jobs.value = jobPage.items.map(item => latestSnapshot(parseAnalysisSnapshot(item, item.id))); online.value = true; listConnectionError.value = ''
     if (!selectedVideoId.value && videos.value[0]) selectedVideoId.value = videos.value[0].id
     if (selectedAtStart && selectedJob.value?.id === selectedAtStart && selectionVersion === versionAtStart) {
       const snapshot = jobs.value.find(job => job.id === selectedAtStart)
       if (snapshot) adoptHttpSnapshot(snapshot)
     }
-  } catch (error) { online.value = false; connectionError.value = formatError(error) }
+    const recoveryId = detailRecovery.next(selectionVersion, !!pending.value || !!reviewEditor.value?.dirty || !!reviewEditor.value?.pending)
+    if (recoveryId) await loadDetail(recoveryId, true)
+  } catch (error) {
+    online.value = false
+    if (connectionFailure(error)) listConnectionError.value = formatError(error)
+    else { listConnectionError.value = ''; showError(error) }
+  }
   finally { refreshing = false; loading.value = false }
 }
 function selectVideo() {
@@ -145,6 +163,7 @@ function selectVideo() {
     selectedVideoId.value = selectedJob.value?.video_id ?? selectedVideoId.value
     errorMessage.value = '审核有未保存修改，请先保存或在审核区放弃修改。'; return
   }
+  detailRecovery.cancel(); detailConnectionError.value = ''
   selectedJob.value = null; selectionVersion++; taskStream.select(null)
   const url = new URL(location.href); url.searchParams.delete('job'); history.replaceState({}, '', url)
 }
@@ -175,7 +194,8 @@ async function createJob() {
   let config: ReturnType<typeof newAnalysisConfig>
   try { config = newAnalysisConfig(visualProvider.value, maxTextCalls.value, maxOcrFrames.value) }
   catch (error) { errorMessage.value = error instanceof RangeError ? error.message : '画面取样配置无效。'; return }
-  const version = selectionVersion, videoId = selectedVideoId.value
+  detailRecovery.cancel(); detailConnectionError.value = ''
+  const version = ++selectionVersion, videoId = selectedVideoId.value
   pending.value = 'create'; errorMessage.value = ''; notice.value = ''
   const payload = { video_id: videoId, config }
   const inputKey = JSON.stringify(payload)
@@ -218,12 +238,12 @@ async function action(kind: 'cancel' | 'retry') {
   finally { pending.value = '' }
 }
 onMounted(async () => {
+  const id = new URL(location.href).searchParams.get('job'), initialVersion = selectionVersion
   await refresh()
-  const id = new URL(location.href).searchParams.get('job')
-  if (id && /^[0-9a-f-]{36}$/i.test(id)) await loadDetail(id)
+  if (!stopped && selectionVersion === initialVersion && id && /^[0-9a-f-]{36}$/i.test(id)) await loadDetail(id)
   if (!stopped) timer = window.setInterval(() => { if (!document.hidden) void refresh() }, 15000)
 })
-onUnmounted(() => { stopped = true; selectionVersion++; window.clearInterval(timer); taskStream.dispose() })
+onUnmounted(() => { stopped = true; detailRecovery.cancel(); selectionVersion++; window.clearInterval(timer); taskStream.dispose() })
 </script>
 
 <template>
@@ -239,7 +259,7 @@ onUnmounted(() => { stopped = true; selectionVersion++; window.clearInterval(tim
       <header class="topbar"><span>工作区 <span class="slash">/</span> 视频与任务</span><span class="connection"><i :class="{ online }"></i>{{ online ? '服务已连接' : '服务未连接' }}</span></header>
       <div class="page">
         <section class="page-title"><div><div class="eyebrow">VIDEO WORKSPACE</div><h1>把长视频，整理成话题片段<span>。</span></h1><p>上传视频，AI 识别讨论内容与时间段，由你选择、调整并切分。</p></div><button class="primary upload-button" :disabled="!!pending" @click="uploadPanel?.chooseFile()"><span>＋</span>{{ pending === 'upload' ? '正在上传…' : '上传视频' }}</button></section>
-        <div v-if="errorMessage || connectionError" class="message error" role="alert"><span>{{ errorMessage || connectionError }}</span><button aria-label="关闭错误提示" @click="errorMessage = ''; connectionError = ''">×</button></div>
+        <div v-if="errorMessage || connectionError" class="message error" role="alert"><span>{{ errorMessage || connectionError }}</span><button aria-label="关闭错误提示" @click="dismissErrors">×</button></div>
         <div v-if="notice" class="message notice" role="status"><span>{{ notice }}</span><button aria-label="关闭操作提示" @click="notice = ''">×</button></div>
         <UploadPanel ref="uploadPanel" :can-start="canStartUpload" @busy="uploadBusy" @started="uploadStarted" @complete="uploaded" />
         <section class="overview" aria-label="当前加载任务统计">
