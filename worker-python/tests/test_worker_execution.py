@@ -236,6 +236,97 @@ def test_topic_stage_still_requires_durable_budget(tmp_path):
         AnalysisStageExecutor()(ctx)
 
 
+@pytest.mark.parametrize("mode,remaining,expected", [
+    ("topics", 600, {"connect": 30, "read": 300, "write": 30, "pool": 30}),
+    ("topics", 45, {"connect": 30, "read": 45, "write": 30, "pool": 30}),
+    ("topics", 7.5, {"connect": 7.5, "read": 7.5, "write": 7.5, "pool": 7.5}),
+    ("commerce", 600, {"connect": 120, "read": 120, "write": 120, "pool": 120}),
+    ("commerce", 7.5, {"connect": 7.5, "read": 7.5, "write": 7.5, "pool": 7.5}),
+    (None, 600, {"connect": 120, "read": 120, "write": 120, "pool": 120}),
+])
+def test_segment_transport_receives_mode_specific_bounded_timeouts(tmp_path, monkeypatch, mode, remaining, expected):
+    ctx = context(tmp_path, "SEGMENT")
+    ctx.lease.config["visual_provider"] = "none"
+    if mode is not None:
+        ctx.lease.config["analysis_mode"] = mode
+    predecessor(ctx, "MEDIA", "media_info", {"duration_ms": 4000})
+    predecessor(ctx, "ASR", "transcript", [])
+    monkeypatch.setattr(ctx.guard, "remaining_seconds", lambda: remaining)
+    seen = []
+
+    def provider(request):
+        seen.append(request.extensions["timeout"])
+        return httpx.Response(200, json={"fixture": True})
+
+    def discover(*args, client, **kwargs):
+        # Probe the actual HTTPX client/transport boundary without a live model.
+        client.post("https://provider.example/fixture", json={"fixture": True})
+        _write(ctx.directory / "analysis-result.json", {"fixture": True})
+
+    monkeypatch.setattr("livecut.worker.discover_topics", discover)
+    monkeypatch.setattr("livecut.worker.discover_products", discover)
+    AnalysisStageExecutor(transport_factory=lambda *args: httpx.MockTransport(provider))(ctx)
+    assert seen == [expected]
+
+
+def test_topic_timeout_shrinks_between_requests_in_the_same_stage(tmp_path, monkeypatch):
+    ctx = context(tmp_path, "SEGMENT")
+    ctx.lease.config.update(analysis_mode="topics", visual_provider="none")
+    predecessor(ctx, "MEDIA", "media_info", {"duration_ms": 4000})
+    predecessor(ctx, "ASR", "transcript", [])
+    remaining = [600]
+    monkeypatch.setattr(ctx.guard, "remaining_seconds", lambda: remaining[0])
+    seen = []
+
+    def provider(request):
+        seen.append(request.extensions["timeout"])
+        remaining[0] = 12.5
+        return httpx.Response(200, json={"fixture": True})
+
+    def discover(*args, client, **kwargs):
+        for _ in range(2):
+            client.post("https://provider.example/fixture", json={"fixture": True})
+        _write(ctx.directory / "analysis-result.json", {"fixture": True})
+
+    monkeypatch.setattr("livecut.worker.discover_topics", discover)
+    AnalysisStageExecutor(transport_factory=lambda *args: httpx.MockTransport(provider))(ctx)
+    assert seen == [
+        {"connect": 30, "read": 300, "write": 30, "pool": 30},
+        {"connect": 12.5, "read": 12.5, "write": 12.5, "pool": 12.5},
+    ]
+
+
+def test_topic_deadline_stops_the_next_request_before_transport_dispatch(tmp_path, monkeypatch):
+    ctx = context(tmp_path, "SEGMENT")
+    ctx.lease.config.update(analysis_mode="topics", visual_provider="none")
+    predecessor(ctx, "MEDIA", "media_info", {"duration_ms": 4000})
+    predecessor(ctx, "ASR", "transcript", [])
+    expired = [False]
+    seen = []
+
+    def remaining():
+        if expired[0]:
+            raise WorkerError("HARD_DEADLINE_EXCEEDED")
+        return 600
+
+    monkeypatch.setattr(ctx.guard, "remaining_seconds", remaining)
+
+    def provider(request):
+        seen.append(request)
+        expired[0] = True
+        return httpx.Response(200, json={"fixture": True})
+
+    def discover(*args, client, **kwargs):
+        for _ in range(2):
+            client.post("https://provider.example/fixture", json={"fixture": True})
+
+    monkeypatch.setattr("livecut.worker.discover_topics", discover)
+    with pytest.raises(WorkerError, match="HARD_DEADLINE_EXCEEDED"):
+        AnalysisStageExecutor(transport_factory=lambda *args: httpx.MockTransport(provider))(ctx)
+    assert len(seen) == 1
+    assert not (ctx.directory / "analysis-result.json").exists()
+
+
 def test_timeline_does_not_interpret_unknown_analysis_mode_as_commerce(tmp_path):
     ctx = context(tmp_path, "TIMELINE")
     ctx.lease.config["analysis_mode"] = "unknown"
