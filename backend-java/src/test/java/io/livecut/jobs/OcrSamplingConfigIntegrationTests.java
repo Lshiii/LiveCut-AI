@@ -58,7 +58,7 @@ class OcrSamplingConfigIntegrationTests {
     private record Legacy(String job, String video, String key) {}
 
     @BeforeAll void start() {
-        assertTrue(System.getenv("LIVECUT_DB_URL").matches("jdbc:mysql://[^/]+/livecut_test(?:\\?.*)?"), "Sampling tests require dedicated livecut_test");
+        assertTrue(System.getenv("LIVECUT_DB_URL").matches("jdbc:mysql://[^/]+/livecut_test(?:_topics)?(?:\\?.*)?"), "Sampling tests require dedicated livecut_test");
         startContext();
     }
     private void startContext() {
@@ -83,6 +83,7 @@ class OcrSamplingConfigIntegrationTests {
         JsonNode job = created(create(video, key, Map.of()));
         Map<String, Object> expected = new TreeMap<>(legacyConfig()); expected.put("ocr_sampling", "uniform");
         expected.put("ocr_max_frames", 120);
+        expected.put("analysis_mode", "topics");
         assertEquals(JSON.valueToTree(expected), job.path("config"));
         assertEquals(job.path("config"), JSON.readTree(jdbc().queryForObject("SELECT config_json FROM analysis_job WHERE id=?", String.class, job.path("id").asText())));
         byte[] before = getBytes(job.path("id").asText());
@@ -104,6 +105,7 @@ class OcrSamplingConfigIntegrationTests {
             Map<String, Object> normalized = new TreeMap<>(legacyConfig());
             normalized.put("ocr_sampling", job.path("config").path("ocr_sampling").asText());
             normalized.put("ocr_max_frames", 120);
+            normalized.put("analysis_mode", "topics");
             assertEquals(hash(JSON.writeValueAsString(normalized)), job.path("config_hash").asText());
             for (JsonNode stage : job.path("stages")) {
                 assertEquals(hash(source + "\n" + job.path("config_hash").asText() + "\n" + stage.path("stage_type").asText() + "\n0"), stage.path("input_hash").asText());
@@ -127,6 +129,43 @@ class OcrSamplingConfigIntegrationTests {
             error(create(video, key(), JSON.readTree("{\"ocr_sampling\":" + value + "}")), 400, "INVALID_ARGUMENT");
         }
         assertEquals(0, jdbc().queryForObject("SELECT COUNT(*) FROM analysis_job WHERE video_id=?", Integer.class, video));
+    }
+
+    @Test void topicAndCommerceModesAreFrozenAndCannotReplayEachOthersCreationReceipts() throws Exception {
+        String video = video(), topicKey = key(), commerceKey = key();
+        JsonNode topics = created(create(video, topicKey, Map.of()));
+        JsonNode commerce = created(create(video, commerceKey, Map.of("analysis_mode", "commerce")));
+        assertEquals("topics", topics.path("config").path("analysis_mode").asText());
+        assertEquals("commerce", commerce.path("config").path("analysis_mode").asText());
+        assertNotEquals(topics.path("config_hash"), commerce.path("config_hash"));
+        assertArrayEquals(getBytes(topics.path("id").asText()), create(video, topicKey, Map.of("analysis_mode", "topics")).body());
+        assertArrayEquals(getBytes(commerce.path("id").asText()), create(video, commerceKey, Map.of("analysis_mode", "commerce")).body());
+        error(create(video, topicKey, Map.of("analysis_mode", "commerce")), 409, "IDEMPOTENCY_CONFLICT");
+        error(create(video, commerceKey, Map.of()), 409, "IDEMPOTENCY_CONFLICT");
+        JsonNode claim = claim(stage(topics, "MEDIA").path("id").asText());
+        assertEquals("topics", claim.path("config").path("analysis_mode").asText());
+    }
+
+    @Test void invalidAnalysisModesNeverCreateJobs() throws Exception {
+        String video = video();
+        for (String value : List.of("null", "true", "0", "[]", "{}", "\"TOPICS\"", "\"product\"", "\"\"")) {
+            error(create(video, key(), JSON.readTree("{\"analysis_mode\":" + value + "}")), 400, "INVALID_ARGUMENT");
+        }
+        assertEquals(0, jdbc().queryForObject("SELECT COUNT(*) FROM analysis_job WHERE video_id=?", Integer.class, video));
+    }
+
+    @Test void lastCommerceReleaseReceiptReplaysWithoutAddingTheNewModeField() throws Exception {
+        Legacy legacy = legacy("uniform", 120);
+        byte[] before = getBytes(legacy.job()); var frozen = metadata(legacy.job()); var stages = stageRows(legacy.job());
+        assertArrayEquals(before, create(legacy.video(), legacy.key(), Map.of()).body());
+        assertArrayEquals(before, create(legacy.video(), legacy.key(), Map.of("ocr_sampling", "uniform", "ocr_max_frames", 120)).body());
+        for (String mode : List.of("commerce", "topics")) {
+            error(create(legacy.video(), legacy.key(), Map.of("analysis_mode", mode)), 409, "IDEMPOTENCY_CONFLICT");
+        }
+        assertFalse(JSON.readTree(before).path("config").has("analysis_mode"));
+        assertEquals(frozen, metadata(legacy.job())); assertEquals(stages, stageRows(legacy.job()));
+        JsonNode claim = claim(stage(JSON.readTree(before), "MEDIA").path("id").asText());
+        assertFalse(claim.path("config").has("analysis_mode"));
     }
 
     @Test void legacyLostAcknowledgementReplaysByteForByteWithoutRewritingAnyFrozenMetadata() throws Exception {
@@ -215,6 +254,7 @@ class OcrSamplingConfigIntegrationTests {
             assertEquals(frames, job.path("config").path("ocr_max_frames").asInt());
             Map<String, Object> expected = new TreeMap<>(legacyConfig());
             expected.put("ocr_sampling", "uniform"); expected.put("ocr_max_frames", frames);
+            expected.put("analysis_mode", "topics");
             String configHash = hash(JSON.writeValueAsString(expected));
             assertEquals(configHash, job.path("config_hash").asText());
             assertTrue(hashes.add(configHash));
@@ -284,10 +324,12 @@ class OcrSamplingConfigIntegrationTests {
         videos.add(result.id()); return result.id();
     }
     private Legacy legacy() { return legacy(null); }
-    private Legacy legacy(String policy) {
+    private Legacy legacy(String policy) { return legacy(policy, null); }
+    private Legacy legacy(String policy, Integer frames) {
         String video = video(), job = UUID.randomUUID().toString(), key = key();
         Map<String, Object> values = legacyConfig();
         if (policy != null) { values.put("ocr_sampling", policy); }
+        if (frames != null) { values.put("ocr_max_frames", frames); }
         String config = JSON.writeValueAsString(values), configHash = hash(config);
         jdbc().update("INSERT INTO analysis_job (id,video_id,generation,idempotency_key,request_hash,config_hash,config_json,status,max_text_calls,max_asr_submissions) VALUES (?,?,1,?,?,?,?,'QUEUED',12,1)", job, video, key, hash(video + "\n" + configHash), configHash, config);
         jobs.add(job);

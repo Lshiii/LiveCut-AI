@@ -15,6 +15,16 @@ function batch(version = 1, status = 'RUNNING') {
     clips: [{ id: id(20), segment_id: 's:001', product_id: 'p.001', product_name: '面膜', start_ms: 0, end_ms: 1000,
       stage_id: id(120), status: 'RUNNING', attempt: 1, error_code: null, size_bytes: null, content_url: null, download_url: null }] }
 }
+test('topic export snapshots require a title with both product fields null and preserve commerce validation', () => {
+  const topic = { ...batch(), clips: [{ ...batch().clips[0]!, product_id: null, product_name: null, title: '缓存失效与随机 TTL' }] }
+  assert.equal(parseExportSnapshot(topic, id(10), id(1)).clips[0]!.title, '缓存失效与随机 TTL')
+  for (const update of [{ product_id: 'p.001' }, { product_name: '缓存' }, { product_id: undefined }, { product_name: undefined }, { title: '' }, { title: 'x'.repeat(121) }, { title: undefined }]) {
+    assert.throws(() => parseExportSnapshot({ ...topic, clips: [{ ...topic.clips[0], ...update }] }, id(10), id(1)), SnapshotError)
+  }
+  assert.equal(parseExportSnapshot(batch(), id(10), id(1)).clips[0]!.product_name, '面膜')
+  assert.throws(() => parseExportSnapshot({ ...batch(), clips: [{ ...batch().clips[0], title: '混合类型' }] }, id(10)), SnapshotError)
+  assert.throws(() => parseExportSnapshot({ ...topic, clips: [...topic.clips, { ...batch().clips[0], id: id(21), segment_id: 's:002' }] }, id(10)), SnapshotError)
+})
 class Clock implements StreamClock {
   now = 0; next = 0; timers = new Map<number, { at: number; callback: () => void }>()
   setTimeout(callback: () => void, delay: number) { const key = ++this.next; this.timers.set(key, { at: this.now + delay, callback }); return key }

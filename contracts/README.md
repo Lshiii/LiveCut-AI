@@ -1,4 +1,12 @@
-# 无清单分析结果契约 v2.0
+# 视频分析结果契约
+
+## 话题解析 v1.0
+
+新任务使用 `analysis_mode=topics` 和独立的 [topic-analysis-result.schema.json](./topic-analysis-result.schema.json)。每段包含标题、摘要、关键词、首末语句 ID、完整语音证据及原视频毫秒边界；不生成商品字段。程序要求核心语句完整、连续、按源顺序分配，时间由首末源语句映射。
+
+话题审核使用 `/api/jobs/{id}/topic-review`。初始段落均未勾选，人工修改写入独立修订；确认后才允许导出。人工时间不要求仍落在自动预测语句边界，但必须在源视频范围内，所选段落不可重叠。完整行为见 [当前需求与验收](../docs/32-通用视频话题解析.md)。
+
+## 历史无清单商品分析 v2.0
 
 输入不要求商品清单或 SKU。products 是从视频中发现的商品类别/可辨识款式，product_id 仅在本次任务有效。identity_granularity=category 不能解释为外部 SKU 已核验。
 

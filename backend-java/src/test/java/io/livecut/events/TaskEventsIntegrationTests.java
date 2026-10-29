@@ -66,7 +66,7 @@ class TaskEventsIntegrationTests {
     private URI base;
 
     @BeforeAll void start() {
-        assertTrue(System.getenv("LIVECUT_DB_URL").matches("jdbc:mysql://[^/]+/livecut_test(?:\\?.*)?"),
+        assertTrue(System.getenv("LIVECUT_DB_URL").matches("jdbc:mysql://[^/]+/livecut_test(?:_topics)?(?:\\?.*)?"),
                 "SSE tests require the dedicated livecut_test database");
         startContext();
     }

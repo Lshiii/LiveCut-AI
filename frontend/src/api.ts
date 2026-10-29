@@ -23,7 +23,7 @@ export interface AnalysisJob {
   actions: JobActions
 }
 export interface ExportClip {
-  id: string; segment_id: string; product_id: string; product_name: string
+  id: string; segment_id: string; product_id: string | null; product_name: string | null; title?: string
   start_ms: number; end_ms: number; stage_id: string; status: string; attempt: number
   error_code: string | null; size_bytes: number | null; content_url: string | null; download_url: string | null; diagnostic?: StageDiagnostic
 }

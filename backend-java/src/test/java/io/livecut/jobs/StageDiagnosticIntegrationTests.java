@@ -61,7 +61,7 @@ class StageDiagnosticIntegrationTests {
     private record Fixture(String job, String stage, JsonNode claim) {}
 
     @BeforeAll void start() {
-        assertTrue(System.getenv("LIVECUT_DB_URL").matches("jdbc:mysql://[^/]+/livecut_test(?:\\?.*)?"), "Diagnostics tests require dedicated livecut_test");
+        assertTrue(System.getenv("LIVECUT_DB_URL").matches("jdbc:mysql://[^/]+/livecut_test(?:_topics)?(?:\\?.*)?"), "Diagnostics tests require dedicated livecut_test");
         startContext();
     }
     private void startContext() {

@@ -23,6 +23,7 @@ import io.livecut.jobs.JobModels.StageRow;
 import io.livecut.jobs.StageDiagnostics;
 import io.livecut.review.ReviewModels;
 import io.livecut.review.ReviewService;
+import io.livecut.topics.TopicReviewService;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -40,14 +41,15 @@ public class ExportService {
     private static final JsonMapper JSON = JsonMapper.builder().build();
     private final JdbcTemplate jdbc;
     private final ReviewService reviews;
+    private final TopicReviewService topics;
     private final ArtifactVerifier verifier;
     private final TransactionTemplate transaction;
     private final int maxAttempts;
 
-    public ExportService(JdbcTemplate jdbc, ReviewService reviews, ArtifactVerifier verifier,
+    public ExportService(JdbcTemplate jdbc, ReviewService reviews, TopicReviewService topics, ArtifactVerifier verifier,
                          PlatformTransactionManager manager,
                          @Value("${livecut.jobs.max-attempts:3}") int maxAttempts) {
-        this.jdbc = jdbc; this.reviews = reviews; this.verifier = verifier; this.maxAttempts = maxAttempts;
+        this.jdbc = jdbc; this.reviews = reviews; this.topics = topics; this.verifier = verifier; this.maxAttempts = maxAttempts;
         this.transaction = new TransactionTemplate(manager);
         this.transaction.setIsolationLevel(TransactionDefinition.ISOLATION_READ_COMMITTED);
     }
@@ -61,6 +63,18 @@ public class ExportService {
         String jobId = uuid(request.jobId(), "INVALID_JOB_ID");
         return transaction.execute(status -> {
             Map<String, Object> job = lockAnalysis(jobId);
+            boolean topicMode="topics".equals(JSON.readTree(String.valueOf(job.get("config_json"))).path("analysis_mode").asText());
+            List<Map<String, Object>> frozenClips = new ArrayList<>();
+            if (topicMode) {
+                var review=topics.get(jobId,request.approvedRevision());
+                if(!"CONFIRMED".equals(review.status()))throw conflict("EXPORT_REQUIRES_CONFIRMATION","Only confirmed topic selections may be exported");
+                var selected=new HashMap<String,io.livecut.topics.TopicModels.Segment>();review.segments().forEach(s->selected.put(s.id(),s));
+                for(String segmentId:request.segmentIds().stream().sorted().toList()){
+                    var segment=selected.get(segmentId);
+                    if(segment==null||!segment.enabled())throw bad("INVALID_EXPORT_SEGMENT","Select enabled topics from the confirmed revision");
+                    frozenClips.add(new TreeMap<>(Map.of("segment_id",segment.id(),"title",segment.title(),"start_ms",segment.startMs(),"end_ms",segment.endMs())));
+                }
+            } else {
             // ReviewService acquires the same analysis lock before review rows.
             // It is deliberately called before any export/stage lock is held.
             ReviewModels.Snapshot review = reviews.get(jobId, request.approvedRevision());
@@ -69,7 +83,6 @@ public class ExportService {
             review.products().forEach(product -> products.put(product.id(), product));
             Map<String, ReviewModels.Segment> segments = new HashMap<>();
             review.segments().forEach(segment -> segments.put(segment.id(), segment));
-            List<Map<String, Object>> frozenClips = new ArrayList<>();
             for (String segmentId : request.segmentIds().stream().sorted().toList()) {
                 ReviewModels.Segment segment = segments.get(segmentId);
                 if (segment == null || !segment.enabled() || segment.productId() == null || !products.containsKey(segment.productId())) {
@@ -78,11 +91,13 @@ public class ExportService {
                 frozenClips.add(new TreeMap<>(Map.of("segment_id", segment.id(), "product_id", segment.productId(),
                         "product_name", products.get(segment.productId()).name(), "start_ms", segment.startMs(), "end_ms", segment.endMs())));
             }
+            }
             String sourceHash = jdbc.queryForObject("SELECT content_hash FROM video_asset WHERE id=?", String.class, job.get("video_id"));
             Map<String, Object> frozen = new TreeMap<>();
             frozen.put("job_id", jobId); frozen.put("video_id", job.get("video_id")); frozen.put("generation", job.get("generation"));
             frozen.put("source_hash", sourceHash); frozen.put("approved_revision", request.approvedRevision());
             frozen.put("encoding_profile", PROFILE); frozen.put("clips", frozenClips);
+            if(topicMode)frozen.put("analysis_mode","topics");
             String frozenJson = JSON.writeValueAsString(frozen);
             String fingerprint = sha256(frozenJson);
             List<String> existing = jdbc.queryForList("SELECT id FROM export_job WHERE fingerprint=?", String.class, fingerprint);
@@ -96,8 +111,8 @@ public class ExportService {
                 String inputHash = sha256(fingerprint + "\n" + JSON.writeValueAsString(new TreeMap<>(frozenClip)) + "\n" + clipId);
                 jdbc.update("INSERT INTO job_stage (id,job_id,owner_type,owner_id,stage_type,shard_key,status,input_hash) VALUES (?,?,'EXPORT',?,'EXPORT_CLIP',?,'READY',?)",
                         stageId, jobId, exportId, clipId, inputHash);
-                jdbc.update("INSERT INTO export_clip (id,export_id,stage_id,segment_id,product_id,product_name,start_ms,end_ms) VALUES (?,?,?,?,?,?,?,?)",
-                        clipId, exportId, stageId, frozenClip.get("segment_id"), frozenClip.get("product_id"), frozenClip.get("product_name"), frozenClip.get("start_ms"), frozenClip.get("end_ms"));
+                jdbc.update("INSERT INTO export_clip (id,export_id,stage_id,segment_id,product_id,product_name,topic_title,start_ms,end_ms) VALUES (?,?,?,?,?,?,?,?,?)",
+                        clipId, exportId, stageId, frozenClip.get("segment_id"), frozenClip.get("product_id"), frozenClip.get("product_name"), frozenClip.get("title"), frozenClip.get("start_ms"), frozenClip.get("end_ms"));
             }
             return snapshot(lockOwner(exportId, jobId));
         });
@@ -143,7 +158,7 @@ public class ExportService {
                     file = new ManifestFile(content.filename(), content.sizeBytes(), content.hash(), clip.downloadUrl());
                 }
                 clips.add(new ManifestClip(clip.id(), clip.segmentId(), clip.productId(), clip.productName(),
-                        clip.startMs(), clip.endMs(), clip.status(), clip.attempt(), clip.errorCode(), file));
+                        clip.startMs(), clip.endMs(), clip.status(), clip.attempt(), clip.errorCode(), file, clip.title()));
             }
             return new Manifest("1.0", "export_manifest", id, batch.jobId(), batch.videoId(), generation,
                     batch.approvedRevision(), String.valueOf(owner.get("source_hash")), batch.snapshotHash(),
@@ -266,7 +281,7 @@ public class ExportService {
                     return new Clip(row.getString("id"), row.getString("segment_id"), row.getString("product_id"), row.getString("product_name"),
                             row.getLong("start_ms"), row.getLong("end_ms"), row.getString("stage_id"), row.getString("status"), row.getInt("attempt"),
                             row.getString("error_code"), size == null ? null : size.longValue(), url, url == null ? null : url + "?download=true",
-                            StageDiagnostics.read(row.getString("diagnostic_json"), row.getString("error_code"), row.getInt("attempt")));
+                            StageDiagnostics.read(row.getString("diagnostic_json"), row.getString("error_code"), row.getInt("attempt")), row.getString("topic_title"));
                 }, id);
         return new Snapshot(id, String.valueOf(owner.get("job_id")), String.valueOf(owner.get("video_id")), ((Number) owner.get("approved_revision")).longValue(),
                 String.valueOf(owner.get("snapshot_hash")), String.valueOf(owner.get("encoding_profile")), String.valueOf(owner.get("status")),

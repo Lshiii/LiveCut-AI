@@ -64,7 +64,7 @@ class JobProtocolIntegrationTests {
 
     @BeforeAll
     void start() throws Exception {
-        assertTrue(System.getenv("LIVECUT_DB_URL").matches("jdbc:mysql://[^/]+/livecut_test(?:\\?.*)?"),
+        assertTrue(System.getenv("LIVECUT_DB_URL").matches("jdbc:mysql://[^/]+/livecut_test(?:_topics)?(?:\\?.*)?"),
                 "Protocol recovery tests require the dedicated livecut_test database");
         startContext();
         // A header-only synthetic source registers the MEDIA work to be done;

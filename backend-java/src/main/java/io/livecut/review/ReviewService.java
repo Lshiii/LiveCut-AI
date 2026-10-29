@@ -119,9 +119,12 @@ public class ReviewService {
     /** Always locks job first, matching the scheduler and model-call lock order. */
     private Document document(String jobId) {
         List<Map<String, Object>> jobs = jdbc.queryForList(
-                "SELECT id,video_id,generation,status FROM analysis_job WHERE id=? FOR UPDATE", jobId);
+                "SELECT id,video_id,generation,status,config_json FROM analysis_job WHERE id=? FOR UPDATE", jobId);
         if (jobs.isEmpty()) { throw missing("JOB_NOT_FOUND", "Analysis job was not found"); }
         Map<String, Object> row = jobs.getFirst();
+        if("topics".equals(JSON.readTree(String.valueOf(row.get("config_json"))).path("analysis_mode").asText())) {
+            throw conflict("REVIEW_MODE_UNSUPPORTED","Use the topic review endpoint for this task");
+        }
         if (!"REVIEW_READY".equals(row.get("status"))) { throw conflict("REVIEW_NOT_READY", "Analysis must reach REVIEW_READY before review"); }
         String videoId = (String) row.get("video_id");
         String sourceHashForVideo = jdbc.queryForObject("SELECT content_hash FROM video_asset WHERE id=?", String.class, videoId);
