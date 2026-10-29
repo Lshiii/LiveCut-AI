@@ -588,8 +588,20 @@ class AnalysisStageExecutor:
             if self.transport_factory is None:
                 raise WorkerError("DURABLE_BUDGET_REQUIRED")
             context.guard.check()
+            topics = config.get("analysis_mode", "commerce") == "topics"
+
+            def bound_topic_timeout(request: httpx.Request) -> None:
+                # Generation may be slow; refresh every wait limit against the
+                # current stage deadline before the budget transport dispatches.
+                remaining = context.guard.remaining_seconds()
+                request.extensions["timeout"] = {
+                    "connect": min(30, remaining), "read": min(300, remaining),
+                    "write": min(30, remaining), "pool": min(30, remaining),
+                }
+
             with httpx.Client(transport=self.transport_factory(context, "text"),
-                              timeout=min(120, context.guard.remaining_seconds()),
+                              timeout=min(300 if topics else 120, context.guard.remaining_seconds()),
+                              event_hooks={"request": [bound_topic_timeout]} if topics else None,
                               follow_redirects=False) as client:
                 if config.get("analysis_mode", "commerce") == "topics":
                     discover_topics(
