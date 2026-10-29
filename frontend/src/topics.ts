@@ -74,6 +74,37 @@ export function parseTopicTime(value: string): number | null {
   return Number.isSafeInteger(result) && result >= 0 ? result : null
 }
 
+export type TopicTimeField = 'start_ms' | 'end_ms'
+export type TopicTimeDrafts = Record<string, Partial<Record<TopicTimeField, string>>>
+
+/** Keep incomplete input visible while immediately invalidating unsafe boundaries. */
+export function editTopicTime(segment: TopicSegment, drafts: TopicTimeDrafts, field: TopicTimeField, value: string) {
+  const inputs = drafts[segment.id] ??= {}
+  inputs[field] = value
+  segment[field] = parseTopicTime(value) ?? Number.NaN
+}
+
+export function topicTimeInput(segment: TopicSegment, drafts: TopicTimeDrafts, field: TopicTimeField): string {
+  return drafts[segment.id]?.[field] ?? topicTime(segment[field])
+}
+
+export function normalizeTopicTime(segment: TopicSegment, drafts: TopicTimeDrafts, field: TopicTimeField) {
+  const inputs = drafts[segment.id], value = inputs?.[field]
+  if (inputs && value !== undefined && parseTopicTime(value) !== null) inputs[field] = topicTime(segment[field])
+}
+
+/** Includes text still being entered, so leaving before blur cannot bypass dirty checks. */
+export function hasTopicTimeDraft(segments: TopicSegment[], drafts: TopicTimeDrafts): boolean {
+  return segments.some(segment => (['start_ms', 'end_ms'] as const).some(field => {
+    const input = drafts[segment.id]?.[field]
+    return input !== undefined && input !== topicTime(segment[field])
+  }))
+}
+
+export function validTopicRange(segment: Pick<TopicSegment, 'start_ms' | 'end_ms'>, duration: number): boolean {
+  return integer(segment.start_ms) && integer(segment.end_ms, segment.start_ms + 1) && segment.end_ms <= duration
+}
+
 export function splitTopic(segment: TopicSegment, playhead: number, newId: string): [TopicSegment, TopicSegment] | null {
   const point = playhead > segment.start_ms && playhead < segment.end_ms ? Math.round(playhead) : Math.floor((segment.start_ms + segment.end_ms) / 2)
   if (!integer(point) || point <= segment.start_ms || point >= segment.end_ms || !identifier.test(newId) || newId === segment.id) return null

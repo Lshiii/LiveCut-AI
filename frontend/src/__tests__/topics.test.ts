@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { parseTopicReview, parseTopicTime, splitTopic, topicPayload, topicTime, topicValidation, TopicResponseError, type TopicSegment } from '../topics.ts'
+import { editTopicTime, hasTopicTimeDraft, normalizeTopicTime, parseTopicReview, parseTopicTime, splitTopic, topicPayload, topicTime, topicTimeInput, topicValidation, validTopicRange, TopicResponseError, type TopicSegment, type TopicTimeDrafts } from '../topics.ts'
 
 const jobId = '00000000-0000-4000-8000-000000000001'
 test('time editor accepts minute or hour timecodes and rejects ambiguous or invalid boundaries', () => {
@@ -12,6 +12,44 @@ test('time editor accepts minute or hour timecodes and rejects ambiguous or inva
   for (const value of [0, 300001, 5399980, 7200000]) assert.equal(parseTopicTime(topicTime(value)), value)
 })
 const segment = (): TopicSegment => ({ id: 'topic:1', start_ms: 300000, end_ms: 420000, title: '缓存失效', summary: '讨论失效时间和随机过期策略。', keywords: ['缓存', 'TTL'], enabled: false, origin: 'model', boundary_source: 'model', content_source: 'model', original_prediction_id: 'topic:1' })
+test('time input updates boundaries before blur and preserves incomplete or invalid drafts', () => {
+  const value = segment(), inputs: TopicTimeDrafts = {}, original = JSON.stringify(topicPayload([value]))
+  editTopicTime(value, inputs, 'start_ms', '05:10')
+  assert.equal(value.start_ms, 310000)
+  assert.equal(topicTimeInput(value, inputs, 'start_ms'), '05:10')
+  assert.equal(hasTopicTimeDraft([value], inputs), true)
+  assert.notEqual(JSON.stringify(topicPayload([value])), original, 'leaving before blur sees the edited boundary')
+  normalizeTopicTime(value, inputs, 'start_ms')
+  assert.equal(topicTimeInput(value, inputs, 'start_ms'), '05:10.000')
+  editTopicTime(value, inputs, 'start_ms', '05:99')
+  assert.equal(Number.isNaN(value.start_ms), true)
+  assert.equal(validTopicRange(value, 600000), false)
+  assert.notEqual(topicValidation([value], 600000), '')
+  normalizeTopicTime(value, inputs, 'start_ms')
+  assert.equal(topicTimeInput(value, inputs, 'start_ms'), '05:99', 'invalid text is retained after blur')
+  assert.equal(hasTopicTimeDraft([value], inputs), true)
+  editTopicTime(value, inputs, 'start_ms', '')
+  assert.equal(topicTimeInput(value, inputs, 'start_ms'), '')
+  assert.equal(hasTopicTimeDraft([value], inputs), true)
+  editTopicTime(value, inputs, 'start_ms', '05:00.000')
+  assert.equal(JSON.stringify(topicPayload([value])), original)
+  assert.equal(hasTopicTimeDraft([value], inputs), false)
+})
+
+test('draft text stays with its field and can be cleared after reload or a manual split', () => {
+  const value = segment(), inputs: TopicTimeDrafts = {}
+  editTopicTime(value, inputs, 'end_ms', '7:00')
+  assert.equal(hasTopicTimeDraft([value], inputs), true, 'the focused noncanonical input is still an edit')
+  normalizeTopicTime(value, inputs, 'end_ms')
+  assert.equal(hasTopicTimeDraft([value], inputs), false)
+  assert.equal(topicTimeInput(value, inputs, 'start_ms'), '05:00.000')
+  const pair = splitTopic(value, 360000, 'manual:2')!
+  delete inputs[value.id]
+  assert.equal(topicTimeInput(pair[0], inputs, 'end_ms'), '06:00.000')
+  assert.equal(topicTimeInput(pair[1], inputs, 'start_ms'), '06:00.000')
+  assert.equal(validTopicRange(pair[0], 600000), true)
+  assert.equal(validTopicRange({ start_ms: 0, end_ms: 600001 }, 600000), false)
+})
 function snapshot() {
   return { job_id: jobId, video_id: '00000000-0000-4000-8000-000000000080', generation: 1, analysis_mode: 'topics', data_kind: 'model_result', duration_ms: 600000, revision: 0, status: 'DRAFT', source_hash: 'a'.repeat(64), confirmed_revisions: [], segments: [segment()], utterances: [{ utterance_id: 'u:1', start_ms: 300000, end_ms: 420000, text: '我们给缓存增加随机过期时间。', source_chunk_id: 'chunk:1' }] }
 }
