@@ -51,6 +51,7 @@ public class JobService {
     private final TransactionTemplate transaction;
     private final ArtifactVerifier artifactVerifier;
     private final ExportService exports;
+    private final WorkerCapacityService workers;
     private final int leaseSeconds;
     private final int hardDeadlineSeconds;
     private final int maxAttempts;
@@ -63,7 +64,7 @@ public class JobService {
                       @Value("${livecut.jobs.max-attempts:3}") int maxAttempts,
                       @Value("${livecut.jobs.retry-delay-seconds:2}") int retryDelaySeconds,
                       @Value("${livecut.jobs.scan-enabled:true}") boolean scanEnabled,
-                      ArtifactVerifier artifactVerifier, ExportService exports) {
+                      ArtifactVerifier artifactVerifier, ExportService exports, WorkerCapacityService workers) {
         if (leaseSeconds < 1 || leaseSeconds > 3600 || hardDeadlineSeconds < 1 || hardDeadlineSeconds > 86400
                 || maxAttempts < 1 || maxAttempts > 10 || retryDelaySeconds < 0 || retryDelaySeconds > 3600) {
             throw new IllegalArgumentException("Invalid scheduler lease, deadline, attempt or retry settings");
@@ -71,6 +72,7 @@ public class JobService {
         this.jdbc = jdbc;
         this.artifactVerifier = artifactVerifier;
         this.exports = exports;
+        this.workers = workers;
         this.transaction = new TransactionTemplate(manager);
         this.transaction.setIsolationLevel(TransactionDefinition.ISOLATION_READ_COMMITTED);
         this.leaseSeconds = leaseSeconds;
@@ -139,7 +141,7 @@ public class JobService {
             Map<String, Object> job = job(id, true);
             if ("CANCELLED".equals(job.get("status"))) { return snapshot(job); }
             if (!actions(job, stages(id, true)).canCancel()) { throw conflict("JOB_NOT_CANCELLABLE", "A completed job cannot be cancelled"); }
-            jdbc.update("UPDATE job_stage SET status='CANCELLED',run_token=NULL,worker_id=NULL,lease_until=NULL,hard_deadline_at=NULL,updated_at=CURRENT_TIMESTAMP(6) WHERE job_id=? AND owner_type='ANALYSIS' AND status NOT IN ('SUCCEEDED','SKIPPED')", id);
+            jdbc.update("UPDATE job_stage SET status='CANCELLED',run_token=NULL,worker_id=NULL,worker_session_id=NULL,lease_until=NULL,hard_deadline_at=NULL,updated_at=CURRENT_TIMESTAMP(6) WHERE job_id=? AND owner_type='ANALYSIS' AND status NOT IN ('SUCCEEDED','SKIPPED')", id);
             touch(id, "CANCELLED");
             return snapshot(job(id, true));
         });
@@ -156,7 +158,7 @@ public class JobService {
                         : "Only failed jobs with failed stages can be retried";
                 throw conflict(actions.retryBlockReason(), message);
             }
-            jdbc.update("UPDATE job_stage SET status='READY',run_token=NULL,worker_id=NULL,lease_until=NULL,hard_deadline_at=NULL,next_run_at=CURRENT_TIMESTAMP(6),error_code=NULL,diagnostic_json=NULL,updated_at=CURRENT_TIMESTAMP(6) WHERE job_id=? AND owner_type='ANALYSIS' AND status='FAILED'", id);
+            jdbc.update("UPDATE job_stage SET status='READY',run_token=NULL,worker_id=NULL,worker_session_id=NULL,lease_until=NULL,hard_deadline_at=NULL,next_run_at=CURRENT_TIMESTAMP(6),error_code=NULL,diagnostic_json=NULL,updated_at=CURRENT_TIMESTAMP(6) WHERE job_id=? AND owner_type='ANALYSIS' AND status='FAILED'", id);
             touch(id, "RUNNING");
             return snapshot(job(id, true));
         });
@@ -185,6 +187,7 @@ public class JobService {
         String worker = identifier(request.workerId(), "worker_id");
         String claimId = identifier(request.claimRequestId(), "claim_request_id");
         String targetJob = request.jobId() == null ? null : uuid(request.jobId(), "INVALID_JOB_ID");
+        String session = request.sessionId() == null ? null : WorkerCapacityService.uuid(request.sessionId());
         // Preserve existing unscoped receipt identities. A scoped claim adds
         // its target so a lost response cannot resume under different inputs.
         String requestHash = sha256(stageId + "\n" + worker + (targetJob == null ? "" : "\n" + targetJob));
@@ -197,12 +200,14 @@ public class JobService {
             }
             StageRow stage = parent.stage();
             Instant now = dbNow();
-            int inserted = jdbc.update("INSERT IGNORE INTO stage_claim_request (worker_id,claim_request_id,request_hash,stage_id,outcome) VALUES (?,?,?,?,'PENDING')", worker, claimId, requestHash, stageId);
+            int inserted = jdbc.update("INSERT IGNORE INTO stage_claim_request (worker_id,claim_request_id,request_hash,stage_id,worker_session_id,outcome) VALUES (?,?,?,?,?,'PENDING')", worker, claimId, requestHash, stageId, session);
             Map<String, Object> receipt = jdbc.queryForMap("SELECT * FROM stage_claim_request WHERE worker_id=? AND claim_request_id=? FOR UPDATE", worker, claimId);
             if (!requestHash.equals(receipt.get("request_hash"))) { throw conflict("IDEMPOTENCY_CONFLICT", "Claim request ID belongs to a different request"); }
             if (inserted == 0) {
+                if (!java.util.Objects.equals(session, receipt.get("worker_session_id"))) { return noClaim("EXPIRED", stageId); }
+                workers.admit(worker, session, stage.stageType(), jobId, false);
                 if (!"CLAIMED".equals(receipt.get("outcome"))) {
-                    return noClaim("EXPIRED".equals(receipt.get("outcome")) ? "EXPIRED" : "NO_WORK", stageId);
+                    return noClaim("EXPIRED".equals(receipt.get("outcome")) ? "EXPIRED" : "NO_CAPACITY".equals(receipt.get("outcome")) ? "NO_CAPACITY" : "NO_WORK", stageId);
                 }
                 boolean valid = stage.status().equals("RUNNING") && activeParent(parent)
                         && stage.attempt() == ((Number) receipt.get("attempt")).intValue()
@@ -223,11 +228,15 @@ public class JobService {
                 jdbc.update("UPDATE stage_claim_request SET outcome='NO_WORK' WHERE worker_id=? AND claim_request_id=?", worker, claimId);
                 return noClaim("NO_WORK", stageId);
             }
+            if (!workers.admit(worker, session, stage.stageType(), jobId, true)) {
+                jdbc.update("UPDATE stage_claim_request SET outcome='NO_CAPACITY' WHERE worker_id=? AND claim_request_id=?", worker, claimId);
+                return noClaim("NO_CAPACITY", stageId);
+            }
             String token = UUID.randomUUID().toString();
             Instant deadline = now.plusSeconds(hardDeadlineSeconds);
             Instant lease = minimum(now.plusSeconds(leaseSeconds), deadline);
-            jdbc.update("UPDATE job_stage SET status='RUNNING',attempt=attempt+1,run_token=?,worker_id=?,lease_until=?,hard_deadline_at=?,error_code=NULL,diagnostic_json=NULL,updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND status='READY'",
-                    token, worker, timestamp(lease), timestamp(deadline), stageId);
+            jdbc.update("UPDATE job_stage SET status='RUNNING',attempt=attempt+1,run_token=?,worker_id=?,worker_session_id=?,lease_until=?,hard_deadline_at=?,error_code=NULL,diagnostic_json=NULL,updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND status='READY'",
+                    token, worker, session, timestamp(lease), timestamp(deadline), stageId);
             StageRow current = stage(stageId, true);
             jdbc.update("UPDATE stage_claim_request SET outcome='CLAIMED',attempt=?,run_token=? WHERE worker_id=? AND claim_request_id=?", current.attempt(), token, worker, claimId);
             touchParent(current, "RUNNING");
@@ -360,7 +369,7 @@ public class JobService {
     }
 
     private void retryWait(StageRow stage, String code, Instant now, Map<String, Object> diagnostic) {
-        jdbc.update("UPDATE job_stage SET status='RETRY_WAIT',run_token=NULL,worker_id=NULL,lease_until=NULL,hard_deadline_at=NULL,next_run_at=?,error_code=?,diagnostic_json=?,last_retryable=TRUE,updated_at=CURRENT_TIMESTAMP(6) WHERE id=?", timestamp(now.plusSeconds(retryDelaySeconds)), code, StageDiagnostics.json(diagnostic), stage.id());
+        jdbc.update("UPDATE job_stage SET status='RETRY_WAIT',run_token=NULL,worker_id=NULL,worker_session_id=NULL,lease_until=NULL,hard_deadline_at=NULL,next_run_at=?,error_code=?,diagnostic_json=?,last_retryable=TRUE,updated_at=CURRENT_TIMESTAMP(6) WHERE id=?", timestamp(now.plusSeconds(retryDelaySeconds)), code, StageDiagnostics.json(diagnostic), stage.id());
     }
 
     private void terminalFailure(StageRow stage, String code) {
@@ -369,13 +378,13 @@ public class JobService {
 
     private void terminalFailure(StageRow stage, String code, Map<String, Object> diagnostic) {
         List<StageRow> siblings = isExport(stage) ? List.of() : stages(stage.jobId(), true);
-        jdbc.update("UPDATE job_stage SET status='FAILED',run_token=NULL,worker_id=NULL,lease_until=NULL,hard_deadline_at=NULL,error_code=?,diagnostic_json=?,last_retryable=FALSE,updated_at=CURRENT_TIMESTAMP(6) WHERE id=?", code, StageDiagnostics.json(diagnostic), stage.id());
+        jdbc.update("UPDATE job_stage SET status='FAILED',run_token=NULL,worker_id=NULL,worker_session_id=NULL,lease_until=NULL,hard_deadline_at=NULL,error_code=?,diagnostic_json=?,last_retryable=FALSE,updated_at=CURRENT_TIMESTAMP(6) WHERE id=?", code, StageDiagnostics.json(diagnostic), stage.id());
         if (isExport(stage)) { exports.refreshLocked(stage.ownerId()); return; }
         // Fence sibling work when the parent is terminal; manual retry only
         // revives explicit FAILED rows, never a still-live previous token.
         for (StageRow sibling : siblings) {
             if (!sibling.id().equals(stage.id()) && Set.of("RUNNING", "READY", "RETRY_WAIT").contains(sibling.status())) {
-                jdbc.update("UPDATE job_stage SET status='FAILED',run_token=NULL,worker_id=NULL,lease_until=NULL,hard_deadline_at=NULL,error_code='PARENT_STAGE_FAILED',diagnostic_json=?,updated_at=CURRENT_TIMESTAMP(6) WHERE id=?",
+                jdbc.update("UPDATE job_stage SET status='FAILED',run_token=NULL,worker_id=NULL,worker_session_id=NULL,lease_until=NULL,hard_deadline_at=NULL,error_code='PARENT_STAGE_FAILED',diagnostic_json=?,updated_at=CURRENT_TIMESTAMP(6) WHERE id=?",
                         StageDiagnostics.json(StageDiagnostics.create(null, "PARENT_STAGE_FAILED", sibling.attempt())), sibling.id());
             }
         }

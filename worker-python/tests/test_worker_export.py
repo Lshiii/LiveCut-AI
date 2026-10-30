@@ -215,7 +215,8 @@ def test_complete_response_loss_replays_only_callback(tmp_path, tools_and_source
         calls.append(ctx.lease.stage_id)
         return actual(ctx)
 
-    worker = StageWorker(client, context.storage_root, tmp_path / "journal", "worker-1", execute)
+    worker = StageWorker(client, context.storage_root, tmp_path / "journal", "worker-1", execute,
+                         registry_enabled=False)
     with pytest.raises(WorkerClientError):
         worker.run_once(stage_type="EXPORT_CLIP")
     assert worker.run_once(stage_type="EXPORT_CLIP") == "callback_replayed"
@@ -238,7 +239,8 @@ def test_lost_lease_after_encoding_never_submits_completion(tmp_path, tools_and_
         monkeypatch.setattr("livecut.worker_export.export_clip", export_then_lose)
         return AnalysisStageExecutor(ffmpeg_path=ffmpeg, ffprobe_path=ffprobe)(ctx)
 
-    worker = StageWorker(client, context.storage_root, tmp_path / "journal", "worker-1", execute)
+    worker = StageWorker(client, context.storage_root, tmp_path / "journal", "worker-1", execute,
+                         registry_enabled=False)
     assert worker.run_once(stage_type="EXPORT_CLIP") == "failed"
     assert not any(action == "complete" for action, _, _ in client.callbacks)
     assert client.callbacks[-1][2]["error_code"] == "LEASE_LOST"
@@ -272,7 +274,8 @@ def test_invalid_frozen_export_reports_failure_without_sticking_claim_or_computi
     client = FakeClient()
     client.reply = export_claim(config={"export": export_config(start_ms=True)})
     worker = StageWorker(client, tmp_path / "storage", tmp_path / "journal", "worker-1",
-                         lambda context: pytest.fail("invalid export must not compute"))
+                         lambda context: pytest.fail("invalid export must not compute"),
+                         registry_enabled=False)
     assert worker.run_once(stage_type="EXPORT_CLIP") == "failed"
     assert client.callbacks[-1][0] == "fail"
     assert client.callbacks[-1][2]["error_code"] == "INVALID_EXPORT_INPUT"

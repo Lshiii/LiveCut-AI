@@ -8,7 +8,7 @@ import org.springframework.test.annotation.DirtiesContext;
 // The cached smoke-test context must never maintain another suite's rows:
 // integration suites share livecut_test but own separate temporary volumes.
 @SpringBootTest(properties = {
-        "livecut.jobs.scan-enabled=false",
+        "livecut.jobs.scan-enabled=false", "livecut.workers.require-registration=false",
         "livecut.uploads.scan-enabled=false",
         "livecut.events.scan-enabled=false"
 })

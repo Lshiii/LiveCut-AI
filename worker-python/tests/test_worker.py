@@ -74,7 +74,7 @@ def fake_executor(calls):
 
 def worker(tmp_path, client, calls, **kwargs):
     return StageWorker(client, tmp_path / "storage", tmp_path / "journal", "worker-1",
-                       fake_executor(calls), **kwargs)
+                       fake_executor(calls), registry_enabled=False, **kwargs)
 
 
 def test_claim_response_loss_reuses_exact_target_and_request_id(tmp_path):
@@ -125,7 +125,7 @@ def test_heartbeat_failure_stops_new_work_and_reports_fenced_failure(tmp_path):
         raise AssertionError("heartbeat should invalidate guard")
 
     runner = StageWorker(client, tmp_path / "storage", tmp_path / "journal", "worker-1",
-                         execute, heartbeat_seconds=0.01)
+                         execute, heartbeat_seconds=0.01, registry_enabled=False)
     assert runner.run_once() == "failed"
     assert 0 < len(successful_checks) < 200
     failures = [entry for entry in client.callbacks if entry[0] == "fail"]

@@ -57,7 +57,7 @@ class ModelCallIntegrationTests {
     void start() {
         context = new SpringApplicationBuilder(LivecutBackendApplication.class).run(
                 "--server.port=0", "--server.address=127.0.0.1",
-                "--livecut.jobs.scan-enabled=false",
+                "--livecut.jobs.scan-enabled=false", "--livecut.workers.require-registration=false",
                 "--livecut.storage.root=" + storageRoot,
                 "--spring.datasource.url=" + System.getenv("LIVECUT_DB_URL"),
                 "--spring.datasource.username=" + System.getenv("LIVECUT_DB_USER"),

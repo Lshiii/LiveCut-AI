@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from datetime import datetime
 from urllib.parse import urlsplit
 from uuid import UUID
 
@@ -29,6 +30,7 @@ class WorkerClient:
                 or not worker_key or "\n" in worker_key or "\r" in worker_key):
             raise WorkerClientError("INVALID_WORKER_CONFIGURATION")
         self._base_url = base_url.rstrip("/")
+        self._timeout_seconds = timeout_seconds
         self._client = httpx.Client(
             headers={"X-Worker-Key": worker_key}, timeout=timeout_seconds,
             transport=transport, follow_redirects=False, trust_env=False,
@@ -86,13 +88,71 @@ class WorkerClient:
         return self._request("GET", "/internal/stages/ready", params=params)
 
     def claim(self, stage_id: str, worker_id: str, claim_request_id: str,
-              *, job_id: str | None = None) -> dict:
+              *, job_id: str | None = None, session_id: str | None = None) -> dict:
         payload = {
             "stage_id": stage_id, "worker_id": worker_id, "claim_request_id": claim_request_id,
         }
         if job_id is not None:
             payload["job_id"] = self._job_id(job_id)
+        if session_id is not None:
+            payload["session_id"] = self._session_id(session_id)
         return self._request("POST", "/internal/stages/claim", json=payload)
+
+    @staticmethod
+    def _session_id(value: str) -> str:
+        try:
+            return str(UUID(value))
+        except (ValueError, TypeError, AttributeError):
+            raise WorkerClientError("INVALID_WORKER_SESSION") from None
+
+    @staticmethod
+    def _worker_identity(worker_id: str) -> str:
+        if not isinstance(worker_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", worker_id):
+            raise WorkerClientError("INVALID_WORKER_CONFIGURATION")
+        return worker_id
+
+    def _worker_receipt(self, path: str, payload: dict, outcome: str,
+                        *, timeout_seconds: float | None = None) -> dict:
+        options = {} if timeout_seconds is None else {"timeout": min(self._timeout_seconds, timeout_seconds)}
+        response = self._request("POST", path, json=payload, **options)
+        ttl = response.get("heartbeat_timeout_seconds")
+        try:
+            seen = datetime.fromisoformat(response["last_seen_at"].replace("Z", "+00:00"))
+            valid_seen = seen.tzinfo is not None
+        except (KeyError, AttributeError, TypeError, ValueError):
+            valid_seen = False
+        if (response.get("outcome") != outcome
+                or response.get("worker_id") != payload["worker_id"]
+                or response.get("session_id") != payload["session_id"]
+                or type(ttl) is not int or not 1 <= ttl <= 3600 or not valid_seen):
+            raise WorkerClientError("INVALID_WORKER_RESPONSE")
+        return response
+
+    def register_worker(self, worker_id: str, session_id: str, stage_types: list[str],
+                        *, target_job_id: str | None = None) -> dict:
+        allowed = {"MEDIA", "ASR", "SEGMENT", "TIMELINE", "EXPORT_CLIP"}
+        if (not isinstance(stage_types, list) or not stage_types
+                or any(not isinstance(value, str) or value not in allowed for value in stage_types)
+                or len(set(stage_types)) != len(stage_types)):
+            raise WorkerClientError("INVALID_WORKER_CAPABILITIES")
+        payload = {"worker_id": self._worker_identity(worker_id),
+                   "session_id": self._session_id(session_id), "stage_types": stage_types, "slots": 1}
+        if target_job_id is not None:
+            payload["target_job_id"] = self._job_id(target_job_id)
+        return self._worker_receipt("/internal/workers/register", payload, "REGISTERED")
+
+    def heartbeat_worker(self, worker_id: str, session_id: str,
+                         *, timeout_seconds: float | None = None) -> dict:
+        if timeout_seconds is not None and (not isinstance(timeout_seconds, (int, float)) or timeout_seconds <= 0):
+            raise WorkerClientError("INVALID_WORKER_HEARTBEAT_INTERVAL")
+        return self._worker_receipt("/internal/workers/heartbeat", {
+            "worker_id": self._worker_identity(worker_id), "session_id": self._session_id(session_id),
+        }, "ACCEPTED", timeout_seconds=timeout_seconds)
+
+    def unregister_worker(self, worker_id: str, session_id: str) -> dict:
+        return self._worker_receipt("/internal/workers/unregister", {
+            "worker_id": self._worker_identity(worker_id), "session_id": self._session_id(session_id),
+        }, "UNREGISTERED")
 
     def callback(self, action: str, stage_id: str, payload: dict) -> dict:
         if action not in {"heartbeat", "checkpoint", "complete", "fail"}:

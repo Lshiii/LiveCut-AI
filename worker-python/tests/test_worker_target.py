@@ -29,7 +29,7 @@ class TargetClient(FakeClient):
 
 def worker(tmp_path, client, calls, job_id):
     return StageWorker(client, tmp_path / "storage", tmp_path / "journal", "worker-1",
-                       fake_executor(calls), target_job_id=job_id)
+                       fake_executor(calls), target_job_id=job_id, registry_enabled=False)
 
 
 def test_client_target_filter_claim_and_public_source_routes_are_explicit():

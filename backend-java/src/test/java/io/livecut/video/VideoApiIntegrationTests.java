@@ -331,7 +331,7 @@ class VideoApiIntegrationTests {
     private void startContext() {
         context = new SpringApplicationBuilder(LivecutBackendApplication.class).run(
                 "--server.port=0", "--server.address=127.0.0.1",
-                "--livecut.jobs.scan-enabled=false",
+                "--livecut.jobs.scan-enabled=false", "--livecut.workers.require-registration=false",
                 "--spring.datasource.url=" + System.getenv("LIVECUT_DB_URL"),
                 "--spring.datasource.username=" + env("LIVECUT_DB_USER", "livecut"),
                 "--spring.datasource.password=" + env("LIVECUT_DB_PASSWORD", ""),

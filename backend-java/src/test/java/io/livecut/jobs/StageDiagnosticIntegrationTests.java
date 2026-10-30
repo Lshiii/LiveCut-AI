@@ -67,7 +67,7 @@ class StageDiagnosticIntegrationTests {
     private void startContext() {
         context = new SpringApplicationBuilder(LivecutBackendApplication.class, CommitFixture.class).run(
                 "--server.port=0", "--server.address=127.0.0.1", "--livecut.storage.root=" + root,
-                "--livecut.worker.api-key=" + KEY, "--livecut.jobs.scan-enabled=false", "--livecut.uploads.scan-enabled=false",
+                "--livecut.worker.api-key=" + KEY, "--livecut.jobs.scan-enabled=false", "--livecut.workers.require-registration=false", "--livecut.uploads.scan-enabled=false",
                 "--livecut.events.scan-enabled=false", "--livecut.jobs.lease-seconds=30", "--livecut.jobs.retry-delay-seconds=0",
                 "--spring.main.banner-mode=off", "--logging.level.root=WARN");
         base = URI.create("http://127.0.0.1:" + context.getEnvironment().getRequiredProperty("local.server.port"));

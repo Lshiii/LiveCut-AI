@@ -208,7 +208,7 @@ def test_stage_worker_persists_only_cache_contention_as_a_retryable_failure(
     transport = Mock(side_effect=AssertionError("Cache failure must stop before model transport"))
     journal = tmp_path / "cache-failure-journal"
     runner = StageWorker(client, ctx.storage_root, journal, "cache-fixture-worker",
-                         AnalysisStageExecutor(transport_factory=transport))
+                         AnalysisStageExecutor(transport_factory=transport), registry_enabled=False)
 
     assert runner.run_once(stage_type="SEGMENT") == "failed"
     failures = [callback for callback in client.callbacks if callback[0] == "fail"]
