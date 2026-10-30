@@ -568,7 +568,7 @@ class JobProtocolIntegrationTests {
     private void startContext(int maximumAttempts) {
         context = new SpringApplicationBuilder(LivecutBackendApplication.class).run(
                 "--server.port=0", "--server.address=127.0.0.1", "--livecut.storage.root=" + storageRoot.toAbsolutePath(),
-                "--livecut.worker.api-key=" + WORKER_KEY, "--livecut.jobs.scan-enabled=false", "--livecut.jobs.lease-seconds=30",
+                "--livecut.worker.api-key=" + WORKER_KEY, "--livecut.jobs.scan-enabled=false", "--livecut.workers.require-registration=false", "--livecut.jobs.lease-seconds=30",
                 "--livecut.jobs.hard-deadline-seconds=1800", "--livecut.jobs.max-attempts=" + maximumAttempts, "--livecut.jobs.retry-delay-seconds=2");
         base = URI.create("http://127.0.0.1:" + context.getEnvironment().getRequiredProperty("local.server.port"));
     }

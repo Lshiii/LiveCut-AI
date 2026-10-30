@@ -5,6 +5,7 @@ import ReviewPanel from './ReviewPanel.vue'
 import TopicReviewPanel from './TopicReviewPanel.vue'
 import UploadPanel from './UploadPanel.vue'
 import FailureDiagnostic from './FailureDiagnostic.vue'
+import ExecutorStatus from './ExecutorStatus.vue'
 import { DEFAULT_OCR_MAX_FRAMES, newAnalysisConfig, samplingLabel } from './sampling'
 import { SnapshotError, SnapshotStream, isAnalysisTerminal, newestSnapshot, parseAnalysisSnapshot, streamLabels, type StreamMode } from './snapshotStream'
 import { DetailRecovery, isConnectionErrorCode } from './connectionRecovery'
@@ -268,6 +269,7 @@ onUnmounted(() => { stopped = true; detailRecovery.cancel(); selectionVersion++;
           <div><span>待人工审核</span><strong>{{ reviewCount.toString().padStart(2, '0') }}</strong><small>自动结果尚未确认</small></div>
           <div class="workflow-note"><span class="workflow-icon">↗</span><p><b>先定位，再审核</b><br>自动识别保留为草稿<br>正式导出由审核版本决定</p></div>
         </section>
+        <ExecutorStatus :key="selectedJob?.id ?? 'workspace'" :job="selectedJob" />
         <div class="content-grid">
           <section id="tasks" class="panel tasks-panel">
             <div class="panel-heading"><h2>分析任务 <span>{{ jobs.length }}</span></h2><button class="text-button" :disabled="loading" @click="refresh">↻ 刷新</button></div>

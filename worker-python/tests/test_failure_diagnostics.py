@@ -291,7 +291,8 @@ def test_worker_binds_filtered_diagnostic_to_its_own_credentials_and_durable_fai
         raise SensitiveFailure(sensitive_context())
 
     storage, journal = tmp_path / "storage", tmp_path / "journal"
-    runner = StageWorker(client, storage, journal, "diagnostic-worker", execute)
+    runner = StageWorker(client, storage, journal, "diagnostic-worker", execute,
+                         registry_enabled=False)
     assert runner.run_once() == "failed"
     failures = [entry for entry in client.callbacks if entry[0] == "fail"]
     assert len(failures) == 1 and calls == [client.reply["stage_id"]]
@@ -329,7 +330,8 @@ def test_lost_failure_ack_replays_the_exact_diagnostic_without_recomputing_or_re
 
     storage, journal = tmp_path / "storage", tmp_path / "journal"
     with pytest.raises(WorkerClientError, match="JAVA_UNAVAILABLE"):
-        StageWorker(client, storage, journal, "diagnostic-worker", execute).run_once()
+        StageWorker(client, storage, journal, "diagnostic-worker", execute,
+                    registry_enabled=False).run_once()
     pending = (journal / "pending-callback.json").read_bytes()
     saved = json.loads(pending)
     assert saved["payload"]["diagnostic"] == safe_context()
@@ -338,7 +340,8 @@ def test_lost_failure_ack_replays_the_exact_diagnostic_without_recomputing_or_re
     def never_execute(context):
         pytest.fail("Lost callback acknowledgement must not rerun classification or model calls")
 
-    assert StageWorker(client, storage, journal, "diagnostic-worker", never_execute).run_once() == "callback_replayed"
+    assert StageWorker(client, storage, journal, "diagnostic-worker", never_execute,
+                       registry_enabled=False).run_once() == "callback_replayed"
     failures = [entry for entry in client.callbacks if entry[0] == "fail"]
     assert len(failures) == 2 and failures[0] == failures[1]
     assert failures[1][2] == saved["payload"]
@@ -354,7 +357,7 @@ def test_worker_without_context_keeps_the_legacy_failure_payload_shape(tmp_path)
         raise WorkerError("OCR_CACHE_CORRUPT")
 
     assert StageWorker(client, tmp_path / "storage", tmp_path / "journal",
-                       "legacy-worker", execute).run_once() == "failed"
+                       "legacy-worker", execute, registry_enabled=False).run_once() == "failed"
     failures = [entry for entry in client.callbacks if entry[0] == "fail"]
     assert len(failures) == 1
     assert failures[0][2] == {"attempt": 1, "run_token": "token-1",

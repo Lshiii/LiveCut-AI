@@ -60,7 +60,7 @@ class TopicReviewIntegrationTests {
     private void startContext() {
         context = new SpringApplicationBuilder(LivecutBackendApplication.class).run(
                 "--server.port=0", "--server.address=127.0.0.1", "--livecut.storage.root=" + root,
-                "--livecut.worker.api-key=" + WORKER_KEY, "--livecut.jobs.scan-enabled=false",
+                "--livecut.worker.api-key=" + WORKER_KEY, "--livecut.jobs.scan-enabled=false", "--livecut.workers.require-registration=false",
                 "--livecut.uploads.scan-enabled=false", "--livecut.events.scan-enabled=false",
                 "--spring.main.banner-mode=off", "--logging.level.root=WARN");
         jdbc = context.getBean(JdbcTemplate.class);

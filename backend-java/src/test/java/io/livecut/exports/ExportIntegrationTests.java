@@ -66,7 +66,7 @@ class ExportIntegrationTests {
 
     private void startContext() {
         context = new SpringApplicationBuilder(LivecutBackendApplication.class).run("--server.port=0", "--server.address=127.0.0.1",
-                "--livecut.storage.root=" + root, "--livecut.worker.api-key=" + KEY, "--livecut.jobs.scan-enabled=false",
+                "--livecut.storage.root=" + root, "--livecut.worker.api-key=" + KEY, "--livecut.jobs.scan-enabled=false", "--livecut.workers.require-registration=false",
                 "--livecut.jobs.retry-delay-seconds=0", "--livecut.jobs.lease-seconds=30");
         jdbc = context.getBean(JdbcTemplate.class);
         base = URI.create("http://127.0.0.1:" + context.getEnvironment().getRequiredProperty("local.server.port"));

@@ -510,7 +510,7 @@ class UploadApiIntegrationTests {
                 "--livecut.uploads.chunk-size=" + CHUNK, "--livecut.uploads.scan-enabled=false",
                 "--livecut.uploads.max-active=8", "--livecut.uploads.max-reserved-bytes=4096",
                 "--livecut.uploads.lease-seconds=30", "--livecut.uploads.ttl-seconds=86400",
-                "--livecut.jobs.scan-enabled=false", "--spring.main.banner-mode=off",
+                "--livecut.jobs.scan-enabled=false", "--livecut.workers.require-registration=false", "--spring.main.banner-mode=off",
                 "--logging.level.root=WARN");
         base = URI.create("http://127.0.0.1:" + context.getEnvironment().getProperty("local.server.port"));
     }

@@ -182,16 +182,20 @@ class Lease:
 
 class LeaseGuard:
     def __init__(self, lease: Lease, stop: threading.Event,
-                 *, now: Callable[[], float] = time.time) -> None:
+                 *, now: Callable[[], float] = time.time,
+                 presence_check: Callable[[], None] | None = None) -> None:
         self._now, self._stop = now, stop
         self._lease_until = _timestamp(lease.lease_until)
         self._deadline = _timestamp(lease.hard_deadline_at)
         self._lost = threading.Event()
         self._lock = threading.Lock()
+        self._presence_check = presence_check
 
     def check(self) -> None:
         if self._stop.is_set():
             raise WorkerError("WORKER_STOPPED")
+        if self._presence_check is not None:
+            self._presence_check()
         if self._lost.is_set():
             raise WorkerError("LEASE_LOST")
         with self._lock:
@@ -306,16 +310,129 @@ class StageWorker:
         self, client: WorkerClient, storage_root: Path, journal_dir: Path,
         worker_id: str, executor: StageExecutor, *, heartbeat_seconds: float = 10,
         stop: threading.Event | None = None, target_job_id: str | None = None,
+        registry_enabled: bool = True, worker_heartbeat_seconds: float = 10,
     ) -> None:
         self.client, self.storage_root = client, storage_root.resolve()
         self.journal_dir, self.worker_id, self.executor = journal_dir.resolve(), _identifier(worker_id), executor
         if heartbeat_seconds <= 0 or heartbeat_seconds > 15:
             raise WorkerError("INVALID_HEARTBEAT_INTERVAL")
         self.heartbeat_seconds = heartbeat_seconds
+        if worker_heartbeat_seconds <= 0 or worker_heartbeat_seconds > 15:
+            raise WorkerError("INVALID_WORKER_HEARTBEAT_INTERVAL")
+        self.registry_enabled = registry_enabled
+        self.worker_heartbeat_seconds = worker_heartbeat_seconds
+        self.session_id: str | None = None
+        self._presence_error: WorkerClientError | None = None
+        self._presence_deadline: float | None = None
+        self._presence_lock = threading.Lock()
+        self._monotonic = time.monotonic
+        self._ready_cursor = 0
         self.stop = stop if stop is not None else threading.Event()
         self.target_job_id = (WorkerClient._job_id(target_job_id)
                               if target_job_id is not None else None)
         _native_path(self.journal_dir).mkdir(parents=True, exist_ok=True)
+
+    def _recover_local_result(self) -> None:
+        """A completed old attempt may publish its exact callback without a new claim."""
+        claim_path = self.journal_dir / "pending-claim.json"
+        callback_path = self.journal_dir / "pending-callback.json"
+        if not _native_path(claim_path).exists() or _native_path(callback_path).exists():
+            return
+        pending = _read(claim_path)
+        self._check_target_record(pending)
+        attempt_key = pending.get("attempt_key")
+        if attempt_key is None:
+            return
+        if pending.get("worker_id") != self.worker_id:
+            raise WorkerError("WORKER_ID_MISMATCH")
+        result_path = shared_path(self.storage_root, attempt_key) / "worker-result.json"
+        if _native_path(result_path).exists():
+            callback = _read(result_path)
+            self._check_target_record(callback)
+            if callback.get("stage_id") != pending.get("stage_id"):
+                raise WorkerError("CLAIM_TARGET_CHANGED")
+            _write(callback_path, callback)
+            _native_path(claim_path).unlink()
+
+    def _check_presence(self) -> None:
+        if not self.registry_enabled:
+            return
+        with self._presence_lock:
+            if self._presence_deadline is None or self._monotonic() >= self._presence_deadline:
+                self._presence_error = WorkerClientError("WORKER_SESSION_EXPIRED")
+                self.stop.set()
+                raise WorkerError("WORKER_PRESENCE_LOST")
+
+    def _worker_heartbeat(self, finished: threading.Event, interval: float) -> None:
+        while not finished.wait(interval):
+            if self.stop.is_set():
+                return
+            try:
+                self._check_presence()
+                started = self._monotonic()
+                receipt = self.client.heartbeat_worker(self.worker_id, self.session_id,
+                                                       timeout_seconds=interval)
+                # Request start is deliberately conservative: a delayed receipt
+                # must not resurrect a session whose locally known TTL elapsed.
+                self._check_presence()
+                with self._presence_lock:
+                    deadline = started + receipt["heartbeat_timeout_seconds"]
+                    if self._monotonic() >= deadline:
+                        raise WorkerClientError("WORKER_SESSION_EXPIRED")
+                    self._presence_deadline = deadline
+                interval = min(self.worker_heartbeat_seconds, receipt["heartbeat_timeout_seconds"] / 3)
+            except (WorkerClientError, WorkerError) as exc:
+                # A task lease and a live executor are separate requirements.
+                # Stop acquiring/external dispatching as soon as presence is uncertain.
+                self._presence_error = (exc if isinstance(exc, WorkerClientError)
+                                        else WorkerClientError("WORKER_SESSION_EXPIRED"))
+                self.stop.set()
+                return
+
+    @contextmanager
+    def _registered(self, stage_type: str | None) -> Iterator[None]:
+        if not self.registry_enabled:
+            yield
+            return
+        # Never advertise capabilities we will not poll for. This process has
+        # exactly one computation slot, independent of its heartbeat threads.
+        capabilities = [stage_type] if stage_type is not None else list(STAGES)
+        if any(value not in STAGES for value in capabilities):
+            raise WorkerError("INVALID_STAGE_TYPE")
+        self.session_id = str(uuid4())
+        self._presence_error = None
+        target = {"target_job_id": self.target_job_id} if self.target_job_id is not None else {}
+        started = self._monotonic()
+        receipt = self.client.register_worker(self.worker_id, self.session_id, capabilities, **target)
+        with self._presence_lock:
+            self._presence_deadline = started + receipt["heartbeat_timeout_seconds"]
+        finished = threading.Event()
+        interval = min(self.worker_heartbeat_seconds, receipt["heartbeat_timeout_seconds"] / 3)
+        thread = threading.Thread(target=self._worker_heartbeat, args=(finished, interval), daemon=True)
+        thread.start()
+        try:
+            self._check_presence()
+            yield
+            if self._presence_error is not None:
+                raise self._presence_error
+        except WorkerError as exc:
+            if exc.code == "WORKER_PRESENCE_LOST":
+                # The main thread and heartbeat may observe the same deadline
+                # in either order. Expose one lifecycle error in both cases.
+                raise WorkerClientError("WORKER_SESSION_EXPIRED") from None
+            raise
+        finally:
+            finished.set()
+            thread.join(timeout=12)
+            # A failed unregister leaves presence to expire; it cannot replace
+            # the original computation/protocol exception or release its lease.
+            try:
+                self.client.unregister_worker(self.worker_id, self.session_id)
+            except WorkerClientError:
+                pass
+            self.session_id = None
+            with self._presence_lock:
+                self._presence_deadline = None
 
     def _check_target_record(self, value: dict) -> None:
         if self.target_job_id is not None and value.get("job_id") != self.target_job_id:
@@ -354,39 +471,90 @@ class StageWorker:
 
     def run_once(self, *, stage_type: str | None = None) -> str:
         with _single_worker(self.journal_dir):
-            return self._run_once(stage_type=stage_type)
+            self._recover_local_result()
+            if self._pending_callback():
+                return "callback_replayed"
+            if self.stop.is_set():
+                return "stopped"
+            with self._registered(stage_type):
+                return self._run_once(stage_type=stage_type)
+
+    def _next_claim(self, stage_type: str | None) -> tuple[dict, dict] | str:
+        """Try a bounded ready page so a full resource pool cannot block every pool."""
+        claim_path = self.journal_dir / "pending-claim.json"
+        pending = None
+        if _native_path(claim_path).exists():
+            pending = _read(claim_path)
+            self._check_target_record(pending)
+        target = {"job_id": self.target_job_id} if self.target_job_id is not None else {}
+        maximum_claims = 20 if self.registry_enabled else 1
+        if self.registry_enabled and stage_type is None:
+            # Query each capability independently. Twenty old MEDIA stages must
+            # not hide a runnable SEGMENT stage beyond the first global page.
+            query_stages = list(STAGES[self._ready_cursor:] + STAGES[:self._ready_cursor])
+            self._ready_cursor = (self._ready_cursor + 1) % len(STAGES)
+            page_size = 4
+        else:
+            query_stages, page_size = [stage_type], maximum_claims
+        candidates, query_index, attempted = [], 0, set()
+        query_stage = stage_type
+        for _ in range(maximum_claims):
+            if self.stop.is_set():
+                return "stopped"
+            self._check_presence()
+            if pending is None:
+                while not candidates:
+                    if query_index == len(query_stages):
+                        return "unavailable" if attempted else "idle"
+                    query_stage = query_stages[query_index]
+                    query_index += 1
+                    ready = self.client.ready(stage_type=query_stage, limit=page_size, **target)
+                    candidates = ready.get("items")
+                    if not isinstance(candidates, list) or len(candidates) > page_size:
+                        raise WorkerError("INVALID_JAVA_RESPONSE")
+                    candidates = [item for item in candidates if not isinstance(item, dict)
+                                  or not isinstance(item.get("id"), str) or item["id"] not in attempted]
+                item = candidates.pop(0)
+                if not isinstance(item, dict):
+                    raise WorkerError("INVALID_JAVA_RESPONSE")
+                if self.target_job_id is not None and item.get("job_id") != self.target_job_id:
+                    raise WorkerError("CLAIM_TARGET_CHANGED")
+                if self.registry_enabled and query_stage is not None and item.get("stage_type") != query_stage:
+                    raise WorkerError("CLAIM_STAGE_TYPE_CHANGED")
+                pending = {"stage_id": _identifier(item.get("id")),
+                           "worker_id": self.worker_id, "claim_request_id": str(uuid4()), **target}
+                _write(claim_path, pending)
+            if pending.get("worker_id") != self.worker_id:
+                raise WorkerError("WORKER_ID_MISMATCH")
+            options = dict(target)
+            if self.registry_enabled:
+                options["session_id"] = self.session_id
+                if pending.get("session_id") is None:
+                    pending["session_id"] = self.session_id
+                    _write(claim_path, pending)
+                # A restarted process must not adopt an old attempt. Java binds
+                # receipts to their old session and returns EXPIRED on replay.
+            if self.stop.is_set():
+                return "stopped"
+            self._check_presence()
+            claim = self.client.claim(pending["stage_id"], self.worker_id, pending["claim_request_id"], **options)
+            if claim.get("outcome") not in {"NO_WORK", "EXPIRED", "NO_CAPACITY"}:
+                return claim, pending
+            attempted.add(pending["stage_id"])
+            _native_path(claim_path).unlink()
+            pending = None
+        return "unavailable"
 
     def _run_once(self, *, stage_type: str | None = None) -> str:
         if self._pending_callback():
             return "callback_replayed"
         if self.stop.is_set():
             return "stopped"
+        selected = self._next_claim(stage_type)
+        if isinstance(selected, str):
+            return selected
+        claim, pending = selected
         claim_path = self.journal_dir / "pending-claim.json"
-        if _native_path(claim_path).exists():
-            pending = _read(claim_path)
-            self._check_target_record(pending)
-        else:
-            target = {"job_id": self.target_job_id} if self.target_job_id is not None else {}
-            ready = self.client.ready(stage_type=stage_type, limit=1, **target)
-            items = ready.get("items")
-            if not isinstance(items, list):
-                raise WorkerError("INVALID_JAVA_RESPONSE")
-            if not items:
-                return "idle"
-            if self.target_job_id is not None and (not isinstance(items[0], dict)
-                                                  or items[0].get("job_id") != self.target_job_id):
-                raise WorkerError("CLAIM_TARGET_CHANGED")
-            pending = {"stage_id": _identifier(items[0].get("id")),
-                       "worker_id": self.worker_id, "claim_request_id": str(uuid4())}
-            pending.update(target)
-            _write(claim_path, pending)
-        if pending.get("worker_id") != self.worker_id:
-            raise WorkerError("WORKER_ID_MISMATCH")
-        target = {"job_id": self.target_job_id} if self.target_job_id is not None else {}
-        claim = self.client.claim(pending["stage_id"], self.worker_id, pending["claim_request_id"], **target)
-        if claim.get("outcome") in {"NO_WORK", "EXPIRED"}:
-            _native_path(claim_path).unlink()
-            return "unavailable"
         # A malformed frozen export still has valid fenced credentials. Defer
         # its configuration check into the failure callback boundary below.
         lease = Lease.parse(claim, validate_export=False)
@@ -396,9 +564,14 @@ class StageWorker:
             raise WorkerError("CLAIM_TARGET_CHANGED")
         if stage_type is not None and lease.stage_type != stage_type:
             raise WorkerError("CLAIM_STAGE_TYPE_CHANGED")
+        if self.registry_enabled:
+            if pending["session_id"] != self.session_id:
+                raise WorkerError("WORKER_SESSION_CHANGED")
+            pending["attempt_key"] = lease.attempt_key
+            _write(claim_path, pending)
         directory = shared_path(self.storage_root, lease.attempt_key)
         _native_path(directory).mkdir(parents=True, exist_ok=True)
-        guard = LeaseGuard(lease, self.stop)
+        guard = LeaseGuard(lease, self.stop, presence_check=self._check_presence)
         context = StageContext(lease, self.storage_root, directory, guard)
         callback_path = self.journal_dir / "pending-callback.json"
         result_path = directory / "worker-result.json"
@@ -482,15 +655,25 @@ class StageWorker:
     def run(self, *, poll_seconds: float = 3, stage_type: str | None = None) -> None:
         if poll_seconds <= 0:
             raise WorkerError("INVALID_POLL_INTERVAL")
-        while not self.stop.is_set():
-            try:
-                status = self.run_once(stage_type=stage_type)
-            except WorkerClientError as exc:
-                if not exc.retryable and exc.code not in {"STALE_ATTEMPT", "LEASE_EXPIRED"}:
-                    raise
-                status = "unavailable"
-            if status in {"idle", "unavailable"}:
-                self.stop.wait(poll_seconds)
+        # The same process owns its journal for the entire advertised lifetime.
+        # Registering outside this lock could let two processes share an identity.
+        with _single_worker(self.journal_dir):
+            self._recover_local_result()
+            self._pending_callback()
+            if self.stop.is_set():
+                return
+            with self._registered(stage_type):
+                while not self.stop.is_set():
+                    try:
+                        status = self._run_once(stage_type=stage_type)
+                    except WorkerClientError as exc:
+                        if not exc.retryable and exc.code not in {"STALE_ATTEMPT", "LEASE_EXPIRED"}:
+                            raise
+                        status = "unavailable"
+                    if self._presence_error is not None:
+                        raise self._presence_error
+                    if status in {"idle", "unavailable"}:
+                        self.stop.wait(poll_seconds)
 
 
 ProviderTransportFactory = Callable[[StageContext, str], httpx.BaseTransport]

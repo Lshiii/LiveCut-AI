@@ -78,7 +78,7 @@ class TaskEventsIntegrationTests {
     private void startContext(long timeoutMs) {
         context = new SpringApplicationBuilder(LivecutBackendApplication.class, WriteBoundaryFixture.class).run(
                 "--server.port=0", "--server.address=127.0.0.1", "--livecut.storage.root=" + root,
-                "--livecut.worker.api-key=" + KEY, "--livecut.jobs.scan-enabled=false",
+                "--livecut.worker.api-key=" + KEY, "--livecut.jobs.scan-enabled=false", "--livecut.workers.require-registration=false",
                 "--livecut.uploads.scan-enabled=false", "--livecut.jobs.lease-seconds=30",
                 "--livecut.events.poll-ms=100", "--livecut.events.heartbeat-ms=200",
                 "--livecut.events.timeout-ms=" + timeoutMs, "--livecut.events.max-connections=4",
