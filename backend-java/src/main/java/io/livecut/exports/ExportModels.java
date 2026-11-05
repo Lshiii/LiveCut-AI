@@ -7,6 +7,7 @@ import java.util.Map;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.annotation.JsonInclude;
+import io.livecut.jobs.ArtifactVerifier.SourcePart;
 
 public final class ExportModels {
     private ExportModels() {}
@@ -24,7 +25,11 @@ public final class ExportModels {
                        @JsonProperty("content_url") String contentUrl,
                        @JsonProperty("download_url") String downloadUrl,
                        @JsonInclude(JsonInclude.Include.NON_NULL) Map<String, Object> diagnostic,
-                       @JsonInclude(JsonInclude.Include.NON_NULL) String title) {
+                       @JsonInclude(JsonInclude.Include.NON_NULL) String title,
+                       @JsonInclude(JsonInclude.Include.NON_NULL) List<SourcePart> parts) {
+        @JsonProperty("duration_ms") @JsonInclude(JsonInclude.Include.NON_NULL)
+        public Long durationMs(){return parts==null?null:parts.stream().mapToLong(p->p.endMs()-p.startMs()).sum();}
+        public Clip(String id,String segmentId,String productId,String productName,long startMs,long endMs,String stageId,String status,int attempt,String errorCode,Long sizeBytes,String contentUrl,String downloadUrl,Map<String,Object> diagnostic,String title){this(id,segmentId,productId,productName,startMs,endMs,stageId,status,attempt,errorCode,sizeBytes,contentUrl,downloadUrl,diagnostic,title,null);}
         public Clip(String id, String segmentId, String productId, String productName,
                     long startMs, long endMs, String stageId, String status, int attempt,
                     String errorCode, Long sizeBytes, String contentUrl, String downloadUrl) {
@@ -44,7 +49,10 @@ public final class ExportModels {
                            @JsonProperty("snapshot_hash") String snapshotHash, String profile,
                            String status, @JsonProperty("state_version") long stateVersion,
                            @JsonProperty("created_at") Instant createdAt,
-                           @JsonProperty("updated_at") Instant updatedAt, List<Clip> clips) {}
+                           @JsonProperty("updated_at") Instant updatedAt, List<Clip> clips,
+                           @JsonProperty("clip_request_id") @JsonInclude(JsonInclude.Include.NON_NULL) String clipRequestId) {
+        public Snapshot(String id,String jobId,String videoId,long approvedRevision,String snapshotHash,String profile,String status,long stateVersion,Instant createdAt,Instant updatedAt,List<Clip> clips){this(id,jobId,videoId,approvedRevision,snapshotHash,profile,status,stateVersion,createdAt,updatedAt,clips,null);}
+    }
     public record Page(List<Snapshot> items, int limit, int offset) {}
     public record ManifestFile(String filename, @JsonProperty("size_bytes") long sizeBytes,
                                String sha256, @JsonProperty("download_url") String downloadUrl) {}
@@ -54,7 +62,11 @@ public final class ExportModels {
                                @JsonProperty("product_name") String productName,
                                @JsonProperty("start_ms") long startMs, @JsonProperty("end_ms") long endMs,
                                String status, int attempt, @JsonProperty("error_code") String errorCode,
-                               ManifestFile file, @JsonInclude(JsonInclude.Include.NON_NULL) String title) {
+                               ManifestFile file, @JsonInclude(JsonInclude.Include.NON_NULL) String title,
+                               @JsonInclude(JsonInclude.Include.NON_NULL) List<SourcePart> parts) {
+        @JsonProperty("duration_ms") @JsonInclude(JsonInclude.Include.NON_NULL)
+        public Long durationMs(){return parts==null?null:parts.stream().mapToLong(p->p.endMs()-p.startMs()).sum();}
+        public ManifestClip(String clipId,String segmentId,String productId,String productName,long startMs,long endMs,String status,int attempt,String errorCode,ManifestFile file,String title){this(clipId,segmentId,productId,productName,startMs,endMs,status,attempt,errorCode,file,title,null);}
         public ManifestClip(String clipId,String segmentId,String productId,String productName,long startMs,long endMs,
                             String status,int attempt,String errorCode,ManifestFile file) {
             this(clipId,segmentId,productId,productName,startMs,endMs,status,attempt,errorCode,file,null);
@@ -70,7 +82,10 @@ public final class ExportModels {
                            @JsonProperty("snapshot_hash") String snapshotHash, String profile, String status,
                            @JsonProperty("state_version") long stateVersion,
                            @JsonProperty("created_at") Instant createdAt,
-                           @JsonProperty("updated_at") Instant updatedAt, List<ManifestClip> clips) {}
+                           @JsonProperty("updated_at") Instant updatedAt, List<ManifestClip> clips,
+                           @JsonProperty("clip_request_id") @JsonInclude(JsonInclude.Include.NON_NULL) String clipRequestId) {
+        public Manifest(String schemaVersion,String dataKind,String exportId,String jobId,String videoId,int generation,long approvedRevision,String sourceVideoSha256,String snapshotHash,String profile,String status,long stateVersion,Instant createdAt,Instant updatedAt,List<ManifestClip> clips){this(schemaVersion,dataKind,exportId,jobId,videoId,generation,approvedRevision,sourceVideoSha256,snapshotHash,profile,status,stateVersion,createdAt,updatedAt,clips,null);}
+    }
     /** Internal streaming reference; never expose local paths as JSON. */
     public record Content(Path path, long sizeBytes, String hash, String filename) {}
 }

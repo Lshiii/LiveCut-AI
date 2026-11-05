@@ -6,7 +6,14 @@ import re
 from dataclasses import asdict, dataclass
 from uuid import UUID
 
-from .media import MediaInfo, _check_duration, _run_process, export_clip, probe_media
+from .media import (
+    MediaInfo,
+    _check_duration,
+    _run_process,
+    export_clip,
+    export_composed_clip,
+    probe_media,
+)
 from .worker import (
     Lease,
     StageContext,
@@ -31,12 +38,20 @@ class ExportSpec:
     start_ms: int
     end_ms: int
     encoding_profile: str
+    parts: list[dict] | None = None
+    duration_ms: int | None = None
+    clip_request_id: str | None = None
+
+    def frozen(self) -> dict:
+        value = asdict(self)
+        return {key: item for key, item in value.items() if item is not None}
 
     @classmethod
     def from_lease(cls, lease: Lease) -> ExportSpec:
         value = lease.config.get("export")
+        base_fields = set(cls.__dataclass_fields__) - {"parts", "duration_ms", "clip_request_id"}
         if (lease.stage_type != "EXPORT_CLIP" or set(lease.config) != {"export"}
-                or not isinstance(value, dict) or set(value) != set(cls.__dataclass_fields__)
+                or not isinstance(value, dict) or set(value) not in (base_fields, set(cls.__dataclass_fields__))
                 or not isinstance(lease.input_hash, str)
                 or not re.fullmatch(r"[0-9a-f]{64}", lease.input_hash)):
             raise WorkerError("INVALID_EXPORT_INPUT")
@@ -56,6 +71,25 @@ class ExportSpec:
                     or not re.fullmatch(r"[0-9a-f]{64}", value["snapshot_hash"])
                     or value["encoding_profile"] != ENCODING_PROFILE):
                 raise ValueError
+            if "parts" in value:
+                parts = value["parts"]
+                if not isinstance(parts, list) or not 1 <= len(parts) <= 12:
+                    raise ValueError
+                previous, total = -1, 0
+                for part in parts:
+                    if (not isinstance(part, dict) or set(part) != {"start_ms", "end_ms"}
+                            or type(part["start_ms"]) is not int or type(part["end_ms"]) is not int
+                            or not 0 <= part["start_ms"] < part["end_ms"] <= 2**63 - 1
+                            or part["start_ms"] < previous):
+                        raise ValueError
+                    previous = part["end_ms"]
+                    total += part["end_ms"] - part["start_ms"]
+                if (type(value["duration_ms"]) is not int or value["duration_ms"] != total
+                        or parts[0]["start_ms"] != value["start_ms"]
+                        or parts[-1]["end_ms"] != value["end_ms"]
+                        or not isinstance(value["clip_request_id"], str)
+                        or str(UUID(value["clip_request_id"])) != value["clip_request_id"]):
+                    raise ValueError
         except (ValueError, TypeError, WorkerError):
             raise WorkerError("INVALID_EXPORT_INPUT") from None
         return cls(**value)
@@ -82,7 +116,9 @@ class ExportStageExecutor:
             "aac" if source_info.audio_codec is not None else None
         ):
             raise WorkerError("EXPORT_PROFILE_MISMATCH")
-        _check_duration(info.duration_ms, spec.end_ms - spec.start_ms, info.frame_rate)
+        count = len(spec.parts) if spec.parts else 1
+        expected = spec.duration_ms if spec.parts else spec.end_ms - spec.start_ms
+        _check_duration(info.duration_ms, expected, info.frame_rate, interval_count=count)
         context.guard.check()
         _run_process([
             self.ffmpeg_path, "-hide_banner", "-loglevel", "error", "-nostdin", "-xerror",
@@ -114,7 +150,7 @@ class ExportStageExecutor:
             "analysis_generation": lease.generation, "stage_id": lease.stage_id,
             "attempt": lease.attempt, "run_token": lease.run_token,
             "source_sha256": lease.source_hash, "stage_input_hash": lease.input_hash,
-            "export": asdict(spec),
+            "export": spec.frozen(),
         }
         for path in (binding_path, checkpoint_path, clip, media_info):
             if _native_path(path).is_symlink():
@@ -137,9 +173,14 @@ class ExportStageExecutor:
             if _native_path(media_info).exists():
                 raise WorkerError("EXPORT_ARTIFACT_CHANGED")
             context.guard.check()
-            export_clip(_native_path(source), _native_path(clip), spec.start_ms, spec.end_ms,
-                        ffmpeg_path=self.ffmpeg_path, ffprobe_path=self.ffprobe_path,
-                        timeout_seconds=min(300, context.guard.remaining_seconds()))
+            if spec.parts:
+                export_composed_clip(_native_path(source), _native_path(clip), spec.parts,
+                                     ffmpeg_path=self.ffmpeg_path, ffprobe_path=self.ffprobe_path,
+                                     timeout_seconds=min(300, context.guard.remaining_seconds()))
+            else:
+                export_clip(_native_path(source), _native_path(clip), spec.start_ms, spec.end_ms,
+                            ffmpeg_path=self.ffmpeg_path, ffprobe_path=self.ffprobe_path,
+                            timeout_seconds=min(300, context.guard.remaining_seconds()))
         info = self._verify_output(context, clip, spec, source_info)
         if existing is None:
             _write(media_info, {key: value for key, value in asdict(info).items() if key != "path"})
@@ -152,6 +193,6 @@ class ExportStageExecutor:
             "analysis_generation": lease.generation, "stage_id": lease.stage_id,
             "stage_type": "EXPORT_CLIP", "attempt": lease.attempt, "run_token": lease.run_token,
             "input_sha256": lease.source_hash, "stage_input_hash": lease.input_hash,
-            "data_kind": "reviewed_export", "review_status": "CONFIRMED", **asdict(spec),
+            "data_kind": "reviewed_export", "review_status": "CONFIRMED", **spec.frozen(),
             "artifacts": [context.artifact("clip", clip), context.artifact("media_info", media_info)],
         }

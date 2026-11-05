@@ -72,10 +72,27 @@ public class ArtifactVerifier {
 
     public record ExportIdentity(String exportId, String clipId, long approvedRevision, String snapshotHash,
                                  String segmentId, long startMs, long endMs, String encodingProfile,
-                                 String stageInputHash) {}
+                                 String stageInputHash, List<SourcePart> parts, String clipRequestId) {
+        public ExportIdentity(String exportId,String clipId,long approvedRevision,String snapshotHash,String segmentId,
+                long startMs,long endMs,String encodingProfile,String stageInputHash) {
+            this(exportId,clipId,approvedRevision,snapshotHash,segmentId,startMs,endMs,encodingProfile,stageInputHash,List.of(),null);
+        }
+    }
+    public record SourcePart(@com.fasterxml.jackson.annotation.JsonProperty("start_ms") long startMs,
+                             @com.fasterxml.jackson.annotation.JsonProperty("end_ms") long endMs) {}
 
     public VerifiedManifest verifyManifest(String key, String expectedHash, ManifestIdentity expected) {
         return verifyManifest(key, expectedHash, expected, null);
+    }
+
+    public VerifiedManifest verifyClipPlanManifest(String key,String hash,ManifestIdentity expected) {
+        if(expected==null||!"SEGMENT".equals(expected.stageType()))throw invalidReference();
+        return verifyManifest(key,hash,expected,null,true);
+    }
+
+    public JsonNode readJsonArtifact(VerifiedArtifact artifact,ManifestIdentity expected) {
+        try{return JSON.readTree(verifiedBytes(artifact.key(),artifact.sha256(),expected.attemptPrefix(),MAX_ANALYSIS_BYTES));}
+        catch(JobException error){throw error;}catch(RuntimeException error){throw invalidAnalysis();}
     }
 
     public VerifiedManifest verifyExportManifest(String key, String expectedHash, ManifestIdentity expected,
@@ -100,12 +117,18 @@ public class ArtifactVerifier {
         double frameRate = fps.isNull() || fps.isMissingNode() ? 0 : fps.isNumber() ? fps.doubleValue() : Double.NaN;
         if (!Double.isFinite(frameRate) || frameRate < 0 || (!fps.isNull() && !fps.isMissingNode() && frameRate == 0)) { throw invalidManifest(); }
         double tolerance = frameRate > 0 ? Math.max(100, Math.ceil(2000 / frameRate)) : 100;
-        if (Math.abs(metadata.path("duration_ms").longValue() - (export.endMs() - export.startMs())) > tolerance) { throw invalidManifest(); }
+        long expectedDuration=export.parts().isEmpty()?export.endMs()-export.startMs():export.parts().stream().mapToLong(p->p.endMs()-p.startMs()).sum();
+        if (Math.abs(metadata.path("duration_ms").longValue() - expectedDuration) > tolerance*Math.max(1,export.parts().size())) { throw invalidManifest(); }
         return verified;
     }
 
     private VerifiedManifest verifyManifest(String key, String expectedHash, ManifestIdentity expected,
                                              ExportIdentity export) {
+        return verifyManifest(key,expectedHash,expected,export,false);
+    }
+
+    private VerifiedManifest verifyManifest(String key,String expectedHash,ManifestIdentity expected,
+                                             ExportIdentity export,boolean clipPlan) {
         if (expected == null || !expected.attemptPrefix().concat("manifest.json").equals(key)) { throw invalidReference(); }
         byte[] bytes = verifiedBytes(key, expectedHash, expected.attemptPrefix(), MAX_MANIFEST_BYTES);
         JsonNode manifest;
@@ -132,6 +155,20 @@ public class ArtifactVerifier {
                     || !text(manifest, "stage_input_hash", export.stageInputHash())) {
                 throw error(HttpStatus.CONFLICT, "ARTIFACT_IDENTITY_MISMATCH", "Artifact identity does not match this frozen export");
             }
+            if(!export.parts().isEmpty()){
+                JsonNode parts=manifest.path("parts");
+                if(export.clipRequestId()==null||!text(manifest,"clip_request_id",export.clipRequestId())||!parts.isArray()||parts.size()!=export.parts().size())throw invalidManifest();
+                long duration=0,previous=-1;
+                if(parts.size()>12)throw invalidManifest();
+                for(int i=0;i<parts.size();i++){
+                    SourcePart part=export.parts().get(i);
+                    if(part.startMs()<0||part.endMs()<=part.startMs()||part.startMs()<previous
+                            ||!longInteger(parts.get(i),"start_ms",part.startMs())||!longInteger(parts.get(i),"end_ms",part.endMs())
+                            ||parts.get(i).propertyNames().size()!=2)throw invalidManifest();
+                    previous=part.endMs();duration=Math.addExact(duration,part.endMs()-part.startMs());
+                }
+                if(!longInteger(manifest,"duration_ms",duration))throw invalidManifest();
+            } else if(manifest.has("parts")||manifest.has("clip_request_id"))throw invalidManifest();
         } else if (!text(manifest, "data_kind", "model_result") || !text(manifest, "review_status", "DRAFT")) { throw invalidManifest(); }
         JsonNode artifacts = manifest.path("artifacts");
         if (!artifacts.isArray() || artifacts.isEmpty() || artifacts.size() > 64) { throw invalidManifest(); }
@@ -149,7 +186,7 @@ public class ArtifactVerifier {
             long size = verifyFile(artifactKey, artifactHash, expected.attemptPrefix(), Long.MAX_VALUE);
             verified.add(new VerifiedArtifact(kind, artifactKey, artifactHash, size));
         }
-        if (!kinds.containsAll(REQUIRED_KINDS.get(expected.stageType()))) { throw invalidManifest(); }
+        if (!kinds.containsAll(clipPlan?Set.of("clip_plan"):REQUIRED_KINDS.get(expected.stageType()))) { throw invalidManifest(); }
         return new VerifiedManifest(verified);
     }
 

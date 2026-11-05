@@ -17,7 +17,9 @@ from .segmentation import (
     _inputs,
     _json,
     _request,
+    _response_choices,
     _save,
+    _text_api_key,
     _unique_model_object,
     _visual_input,
     _visual_payload,
@@ -69,7 +71,7 @@ class _TopicOutputError(SegmentationError):
 
 def _topic_rows(raw: dict) -> list[dict]:
     try:
-        choices = raw["output"]["choices"]
+        choices = _response_choices(raw)
         if (not isinstance(choices, list) or len(choices) != 1
                 or choices[0]["finish_reason"] != "stop"):
             raise _TopicOutputError("RESPONSE_STRUCTURE")
@@ -216,9 +218,9 @@ def discover_topics(utterances: list[dict], duration_ms: int, output_dir: str | 
             raise SegmentationError("INVALID_CHECKPOINT", "Topic checkpoint cannot be read") from error
         _check_checkpoint(state, fingerprint, len(windows))
         _save(state_path, state)
-        key = api_key or os.environ.get("DASHSCOPE_API_KEY", "")
+        key = _text_api_key(api_key, endpoint)
         if windows and not key:
-            raise SegmentationError("MISSING_API_KEY", "set DASHSCOPE_API_KEY or pass api_key")
+            raise SegmentationError("MISSING_API_KEY", "set LIVECUT_TEXT_API_KEY or pass api_key")
         active = client or httpx.Client(timeout=timeout_seconds, follow_redirects=False)
         owned = client is None
         chapters = []

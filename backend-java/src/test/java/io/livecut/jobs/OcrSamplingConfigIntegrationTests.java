@@ -84,6 +84,7 @@ class OcrSamplingConfigIntegrationTests {
         Map<String, Object> expected = new TreeMap<>(legacyConfig()); expected.put("ocr_sampling", "uniform");
         expected.put("ocr_max_frames", 120);
         expected.put("analysis_mode", "topics");
+        expected.put("text_fallback_models",List.of());
         assertEquals(JSON.valueToTree(expected), job.path("config"));
         assertEquals(job.path("config"), JSON.readTree(jdbc().queryForObject("SELECT config_json FROM analysis_job WHERE id=?", String.class, job.path("id").asText())));
         byte[] before = getBytes(job.path("id").asText());
@@ -106,12 +107,25 @@ class OcrSamplingConfigIntegrationTests {
             normalized.put("ocr_sampling", job.path("config").path("ocr_sampling").asText());
             normalized.put("ocr_max_frames", 120);
             normalized.put("analysis_mode", "topics");
+            normalized.put("text_fallback_models",List.of());
             assertEquals(hash(JSON.writeValueAsString(normalized)), job.path("config_hash").asText());
             for (JsonNode stage : job.path("stages")) {
                 assertEquals(hash(source + "\n" + job.path("config_hash").asText() + "\n" + stage.path("stage_type").asText() + "\n0"), stage.path("input_hash").asText());
             }
         }
         assertNotEquals(inputHashes(prefix.path("id").asText()), inputHashes(uniform.path("id").asText()));
+    }
+    @Test void fallbackModelsAreBoundedFrozenAndPartOfConfigIdentity() throws Exception {
+        String video=video();String receipt=key();
+        JsonNode configured=created(create(video,receipt,Map.of("text_fallback_models",List.of("deepseek-flash"))));
+        JsonNode without=created(create(video,key(),Map.of()));
+        assertNotEquals(configured.path("config_hash"),without.path("config_hash"));
+        assertEquals(JSON.valueToTree(List.of("deepseek-flash")),configured.path("config").path("text_fallback_models"));
+        byte[] frozen=getBytes(configured.path("id").asText());
+        assertArrayEquals(frozen,create(video,receipt,Map.of("text_fallback_models",List.of("deepseek-flash"))).body());
+        error(create(video,receipt,Map.of("text_fallback_models",List.of("other-model"))),409,"IDEMPOTENCY_CONFLICT");
+        for(Object invalid:List.of("model",List.of("a","a"),List.of("https://provider.test"),List.of("a","b","c")))error(create(video,key(),Map.of("text_fallback_models",invalid)),400,"INVALID_TEXT_POLICY");
+        assertArrayEquals(frozen,getBytes(configured.path("id").asText()));
     }
 
     @Test void disabledVisualProviderStillFreezesPolicyAndClaimReturnsItWithoutAnOcrExecution() throws Exception {
@@ -255,6 +269,7 @@ class OcrSamplingConfigIntegrationTests {
             Map<String, Object> expected = new TreeMap<>(legacyConfig());
             expected.put("ocr_sampling", "uniform"); expected.put("ocr_max_frames", frames);
             expected.put("analysis_mode", "topics");
+            expected.put("text_fallback_models",List.of());
             String configHash = hash(JSON.writeValueAsString(expected));
             assertEquals(configHash, job.path("config_hash").asText());
             assertTrue(hashes.add(configHash));

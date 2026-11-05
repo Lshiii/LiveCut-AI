@@ -298,7 +298,7 @@ def _repair_product_merges(raw: dict, window: dict, *, grouping: str) -> dict:
     if grouping != "category":
         return empty
     try:
-        choices = raw["output"]["choices"]
+        choices = _response_choices(raw)
         if (not isinstance(choices, list) or len(choices) != 1
                 or not isinstance(choices[0], dict) or choices[0].get("finish_reason") != "stop"):
             return empty
@@ -338,7 +338,7 @@ def _parse_response(raw: dict, window: dict, *, grouping: str,
                     known_products: list[dict] | None = None,
                     allowed_product_ids: set[str] | None = None) -> dict:
     try:
-        choices = raw["output"]["choices"]
+        choices = _response_choices(raw)
         if (not isinstance(choices, list) or len(choices) != 1
                 or not isinstance(choices[0], dict) or choices[0].get("finish_reason") != "stop"):
             raise ValueError("require exactly one complete, non-truncated choice")
@@ -667,6 +667,18 @@ def _validate_window(parsed: Any, window: dict, *, grouping: str,
         invalid("every core utterance must be assigned exactly once")
 
 
+def _response_choices(raw: dict) -> list:
+    """Read either wire envelope without changing the recorded provider response."""
+    return raw["output"]["choices"] if "output" in raw else raw["choices"]
+
+
+def _text_api_key(explicit: str | None, endpoint: str) -> str:
+    # OpenAI-compatible services must never receive an ASR/DashScope secret as
+    # an implicit fallback. Native DashScope keeps its existing configuration.
+    return (explicit or os.environ.get("LIVECUT_TEXT_API_KEY")
+            or (os.environ.get("DASHSCOPE_API_KEY", "") if not endpoint.endswith("/chat/completions") else ""))
+
+
 def _endpoint(base_url: str) -> str:
     parsed = urlsplit(base_url)
     if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
@@ -674,6 +686,11 @@ def _endpoint(base_url: str) -> str:
     if parsed.query or parsed.fragment:
         raise SegmentationError("INVALID_INPUT", "base_url must not contain query or fragment")
     path = base_url.rstrip("/")
+    style = os.environ.get("LIVECUT_TEXT_API_STYLE", "dashscope")
+    if style not in {"dashscope", "openai"}:
+        raise SegmentationError("INVALID_INPUT", "LIVECUT_TEXT_API_STYLE must be dashscope or openai")
+    if style == "openai":
+        return path if path.endswith("/chat/completions") else path + "/chat/completions"
     suffix = "/services/aigc/text-generation/generation"
     if path.endswith(suffix):
         return path
@@ -688,33 +705,46 @@ def _request(
         call for call in state["calls"]
         if call["window_index"] == window_index and call["attempt"] == attempt
     ]
+    resumable = getattr(client, "livecut_resumable_text", False) is True
     if existing:
         call = existing[0]
-        if call["status"] != "received":
+        if call["status"] != "received" and not resumable:
             raise SegmentationError(
                 "CALL_STATE_UNCERTAIN", "previous call did not finish safely; inspect the local ledger"
             )
-        if call.get("provider_failed"):
+        if call.get("provider_failed") and not resumable:
             raise SegmentationError("PROVIDER_ERROR", "previous provider call failed; inspect the local ledger")
-        try:
-            return json.loads((directory / call["response_file"]).read_text(encoding="utf-8"))
-        except (OSError, ValueError) as exc:
-            raise SegmentationError("INVALID_CHECKPOINT", "cached provider response is missing/corrupt") from exc
-    if len(state["calls"]) >= max_calls:
-        raise SegmentationError("BUDGET_EXHAUSTED", "max_calls reached before a provider request")
-    call = {
-        "window_index": window_index, "attempt": attempt, "status": "started", "usage": {},
-        "response_file": f"window-{window_index:04d}-attempt-{attempt}.json",
-    }
-    state["calls"].append(call)
-    _save(directory / "state.json", state)
-    request = {
-        "model": model, "input": {"messages": messages},
-        "parameters": {
-            "result_format": "message", "response_format": {"type": "json_object"},
-            "enable_thinking": False, "temperature": 0,
-        },
-    }
+        if call["status"] == "received" and not call.get("provider_failed"):
+            try:
+                return json.loads((directory / call["response_file"]).read_text(encoding="utf-8"))
+            except (OSError, ValueError) as exc:
+                raise SegmentationError("INVALID_CHECKPOINT", "cached provider response is missing/corrupt") from exc
+        # Only the bounded, ledger-backed worker transport may resume this
+        # logical operation. It replays completed calls or reserves a new slot;
+        # the original uncertain dispatch is never sent again or erased.
+    else:
+        if len(state["calls"]) >= max_calls:
+            raise SegmentationError("BUDGET_EXHAUSTED", "max_calls reached before a provider request")
+        call = {
+            "window_index": window_index, "attempt": attempt, "status": "started", "usage": {},
+            "response_file": f"window-{window_index:04d}-attempt-{attempt}.json",
+        }
+        state["calls"].append(call)
+        _save(directory / "state.json", state)
+    openai = urlsplit(endpoint).path.endswith("/chat/completions")
+    if openai:
+        request = {"model": model, "messages": messages, "stream": False,
+                   "response_format": {"type": "json_object"}, "temperature": 0}
+        if urlsplit(endpoint).hostname == "api.deepseek.com":
+            request["thinking"] = {"type": "disabled"}
+    else:
+        request = {
+            "model": model, "input": {"messages": messages},
+            "parameters": {
+                "result_format": "message", "response_format": {"type": "json_object"},
+                "enable_thinking": False, "temperature": 0,
+            },
+        }
     try:
         response = client.post(
             endpoint, headers={"Authorization": f"Bearer {key}"}, json=request,
@@ -730,13 +760,14 @@ def _request(
         partial = response.headers.get("x-dashscope-partialresponse", "").lower() == "true"
         call["provider_failed"] = (
             response.status_code >= 300 or not isinstance(raw, dict)
-            or bool(raw.get("code")) or partial
+            or bool(raw.get("code")) or bool(raw.get("error")) or partial
+            or (openai and ("non_json_response" in raw or not raw))
         )
         call["usage"] = raw.get("usage", {}) if isinstance(raw, dict) else {}
         call["status"] = "received"
         _save(directory / "state.json", state)
         if call["provider_failed"]:
-            raise SegmentationError("PROVIDER_ERROR", f"DashScope call failed (HTTP {response.status_code})")
+            raise SegmentationError("PROVIDER_ERROR", f"Text provider call failed (HTTP {response.status_code})")
         return raw
     except httpx.HTTPError as exc:
         call["status"] = "uncertain"
@@ -890,7 +921,7 @@ def _attach_visual_evidence(result: dict, observations: list[dict]) -> None:
 
 def _independent_candidates(raw: dict, visible_ids: set[str]) -> list[dict]:
     try:
-        choice = raw["output"]["choices"][0]
+        choice = _response_choices(raw)[0]
         if choice.get("finish_reason") != "stop":
             raise ValueError
         data = json.loads(choice["message"]["content"])
@@ -961,7 +992,8 @@ def discover_products(
                                 diagnostic={"reason_code": "WINDOW_LIMIT_EXCEEDED"})
     if len(windows) * (2 if two_pass else 1) > max_calls:
         raise SegmentationError("BUDGET_EXHAUSTED", "window count exceeds configured request budget")
-    endpoint = _endpoint(base_url or os.environ.get("DASHSCOPE_BASE_URL", DEFAULT_BASE_URL))
+    endpoint = _endpoint(base_url or os.environ.get("LIVECUT_TEXT_BASE_URL")
+                         or os.environ.get("DASHSCOPE_BASE_URL", DEFAULT_BASE_URL))
     config = {
         "duration_ms": duration_ms, "utterances": items, "endpoint": endpoint, "model": model,
         "window_ms": window_ms, "context_ms": context_ms, "merge_gap_ms": merge_gap_ms,
@@ -993,9 +1025,9 @@ def discover_products(
     else:
         state = {"config_hash": fingerprint, "calls": [], "completed_windows": []}
         _save(state_path, state)
-    key = api_key or os.environ.get("DASHSCOPE_API_KEY", "")
+    key = _text_api_key(api_key, endpoint)
     if windows and not key:
-        raise SegmentationError("MISSING_API_KEY", "set DASHSCOPE_API_KEY or pass api_key")
+        raise SegmentationError("MISSING_API_KEY", "set LIVECUT_TEXT_API_KEY or pass api_key")
     products: list[dict] = []
     segments: list[dict] = []
     owned_client = client is None

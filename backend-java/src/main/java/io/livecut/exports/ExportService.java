@@ -24,6 +24,8 @@ import io.livecut.jobs.StageDiagnostics;
 import io.livecut.review.ReviewModels;
 import io.livecut.review.ReviewService;
 import io.livecut.topics.TopicReviewService;
+import io.livecut.clips.ClipRequestService;
+import io.livecut.clips.ClipPlanValidator;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -43,13 +45,14 @@ public class ExportService {
     private final ReviewService reviews;
     private final TopicReviewService topics;
     private final ArtifactVerifier verifier;
+    private final ClipRequestService clipRequests;
     private final TransactionTemplate transaction;
     private final int maxAttempts;
 
-    public ExportService(JdbcTemplate jdbc, ReviewService reviews, TopicReviewService topics, ArtifactVerifier verifier,
+    public ExportService(JdbcTemplate jdbc, ReviewService reviews, TopicReviewService topics, ArtifactVerifier verifier, ClipRequestService clipRequests,
                          PlatformTransactionManager manager,
                          @Value("${livecut.jobs.max-attempts:3}") int maxAttempts) {
-        this.jdbc = jdbc; this.reviews = reviews; this.topics = topics; this.verifier = verifier; this.maxAttempts = maxAttempts;
+        this.jdbc = jdbc; this.reviews = reviews; this.topics = topics; this.verifier = verifier; this.clipRequests=clipRequests; this.maxAttempts = maxAttempts;
         this.transaction = new TransactionTemplate(manager);
         this.transaction.setIsolationLevel(TransactionDefinition.ISOLATION_READ_COMMITTED);
     }
@@ -123,10 +126,52 @@ public class ExportService {
         if (limit < 1 || limit > 100 || offset < 0) { throw bad("INVALID_PAGINATION", "limit must be 1..100 and offset nonnegative"); }
         return transaction.execute(status -> {
             lockAnalysis(jobId);
-            List<String> ids = jdbc.queryForList("SELECT id FROM export_job WHERE job_id=? ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?", String.class, jobId, limit, offset);
+            List<String> ids = jdbc.queryForList("SELECT id FROM export_job WHERE job_id=? AND clip_request_id IS NULL ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?", String.class, jobId, limit, offset);
             return new Page(ids.stream().map(id -> snapshot(lockOwner(id, jobId))).toList(), limit, offset);
         });
     }
+
+    public Snapshot createClipRequest(String requestId,JsonNode input){
+        ClipPlanValidator.fields(input,Set.of("revision","plan_hash","profile"));
+        long revision=ClipPlanValidator.number(input,"revision");String planHash=ClipPlanValidator.hash(ClipPlanValidator.text(input,"plan_hash",64));
+        String profile=ClipPlanValidator.text(input,"profile",40);
+        if(!Set.of(PROFILE,"mp4-h264-aac-v1").contains(profile))throw bad("INVALID_EXPORT_PROFILE","Unsupported encoding profile");
+        String id=ClipRequestService.uuid(requestId);
+        return transaction.execute(status->{
+            var request=clipRequests.lockPublicOwner(id);String jobId=String.valueOf(request.get("job_id"));
+            var analysis=jdbc.queryForMap("SELECT * FROM analysis_job WHERE id=?",jobId);
+            if(!"REVIEW_READY".equals(analysis.get("status")))throw conflict("EXPORT_ANALYSIS_NOT_READY","Source analysis is not ready");
+            JsonNode plan=clipRequests.confirmedCandidate(request,revision,planHash,true);
+            List<Map<String,Object>> frozenClips=new ArrayList<>();
+            for(JsonNode output:plan.path("outputs")){
+                if(!output.path("enabled").asBoolean())continue;
+                if(!"FOUND".equals(output.path("status").asText()))throw bad("INVALID_EXPORT_SEGMENT","Only verified source-backed outputs can be exported");
+                List<Map<String,Object>> parts=new ArrayList<>();long duration=0;
+                for(JsonNode part:output.path("parts")){
+                    long start=part.path("start_ms").longValue(),end=part.path("end_ms").longValue();
+                    duration=Math.addExact(duration,end-start);parts.add(new TreeMap<>(Map.of("start_ms",start,"end_ms",end)));
+                }
+                if(parts.isEmpty())throw bad("INVALID_EXPORT_SEGMENT","No source parts were retained");
+                Map<String,Object> clip=new TreeMap<>();clip.put("segment_id",output.path("output_id").asText());clip.put("goal_id",output.path("goal_id").asText());
+                clip.put("title",output.path("title").asText());clip.put("start_ms",parts.getFirst().get("start_ms"));clip.put("end_ms",parts.getLast().get("end_ms"));clip.put("parts",parts);clip.put("duration_ms",duration);frozenClips.add(clip);
+            }
+            if(frozenClips.isEmpty())throw conflict("CLIP_PLAN_EMPTY_SELECTION","Select at least one output");
+            Map<String,Object> frozen=new TreeMap<>();frozen.put("job_id",jobId);frozen.put("video_id",request.get("video_id"));frozen.put("generation",analysis.get("generation"));
+            frozen.put("source_hash",request.get("source_hash"));frozen.put("approved_revision",revision);frozen.put("encoding_profile",PROFILE);frozen.put("clips",frozenClips);frozen.put("clip_request_id",id);frozen.put("plan_hash",planHash);frozen.put("analysis_mode","intent_clip");
+            String frozenJson=ClipRequestService.canonicalJson(JSON.valueToTree(frozen)),fingerprint=sha256(frozenJson);
+            List<String> existing=jdbc.queryForList("SELECT id FROM export_job WHERE fingerprint=?",String.class,fingerprint);
+            if(!existing.isEmpty())return snapshot(lockOwner(existing.getFirst(),jobId));
+            String exportId=UUID.randomUUID().toString();
+            jdbc.update("INSERT INTO export_job (id,job_id,video_id,approved_revision,source_hash,snapshot_hash,fingerprint,encoding_profile,frozen_json,clip_request_id) VALUES (?,?,?,?,?,?,?,?,?,?)",exportId,jobId,request.get("video_id"),revision,request.get("source_hash"),fingerprint,fingerprint,PROFILE,frozenJson,id);
+            for(Map<String,Object> clip:frozenClips){String clipId=UUID.randomUUID().toString(),stageId=UUID.randomUUID().toString();String inputHash=sha256(fingerprint+"\n"+ClipRequestService.canonicalJson(JSON.valueToTree(clip))+"\n"+clipId);
+                jdbc.update("INSERT INTO job_stage (id,job_id,owner_type,owner_id,stage_type,shard_key,status,input_hash) VALUES (?,?,'EXPORT',?,'EXPORT_CLIP',?,'READY',?)",stageId,jobId,exportId,clipId,inputHash);
+                jdbc.update("INSERT INTO export_clip (id,export_id,stage_id,segment_id,product_id,product_name,topic_title,start_ms,end_ms,source_parts_json) VALUES (?,?,?,?,NULL,NULL,?,?,?,?)",clipId,exportId,stageId,clip.get("segment_id"),clip.get("title"),clip.get("start_ms"),clip.get("end_ms"),ClipRequestService.canonicalJson(JSON.valueToTree(clip.get("parts"))));
+            }
+            return snapshot(lockOwner(exportId,jobId));
+        });
+    }
+
+    public Page listClipRequest(String requestId){String id=ClipRequestService.uuid(requestId);return transaction.execute(status->{var request=clipRequests.lockPublicOwner(id);String job=String.valueOf(request.get("job_id"));return new Page(jdbc.queryForList("SELECT id FROM export_job WHERE clip_request_id=? ORDER BY created_at DESC,id DESC LIMIT 100",String.class,id).stream().map(value->snapshot(lockOwner(value,job))).toList(),100,0);});}
 
     public Snapshot get(String value) {
         String id = uuid(value, "INVALID_EXPORT_ID");
@@ -158,11 +203,11 @@ public class ExportService {
                     file = new ManifestFile(content.filename(), content.sizeBytes(), content.hash(), clip.downloadUrl());
                 }
                 clips.add(new ManifestClip(clip.id(), clip.segmentId(), clip.productId(), clip.productName(),
-                        clip.startMs(), clip.endMs(), clip.status(), clip.attempt(), clip.errorCode(), file, clip.title()));
+                        clip.startMs(), clip.endMs(), clip.status(), clip.attempt(), clip.errorCode(), file, clip.title(),clip.parts()));
             }
             return new Manifest("1.0", "export_manifest", id, batch.jobId(), batch.videoId(), generation,
                     batch.approvedRevision(), String.valueOf(owner.get("source_hash")), batch.snapshotHash(),
-                    batch.profile(), batch.status(), batch.stateVersion(), batch.createdAt(), batch.updatedAt(), List.copyOf(clips));
+                    batch.profile(), batch.status(), batch.stateVersion(), batch.createdAt(), batch.updatedAt(), List.copyOf(clips),batch.clipRequestId());
         });
     }
 
@@ -231,6 +276,9 @@ public class ExportService {
         export.put("snapshot_hash", owner.get("snapshot_hash")); export.put("segment_id", row.get("segment_id"));
         export.put("start_ms", ((Number) row.get("start_ms")).longValue()); export.put("end_ms", ((Number) row.get("end_ms")).longValue());
         export.put("encoding_profile", owner.get("encoding_profile"));
+        if(owner.get("clip_request_id")!=null){
+            List<ArtifactVerifier.SourcePart> parts=sourceParts(row);export.put("parts",parts);export.put("duration_ms",parts.stream().mapToLong(p->p.endMs()-p.startMs()).sum());export.put("clip_request_id",owner.get("clip_request_id"));
+        }
         return Map.of("export", export);
     }
 
@@ -255,7 +303,8 @@ public class ExportService {
         return new ArtifactVerifier.ExportIdentity(stage.ownerId(), String.valueOf(export.get("clip_id")),
                 ((Number) export.get("approved_revision")).longValue(), String.valueOf(export.get("snapshot_hash")),
                 String.valueOf(export.get("segment_id")), ((Number) export.get("start_ms")).longValue(),
-                ((Number) export.get("end_ms")).longValue(), PROFILE, stage.inputHash());
+                ((Number) export.get("end_ms")).longValue(), PROFILE, stage.inputHash(),
+                export.get("parts")==null?List.of():castParts(export.get("parts")),(String)export.get("clip_request_id"));
     }
 
     private Map<String, Object> lockPublicOwner(String id) {
@@ -281,11 +330,12 @@ public class ExportService {
                     return new Clip(row.getString("id"), row.getString("segment_id"), row.getString("product_id"), row.getString("product_name"),
                             row.getLong("start_ms"), row.getLong("end_ms"), row.getString("stage_id"), row.getString("status"), row.getInt("attempt"),
                             row.getString("error_code"), size == null ? null : size.longValue(), url, url == null ? null : url + "?download=true",
-                            StageDiagnostics.read(row.getString("diagnostic_json"), row.getString("error_code"), row.getInt("attempt")), row.getString("topic_title"));
+                            StageDiagnostics.read(row.getString("diagnostic_json"), row.getString("error_code"), row.getInt("attempt")), row.getString("topic_title"),
+                            row.getString("source_parts_json")==null?null:parseParts(row.getString("source_parts_json")));
                 }, id);
         return new Snapshot(id, String.valueOf(owner.get("job_id")), String.valueOf(owner.get("video_id")), ((Number) owner.get("approved_revision")).longValue(),
                 String.valueOf(owner.get("snapshot_hash")), String.valueOf(owner.get("encoding_profile")), String.valueOf(owner.get("status")),
-                ((Number) owner.get("state_version")).longValue(), instant(owner.get("created_at")), instant(owner.get("updated_at")), clips);
+                ((Number) owner.get("state_version")).longValue(), instant(owner.get("created_at")), instant(owner.get("updated_at")), clips,(String)owner.get("clip_request_id"));
     }
 
     private Map<String, Object> clip(String exportId, String clipId, boolean lock) {
@@ -304,6 +354,12 @@ public class ExportService {
     }
 
     private static Instant timestampInstant(Timestamp value) { return value == null ? null : value.toInstant(); }
+    @SuppressWarnings("unchecked") private static List<ArtifactVerifier.SourcePart> castParts(Object value){return (List<ArtifactVerifier.SourcePart>)value;}
+    private static List<ArtifactVerifier.SourcePart> sourceParts(Map<String,Object> row){return parseParts(String.valueOf(row.get("source_parts_json")));}
+    private static List<ArtifactVerifier.SourcePart> parseParts(String raw){
+        JsonNode parts=JSON.readTree(raw);if(!parts.isArray()||parts.isEmpty()||parts.size()>12)throw conflict("EXPORT_SNAPSHOT_INVALID","Invalid source parts");List<ArtifactVerifier.SourcePart> result=new ArrayList<>();long previous=-1;
+        for(JsonNode part:parts){long start=ClipPlanValidator.number(part,"start_ms"),end=ClipPlanValidator.number(part,"end_ms");if(end<=start||start<previous)throw conflict("EXPORT_SNAPSHOT_INVALID","Invalid source part order");previous=end;result.add(new ArtifactVerifier.SourcePart(start,end));}return List.copyOf(result);
+    }
     private static Instant instant(Object value) { return value instanceof Timestamp timestamp ? timestamp.toInstant() : ((java.time.LocalDateTime) value).toInstant(java.time.ZoneOffset.UTC); }
     private static String uuid(String value, String code) { try { String id = UUID.fromString(value).toString(); if (!id.equalsIgnoreCase(value)) { throw new IllegalArgumentException(); } return id; } catch (IllegalArgumentException | NullPointerException failure) { throw bad(code, "Identifier must be a UUID"); } }
     private static String sha256(String value) { try { return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(value.getBytes(StandardCharsets.UTF_8))); } catch (NoSuchAlgorithmException failure) { throw new IllegalStateException(failure); } }

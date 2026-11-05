@@ -155,7 +155,7 @@ class WorkerClient:
         }, "UNREGISTERED")
 
     def callback(self, action: str, stage_id: str, payload: dict) -> dict:
-        if action not in {"heartbeat", "checkpoint", "complete", "fail"}:
+        if action not in {"heartbeat", "checkpoint", "complete", "fail", "text-progress"}:
             raise WorkerClientError("INVALID_CALLBACK")
         if not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", stage_id):
             raise WorkerClientError("INVALID_STAGE_ID")
@@ -163,6 +163,9 @@ class WorkerClient:
 
     def reserve_call(self, payload: dict) -> dict:
         return self._request("POST", "/internal/model-calls/reserve", json=payload)
+
+    def lookup_call(self, payload: dict) -> dict:
+        return self._request("POST", "/internal/model-calls/lookup", json=payload)
 
     def update_call(self, request_id: str, payload: dict) -> dict:
         if not re.fullmatch(r"[a-f0-9]{64}", request_id):

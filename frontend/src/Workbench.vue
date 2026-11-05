@@ -3,8 +3,10 @@ import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { api, ApiError, post, type AnalysisJob, type Page, type VideoAsset } from './api'
 import ReviewPanel from './ReviewPanel.vue'
 import TopicReviewPanel from './TopicReviewPanel.vue'
+import IntentClipPanel from './IntentClipPanel.vue'
 import UploadPanel from './UploadPanel.vue'
 import FailureDiagnostic from './FailureDiagnostic.vue'
+import TextRequestProgress from './TextRequestProgress.vue'
 import ExecutorStatus from './ExecutorStatus.vue'
 import { DEFAULT_OCR_MAX_FRAMES, newAnalysisConfig, samplingLabel } from './sampling'
 import { SnapshotError, SnapshotStream, isAnalysisTerminal, newestSnapshot, parseAnalysisSnapshot, streamLabels, type StreamMode } from './snapshotStream'
@@ -19,6 +21,9 @@ const online = ref(false), loading = ref(true), query = ref(''), filter = ref('A
 const visualProvider = ref<'ocr' | 'none'>('none'), maxTextCalls = ref(24), maxOcrFrames = ref(DEFAULT_OCR_MAX_FRAMES)
 const uploadPanel = ref<{ chooseFile: () => void } | null>(null)
 const reviewEditor = ref<{ dirty: boolean; pending: boolean } | null>(null)
+const intentEditor = ref<{ dirty: boolean; pending: boolean } | null>(null)
+const editorsDirty = computed(() => !!reviewEditor.value?.dirty || !!intentEditor.value?.dirty)
+const editorsPending = computed(() => !!reviewEditor.value?.pending || !!intentEditor.value?.pending)
 const streamMode = ref<StreamMode>('idle')
 let timer: number | undefined, refreshing = false, stopped = false, selectionVersion = 0
 let uploadSelectionVersion = 0
@@ -64,7 +69,7 @@ function applySelectedSnapshot(snapshot: AnalysisJob) {
   if (index >= 0) jobs.value[index] = latest
   // Updating status must never unmount an editor with unsaved or in-flight changes.
   if (selectedJob.value?.id === latest.id && selectedJob.value.status === 'REVIEW_READY'
-      && latest.status !== 'REVIEW_READY' && (reviewEditor.value?.dirty || reviewEditor.value?.pending)) return
+      && latest.status !== 'REVIEW_READY' && (editorsDirty.value || editorsPending.value)) return
   selectedJob.value = latest; selectedVideoId.value = latest.video_id
 }
 function adoptHttpSnapshot(snapshot: AnalysisJob) {
@@ -126,8 +131,8 @@ async function loadDetail(id: string, background = false) {
 }
 function canSelect(id: string) {
   if (selectedJob.value?.id === id) return true
-  if (reviewEditor.value?.pending) { errorMessage.value = '审核正在提交，请稍后再切换任务。'; return false }
-  if (reviewEditor.value?.dirty) { errorMessage.value = '审核有未保存修改，请先保存或在审核区放弃修改。'; return false }
+  if (editorsPending.value) { errorMessage.value = '审核或剪辑方案正在提交，请稍后再切换任务。'; return false }
+  if (editorsDirty.value) { errorMessage.value = '审核或剪辑方案有未保存修改，请先保存或在相应区域放弃修改。'; return false }
   return true
 }
 async function refresh() {
@@ -146,7 +151,7 @@ async function refresh() {
       const snapshot = jobs.value.find(job => job.id === selectedAtStart)
       if (snapshot) adoptHttpSnapshot(snapshot)
     }
-    const recoveryId = detailRecovery.next(selectionVersion, !!pending.value || !!reviewEditor.value?.dirty || !!reviewEditor.value?.pending)
+    const recoveryId = detailRecovery.next(selectionVersion, !!pending.value || editorsDirty.value || editorsPending.value)
     if (recoveryId) await loadDetail(recoveryId, true)
   } catch (error) {
     online.value = false
@@ -156,13 +161,13 @@ async function refresh() {
   finally { refreshing = false; loading.value = false }
 }
 function selectVideo() {
-  if (reviewEditor.value?.pending) {
+  if (editorsPending.value) {
     selectedVideoId.value = selectedJob.value?.video_id ?? selectedVideoId.value
-    errorMessage.value = '审核正在提交，请稍后再切换任务。'; return
+    errorMessage.value = '审核或剪辑方案正在提交，请稍后再切换任务。'; return
   }
-  if (reviewEditor.value?.dirty) {
+  if (editorsDirty.value) {
     selectedVideoId.value = selectedJob.value?.video_id ?? selectedVideoId.value
-    errorMessage.value = '审核有未保存修改，请先保存或在审核区放弃修改。'; return
+    errorMessage.value = '审核或剪辑方案有未保存修改，请先保存或在相应区域放弃修改。'; return
   }
   detailRecovery.cancel(); detailConnectionError.value = ''
   selectedJob.value = null; selectionVersion++; taskStream.select(null)
@@ -170,8 +175,8 @@ function selectVideo() {
 }
 function canStartUpload() {
   if (pending.value && pending.value !== 'upload') { errorMessage.value = '请等待当前操作完成，再上传视频。'; return false }
-  if (reviewEditor.value?.pending) { errorMessage.value = '请等待审核提交完成，再上传新视频。'; return false }
-  if (reviewEditor.value?.dirty) { errorMessage.value = '请先保存审核修改，再上传新视频。'; return false }
+  if (editorsPending.value) { errorMessage.value = '请等待审核或剪辑方案提交完成，再上传新视频。'; return false }
+  if (editorsDirty.value) { errorMessage.value = '请先保存或放弃审核、剪辑方案修改，再上传新视频。'; return false }
   return true
 }
 function uploadBusy(value: boolean) {
@@ -183,7 +188,7 @@ async function uploaded(video: VideoAsset) {
   if (stopped) return
   if (!videos.value.some(item => item.id === video.id)) videos.value.unshift(video)
   // A delayed upload must not replace a task the user opened or edited while it ran.
-  if (selectionVersion === uploadSelectionVersion && !reviewEditor.value?.dirty && !reviewEditor.value?.pending) {
+  if (selectionVersion === uploadSelectionVersion && !editorsDirty.value && !editorsPending.value) {
     selectedVideoId.value = video.id; selectVideo()
     notice.value = '视频已保存，可以创建分析任务。'
   } else notice.value = '视频已保存。当前审核和任务选择保持不变，可在视频来源中选择新视频。'
@@ -210,7 +215,7 @@ async function createJob() {
     const job = parseAnalysisSnapshot(raw, raw.id)
     if (job.video_id !== videoId) throw new ApiError('INVALID_SERVER_RESPONSE')
     localStorage.removeItem('livecut-pending-create')
-    if (version === selectionVersion && selectedVideoId.value === videoId && !reviewEditor.value?.dirty && !reviewEditor.value?.pending) {
+    if (version === selectionVersion && selectedVideoId.value === videoId && !editorsDirty.value && !editorsPending.value) {
       await loadDetail(job.id)
       notice.value = '任务已创建。计算 Worker 在线后会自动领取。'
     } else notice.value = '任务已创建。当前选择和审核内容保持不变，可在任务列表中打开。'
@@ -288,7 +293,7 @@ onUnmounted(() => { stopped = true; detailRecovery.cancel(); selectionVersion++;
               <template v-if="selectedJob">
                 <p class="help" aria-label="画面取证策略">{{ samplingLabel(selectedJob.config) }}</p>
                 <div class="detail-status"><span class="status" :class="selectedJob.status.toLowerCase()">{{ names[selectedJob.status] ?? selectedJob.status }}</span><span>{{ completeCount }} / {{ selectedJob.stages.length }} 阶段完成</span></div>
-                <ol class="stages"><li v-for="(stage, index) in orderedStages" :key="stage.id" :class="stage.status.toLowerCase()"><span class="step">{{ stage.status === 'SUCCEEDED' ? '✓' : index + 1 }}</span><div><b>{{ stage.stage_type === 'SEGMENT' && topicMode ? '话题解析' : stageNames[stage.stage_type] ?? stage.stage_type }}</b><small>{{ names[stage.status] ?? stage.status }}<template v-if="stage.attempt"> · 第 {{ stage.attempt }} 次执行</template></small><FailureDiagnostic :diagnostic="stage.diagnostic" :error-code="stage.error_code" :attempt="stage.attempt" /></div></li></ol>
+                <ol class="stages"><li v-for="(stage, index) in orderedStages" :key="stage.id" :class="stage.status.toLowerCase()"><span class="step">{{ stage.status === 'SUCCEEDED' ? '✓' : index + 1 }}</span><div><b>{{ stage.stage_type === 'SEGMENT' && topicMode ? '话题解析' : stageNames[stage.stage_type] ?? stage.stage_type }}</b><small>{{ names[stage.status] ?? stage.status }}<template v-if="stage.attempt"> · 第 {{ stage.attempt }} 次执行</template></small><TextRequestProgress v-if="stage.stage_type === 'SEGMENT'" :progress="stage.text_progress" :terminal="['SUCCEEDED', 'FAILED', 'CANCELLED', 'SKIPPED'].includes(stage.status)" /><FailureDiagnostic :diagnostic="stage.diagnostic" :error-code="stage.error_code" :attempt="stage.attempt" /></div></li></ol>
                 <div class="budget"><span>已预留模型请求</span><b>文本 {{ selectedJob.budget.text_calls_reserved }}/{{ selectedJob.budget.max_text_calls }} <i>·</i> ASR {{ selectedJob.budget.asr_calls_reserved }}/{{ selectedJob.budget.max_asr_submissions }}</b><small>次数上限，不代表人民币费用</small></div>
                 <p v-if="selectedJob.status === 'REVIEW_READY'" class="review-note">自动结果已就绪。请在下方核对内容与边界，勾选需要切分的片段，再保存并确认。</p>
                 <p v-if="selectedJob.status === 'FAILED' && !selectedJob.actions?.can_retry" class="help" role="status">{{ retryExplanation }}</p>
@@ -302,7 +307,7 @@ onUnmounted(() => { stopped = true; detailRecovery.cancel(); selectionVersion++;
                   <label class="field-label" for="ocr-frame-budget">画面取样上限</label><div class="number-field"><input id="ocr-frame-budget" v-model.number="maxOcrFrames" type="number" min="1" max="120" step="1"><span>帧 / 本次分析</span></div>
                   <p class="help">按视频时长在整段取样，用画面文字辅助语音判断。提高上限会增加本地识别耗时，也可能增加模型输入；取样不代表全程视觉核验。</p>
                 </template>
-                <label class="field-label" for="text-budget">文本请求上限</label><div class="number-field"><input id="text-budget" v-model.number="maxTextCalls" type="number" min="1" max="100" step="1"><span>次 / 本次分析</span></div><p class="help">每 10 分钟语音窗口通常需要 1 次文本请求，格式修复最多再请求 1 次。默认上限 24 次；超长视频可提高。ASR 默认最多提交 1 次。</p>
+                <label class="field-label" for="text-budget">文本请求上限</label><div class="number-field"><input id="text-budget" v-model.number="maxTextCalls" type="number" min="1" max="100" step="1"><span>次 / 本次分析</span></div><p class="help">每 10 分钟语音窗口通常需要 1 次文本请求，格式修复最多再请求 1 次。短暂服务故障会自动恢复，恢复请求也计入次数。默认上限 24 次；超长视频可提高。ASR 默认最多提交 1 次。</p>
                 <button class="primary create-button" :disabled="!selectedVideoId || !!pending || !online" @click="createJob">{{ pending === 'create' ? '正在创建…' : '创建分析任务' }} <span>→</span></button>
                 <p class="footnote">任务保存到 MySQL，关闭页面后仍可查看进度。</p>
               </template>
@@ -312,6 +317,7 @@ onUnmounted(() => { stopped = true; detailRecovery.cancel(); selectionVersion++;
         <TopicReviewPanel v-if="selectedJob?.status === 'REVIEW_READY' && currentVideo && topicMode" :key="selectedJob.id" ref="reviewEditor" :job-id="selectedJob.id" :video-url="currentVideo.content_url" />
         <ReviewPanel v-else-if="selectedJob?.status === 'REVIEW_READY' && currentVideo" :key="selectedJob.id" ref="reviewEditor" :job-id="selectedJob.id" :video-url="currentVideo.content_url" />
         <section v-else-if="currentVideo" class="panel source-panel"><div class="panel-heading"><div><h2>原视频预览</h2><p>{{ currentVideo.original_filename }}</p></div><span class="subtle-number">{{ (currentVideo.size_bytes / 1024 / 1024).toFixed(1) }} MB</span></div><div class="source-layout"><video :key="currentVideo.id" :src="currentVideo.content_url" controls preload="metadata" playsinline></video><div class="source-description"><span class="eyebrow">SOURCE VIDEO</span><h3>所有片段，共用一条时间轴。</h3><p>播放器支持按需读取原视频。ASR 时间戳映射到原视频毫秒，后续审核和切片都以此为准。</p><dl><dt>来源状态</dt><dd>{{ currentVideo.media_validation_status }}</dd><dt>文件 SHA256</dt><dd class="hash">{{ currentVideo.content_hash }}</dd></dl><small>上传时仅检查基本文件头，完整媒体探测由 Worker 执行。</small></div></div></section>
+        <IntentClipPanel v-if="selectedJob?.status === 'REVIEW_READY' && currentVideo && topicMode" :key="`intent-${selectedJob.id}`" ref="intentEditor" :job-id="selectedJob.id" :video-url="currentVideo.content_url" />
         <footer class="page-footer"><span>LiveCut AI</span> 自动预测需要人工复核 · 真实素材仅保存在本地</footer>
       </div>
     </main>

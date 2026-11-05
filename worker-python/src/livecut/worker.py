@@ -693,6 +693,67 @@ class AnalysisStageExecutor:
         self.ffmpeg_path, self.ffprobe_path = ffmpeg_path, ffprobe_path
         self.asr_reuse_source = deepcopy(asr_reuse_source)
 
+    def _execute_intent(self, context: StageContext) -> dict:
+        from .intent import build_clip_plan
+
+        lease, directory = context.lease, context.directory
+        config = lease.config.get("clip_request")
+        required = {"request_id", "instruction", "source_job_id", "source_transcript_key",
+                    "source_transcript_hash", "duration_ms", "max_text_calls", "text_model_id"}
+        if (not isinstance(config, dict) or not required.issubset(config)
+                or config["source_job_id"] != lease.job_id
+                or type(config["max_text_calls"]) is not int or not 1 <= config["max_text_calls"] <= 24
+                or type(config["duration_ms"]) is not int or config["duration_ms"] <= 0):
+            raise WorkerError("INVALID_INTENT_INPUT")
+        transcript_path = context.predecessor("ASR", "transcript")
+        expected_path = shared_path(context.storage_root, config["source_transcript_key"], must_exist=True)
+        if transcript_path != expected_path or sha256(transcript_path) != config["source_transcript_hash"]:
+            raise WorkerError("SOURCE_HASH_MISMATCH")
+        media = _read(context.predecessor("MEDIA", "media_info"))
+        if media.get("duration_ms") != config["duration_ms"]:
+            raise WorkerError("INVALID_INTENT_INPUT")
+        transcript = json.loads(_native_path(transcript_path).read_text(encoding="utf-8"))
+        if self.transport_factory is None:
+            raise WorkerError("DURABLE_BUDGET_REQUIRED")
+        embedder = None
+        if os.environ.get("LIVECUT_INTENT_EMBEDDING_DIR"):
+            from .intent_embedding import LocalIntentEmbedder
+
+            context.guard.check()
+            embedder = LocalIntentEmbedder(os.environ["LIVECUT_INTENT_EMBEDDING_DIR"])
+
+        def bound_timeout(request: httpx.Request) -> None:
+            context.guard.check()
+            remaining = context.guard.remaining_seconds()
+            request.extensions["timeout"] = {"connect": min(30, remaining), "read": min(300, remaining),
+                                              "write": min(30, remaining), "pool": min(30, remaining)}
+
+        text_transport = self.transport_factory(context, "text")
+        with httpx.Client(transport=text_transport,
+                          timeout=min(300, context.guard.remaining_seconds()),
+                          event_hooks={"request": [bound_timeout]}, follow_redirects=False) as client:
+            from .text_resilience import ResilientTextTransport
+
+            client.livecut_resumable_text = isinstance(text_transport, ResilientTextTransport)
+            build_clip_plan(transcript, config["duration_ms"], config["instruction"], _native_path(directory),
+                request_id=config["request_id"], job_id=lease.job_id, video_id=lease.video_id,
+                source_hash=lease.source_hash, transcript_hash=config["source_transcript_hash"],
+                model=config["text_model_id"], max_calls=config["max_text_calls"], client=client,
+                base_url=os.environ.get("LIVECUT_TEXT_BASE_URL"), dense_embedder=embedder,
+                embedding_model_id=embedder.model_id if embedder else None,
+                index_cache_dir=_native_path(context.storage_root / "cache" / "intent-index-v1"))
+        context.guard.check()
+        artifacts = [context.artifact(kind, directory / filename) for kind, filename in (
+            ("clip_plan", "clip-plan.json"), ("retrieval_index", "retrieval-index.json"),
+            ("retrieval_trace", "retrieval-trace.json"))]
+        if _native_path(directory / "text-execution-trace.json").is_file():
+            artifacts.append(context.artifact("text_execution_trace", directory / "text-execution-trace.json"))
+        return {"schema_version": 1, "job_id": lease.job_id, "video_id": lease.video_id,
+                "analysis_generation": lease.generation, "stage_id": lease.stage_id,
+                "stage_type": lease.stage_type, "attempt": lease.attempt, "run_token": lease.run_token,
+                "input_sha256": lease.source_hash, "data_kind": "model_result", "review_status": "DRAFT",
+                "artifacts": artifacts}
+
     def __call__(self, context: StageContext) -> dict:
         if context.lease.stage_type == "EXPORT_CLIP":
             from .worker_export import ExportStageExecutor
@@ -705,6 +766,8 @@ class AnalysisStageExecutor:
         if sha256(source) != lease.source_hash:
             raise WorkerError("SOURCE_HASH_MISMATCH")
         config = lease.config
+        if lease.stage_type == "SEGMENT" and "clip_request" in config:
+            return self._execute_intent(context)
         artifacts: list[dict] = []
         if lease.stage_type == "MEDIA":
             info = probe_media(_native_path(source), ffprobe_path=self.ffprobe_path,
@@ -782,10 +845,14 @@ class AnalysisStageExecutor:
                     "write": min(30, remaining), "pool": min(30, remaining),
                 }
 
-            with httpx.Client(transport=self.transport_factory(context, "text"),
+            text_transport = self.transport_factory(context, "text")
+            with httpx.Client(transport=text_transport,
                               timeout=min(300 if topics else 120, context.guard.remaining_seconds()),
                               event_hooks={"request": [bound_topic_timeout]} if topics else None,
                               follow_redirects=False) as client:
+                from .text_resilience import ResilientTextTransport
+
+                client.livecut_resumable_text = isinstance(text_transport, ResilientTextTransport)
                 if config.get("analysis_mode", "commerce") == "topics":
                     discover_topics(
                         transcript, media["duration_ms"], _native_path(directory), client=client,
@@ -808,6 +875,8 @@ class AnalysisStageExecutor:
                     raise WorkerError("UNSUPPORTED_ANALYSIS_MODE")
             artifacts = [context.artifact("analysis_result", directory / "analysis-result.json"),
                          *visual_artifacts]
+            if _native_path(directory / "text-execution-trace.json").is_file():
+                artifacts.append(context.artifact("text_execution_trace", directory / "text-execution-trace.json"))
         elif lease.stage_type == "TIMELINE":
             result_path = context.predecessor("SEGMENT", "analysis_result")
             result = _read(result_path)

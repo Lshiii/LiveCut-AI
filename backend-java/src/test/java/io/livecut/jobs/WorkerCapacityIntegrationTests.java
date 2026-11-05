@@ -131,6 +131,24 @@ class WorkerCapacityIntegrationTests {
         assertEquals(1, jdbc.queryForObject("SELECT SUM(attempt) FROM job_stage WHERE job_id IN (?,?)", Integer.class, a.job(), b.job()));
         assertEquals(1, workers.snapshot(null).busySlots());
     }
+    @Test void claimingOneJobDoesNotWaitForUnrelatedJobsStageLocks() throws Exception {
+        Fixture own=fixture("TIMELINE"),foreign=fixture("TIMELINE");Agent worker=agent(List.of("TIMELINE"),1,null);
+        CountDownLatch held=new CountDownLatch(1),release=new CountDownLatch(1);
+        var transaction=new org.springframework.transaction.support.TransactionTemplate(context.getBean(org.springframework.transaction.PlatformTransactionManager.class));
+        transaction.setIsolationLevel(org.springframework.transaction.TransactionDefinition.ISOLATION_READ_COMMITTED);
+        try(var pool=Executors.newFixedThreadPool(2)){
+            var blocker=pool.submit(()->transaction.execute(status->{
+                jdbc.queryForObject("SELECT id FROM job_stage WHERE id=? FOR UPDATE",String.class,foreign.stage());held.countDown();
+                try{if(!release.await(10,TimeUnit.SECONDS))throw new AssertionError("Unrelated stage lock was not released");}catch(InterruptedException e){Thread.currentThread().interrupt();throw new AssertionError(e);}
+                return null;
+            }));
+            try{
+                assertTrue(held.await(3,TimeUnit.SECONDS));
+                var outcome=pool.submit(()->claim(own,worker).outcome());
+                assertEquals("CLAIMED",outcome.get(3,TimeUnit.SECONDS),"A job-scoped claim must never scan-lock another job's stages");
+            }finally{release.countDown();blocker.get(5,TimeUnit.SECONDS);}
+        }
+    }
     @Test void twoWorkersShareOneFfmpegPoolAndCancelReleasesCapacity() throws Exception {
         Fixture a = fixture("MEDIA"), b = fixture("MEDIA"); Agent first = agent(List.of("MEDIA"), 1, null), second = agent(List.of("MEDIA"), 1, null);
         List<String> outcomes = concurrent(() -> claim(a, first).outcome(), () -> claim(b, second).outcome());

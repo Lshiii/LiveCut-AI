@@ -33,7 +33,11 @@ class BudgetTransport(httpx.BaseTransport):
         from .worker import _native_path
 
         self.client, self.context = client, context
-        self.inner = inner if inner is not None else httpx.HTTPTransport(retries=0)
+        if inner is None:
+            from .text_resilience import DeadlineHTTPTransport
+
+            inner = DeadlineHTTPTransport()
+        self.inner = inner
         self._asr_calls: dict[str, str] = {}
         self._recovery_path = context.directory / "model-call-recovery.json"
         if _native_path(self._recovery_path).exists():
@@ -73,7 +77,7 @@ class BudgetTransport(httpx.BaseTransport):
         status = wrapper.get("http_status")
         headers = wrapper.get("headers")
         if (type(status) is not int or not 100 <= status <= 599 or not isinstance(headers, dict)
-                or any(key != "x-dashscope-partialresponse" for key in headers)
+                or any(key not in {"x-dashscope-partialresponse", "retry-after"} for key in headers)
                 or "body" not in wrapper):
             raise ModelBudgetError("INVALID_MODEL_RESPONSE_RECORDING")
         if wrapper.get("body_is_json", True):
@@ -103,6 +107,9 @@ class BudgetTransport(httpx.BaseTransport):
                    "body_is_json": is_json, "headers": {}}
         if "x-dashscope-partialresponse" in response.headers:
             wrapper["headers"]["x-dashscope-partialresponse"] = response.headers["x-dashscope-partialresponse"]
+        retry_after = response.headers.get("retry-after", "")
+        if retry_after.isascii() and retry_after.isdigit() and len(retry_after) <= 6:
+            wrapper["headers"]["retry-after"] = str(min(30, int(retry_after)))
         return wrapper
 
     def _emergency_response(self, request_id: str, kind: str, response: httpx.Response) -> None:
@@ -178,7 +185,7 @@ class BudgetTransport(httpx.BaseTransport):
         kind = None
         if request.method == "POST" and path.endswith("/services/audio/asr/transcription"):
             kind = "ASR"
-        elif request.method == "POST" and path.endswith("/services/aigc/text-generation/generation"):
+        elif request.method == "POST" and path.endswith(("/services/aigc/text-generation/generation", "/chat/completions")):
             kind = "TEXT"
         if kind is None:
             if request.method == "POST" and "/tasks/" in path:
@@ -205,16 +212,39 @@ class BudgetTransport(httpx.BaseTransport):
                         "parameters": body.get("parameters", {})}
         else:
             identity = {"endpoint": endpoint, "body": body}
+        recovery = request.extensions.get("livecut_text_retry")
+        if recovery is not None:
+            if (kind != "TEXT" or not isinstance(recovery, dict)
+                    or set(recovery) != {"slot", "logical_hash", "policy_hash"}
+                    or type(recovery["slot"]) is not int or not 0 <= recovery["slot"] <= 2
+                    or any(not isinstance(recovery[field], str)
+                           or len(recovery[field]) != 64
+                           or any(c not in "0123456789abcdef" for c in recovery[field])
+                           for field in ("logical_hash", "policy_hash"))):
+                raise ModelBudgetError("INVALID_TEXT_RETRY_STATE")
+            # Ordinal zero retains the historic identity, so an already paid
+            # success remains reusable when recovery is enabled for old work.
+            if recovery["slot"]:
+                identity["recovery"] = recovery
         serialized = json.dumps(identity, ensure_ascii=False, sort_keys=True,
                                 separators=(",", ":"), allow_nan=False).encode()
         input_hash = hashlib.sha256(serialized).hexdigest()
         operation_key = kind.lower() + "-" + input_hash
         request_id = hashlib.sha256((self.context.lease.stage_id + ":" + operation_key).encode()).hexdigest()
-        reservation = self.client.reserve_call({
+        payload = {
             "stage_id": self.context.lease.stage_id, **self.context.lease.credentials,
             "request_id": request_id, "input_hash": input_hash,
             "operation_key": operation_key, "model_id": model, "kind": kind,
-        })
+        }
+        replay_only = request.extensions.get("livecut_text_replay_only", False)
+        if replay_only:
+            if kind != "TEXT" or recovery is None or replay_only is not True:
+                raise ModelBudgetError("INVALID_TEXT_RETRY_STATE")
+            reservation = self.client.lookup_call(payload)
+            if reservation.get("outcome") == "NOT_FOUND":
+                raise ModelBudgetError("TEXT_RECOVERY_NOT_RECORDED")
+        else:
+            reservation = self.client.reserve_call(payload)
         call = reservation.get("call", {})
         if (not isinstance(call, dict) or call.get("input_hash") != input_hash
                 or call.get("request_id") != request_id):
@@ -227,6 +257,15 @@ class BudgetTransport(httpx.BaseTransport):
             if kind == "ASR" and isinstance(task_id, str) and task_id:
                 self._remember_asr(task_id, request_id)
             return response
+        if kind == "TEXT" and recovery is not None:
+            if status in {"FAILED", "UNKNOWN_OUTCOME"} and call.get("response_key"):
+                return self._replay(call, request)
+            if status in {"DISPATCHING", "UNKNOWN_OUTCOME"}:
+                # A new ordinal may be reserved under the explicit bounded
+                # recovery policy, but this original dispatch is never resent.
+                raise ModelBudgetError("TEXT_PREVIOUS_OUTCOME_UNKNOWN")
+            if replay_only:
+                raise ModelBudgetError("TEXT_RECOVERY_NOT_RECORDED")
         if status != "RESERVED":
             raise ModelBudgetError("MODEL_CALL_REQUIRES_RECOVERY")
         self._preflight_recording(request_id)
@@ -262,7 +301,7 @@ class BudgetTransport(httpx.BaseTransport):
         usage = {key: value for key, value in usage.items()
                  if isinstance(key, str) and type(value) is int and value >= 0}
         partial = response.headers.get("x-dashscope-partialresponse", "").lower() == "true"
-        if 200 <= response.status_code < 300 and not raw.get("code") and not partial:
+        if 200 <= response.status_code < 300 and not raw.get("code") and not raw.get("error") and not partial:
             status = "SUBMITTED" if kind == "ASR" and task_id else (
                 "SUCCEEDED" if kind == "TEXT" and raw else "UNKNOWN_OUTCOME")
         elif 400 <= response.status_code < 500:
@@ -278,8 +317,17 @@ class BudgetTransport(httpx.BaseTransport):
 
 def transport_factory(client: WorkerClient):
     """Build a per-stage transport; operation labels never bypass path gating."""
-    def create(context: StageContext, operation: str) -> BudgetTransport:
+    def create(context: StageContext, operation: str) -> httpx.BaseTransport:
         if operation not in {"asr", "text"}:
             raise ModelBudgetError("UNSUPPORTED_PROVIDER_OPERATION")
-        return BudgetTransport(client, context)
+        budget = BudgetTransport(client, context)
+        if operation == "text":
+            from .text_resilience import ResilientTextTransport
+
+            def progress(value):
+                client.callback("text-progress", context.lease.stage_id,
+                                {**context.lease.credentials, "progress": value})
+
+            return ResilientTextTransport(budget, context, progress=progress)
+        return budget
     return create

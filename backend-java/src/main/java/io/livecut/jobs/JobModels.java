@@ -36,6 +36,9 @@ public final class JobModels {
                                   @JsonProperty("manifest_hash") String manifestHash) {
         public Credential credential() { return new Credential(attempt, runToken); }
     }
+    public record TextProgressRequest(int attempt,@JsonProperty("run_token") String runToken,JsonNode progress){
+        public Credential credential(){return new Credential(attempt,runToken);}
+    }
     public record FailRequest(int attempt, @JsonProperty("run_token") String runToken,
                               @JsonProperty("error_code") String errorCode, boolean retryable,
                               @JsonInclude(JsonInclude.Include.NON_NULL) JsonNode diagnostic) {
@@ -54,12 +57,18 @@ public final class JobModels {
                                  @JsonProperty("manifest_key") String manifestKey,
                                  @JsonProperty("manifest_hash") String manifestHash,
                                  @JsonProperty("error_code") String errorCode,
-                                 @JsonInclude(JsonInclude.Include.NON_NULL) Map<String, Object> diagnostic) {
+                                 @JsonInclude(JsonInclude.Include.NON_NULL) Map<String, Object> diagnostic,
+                                 @JsonProperty("text_progress") @JsonInclude(JsonInclude.Include.NON_NULL) Map<String,Object> textProgress) {
+        public StageSnapshot(String id,String stageType,String shardKey,String status,int attempt,
+                Instant leaseUntil,Instant hardDeadlineAt,Instant nextRunAt,String inputHash,
+                String checkpointKey,String manifestKey,String manifestHash,String errorCode,Map<String,Object> diagnostic){
+            this(id,stageType,shardKey,status,attempt,leaseUntil,hardDeadlineAt,nextRunAt,inputHash,checkpointKey,manifestKey,manifestHash,errorCode,diagnostic,null);
+        }
         public StageSnapshot(String id, String stageType, String shardKey, String status, int attempt,
                              Instant leaseUntil, Instant hardDeadlineAt, Instant nextRunAt, String inputHash,
                              String checkpointKey, String manifestKey, String manifestHash, String errorCode) {
             this(id, stageType, shardKey, status, attempt, leaseUntil, hardDeadlineAt, nextRunAt, inputHash,
-                    checkpointKey, manifestKey, manifestHash, errorCode, null);
+                    checkpointKey, manifestKey, manifestHash, errorCode, null,null);
         }
     }
     public record BudgetSnapshot(@JsonProperty("max_text_calls") int maxTextCalls,
@@ -108,7 +117,13 @@ public final class JobModels {
                            Instant hardDeadlineAt, Instant nextRunAt, String inputHash,
                            String checkpointKey, String checkpointHash, String manifestKey,
                            String manifestHash, String errorCode, String ownerType, String ownerId,
-                           Map<String, Object> diagnostic) {
+                           Map<String, Object> diagnostic,Map<String,Object> textProgress) {
+        public StageRow(String id,String jobId,String stageType,String shardKey,String status,int attempt,
+                String runToken,String workerId,Instant leaseUntil,Instant hardDeadlineAt,Instant nextRunAt,String inputHash,
+                String checkpointKey,String checkpointHash,String manifestKey,String manifestHash,String errorCode,
+                String ownerType,String ownerId,Map<String,Object> diagnostic){
+            this(id,jobId,stageType,shardKey,status,attempt,runToken,workerId,leaseUntil,hardDeadlineAt,nextRunAt,inputHash,checkpointKey,checkpointHash,manifestKey,manifestHash,errorCode,ownerType,ownerId,diagnostic,null);
+        }
         public StageRow(String id, String jobId, String stageType, String shardKey, String status,
                         int attempt, String runToken, String workerId, Instant leaseUntil,
                         Instant hardDeadlineAt, Instant nextRunAt, String inputHash,
@@ -116,7 +131,7 @@ public final class JobModels {
                         String manifestHash, String errorCode, String ownerType, String ownerId) {
             this(id, jobId, stageType, shardKey, status, attempt, runToken, workerId, leaseUntil,
                     hardDeadlineAt, nextRunAt, inputHash, checkpointKey, checkpointHash, manifestKey,
-                    manifestHash, errorCode, ownerType, ownerId, null);
+                    manifestHash, errorCode, ownerType, ownerId, null,null);
         }
     }
     public record LockedStage(String jobId, StageRow stage, Instant dbNow) {}

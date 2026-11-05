@@ -1,15 +1,18 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { diagnosticView, safeErrorCode } from './diagnostics'
+import { textRecoveryFailureCopy } from './textProgress'
 
 const props = defineProps<{ diagnostic?: unknown; errorCode: string | null; attempt: number }>()
 const code = computed(() => safeErrorCode(props.errorCode))
 const view = computed(() => diagnosticView(props.diagnostic, props.attempt, props.errorCode))
+const recoveryFailure = computed(() => textRecoveryFailureCopy(props.errorCode))
 </script>
 
 <template>
   <div v-if="code" class="failure-diagnostic" role="note" aria-label="失败诊断">
-    <template v-if="view">
+    <template v-if="recoveryFailure"><p><strong>{{ recoveryFailure.title }}</strong></p><p class="failure-suggestion">{{ recoveryFailure.detail }}</p></template>
+    <template v-else-if="view">
       <p class="failure-title"><span>{{ view.category }}</span><strong>{{ view.title }}</strong></p>
       <ul v-if="view.details.length" class="failure-details"><li v-for="detail in view.details" :key="detail">{{ detail }}</li></ul>
       <p class="failure-suggestion">{{ view.suggestion }}</p>

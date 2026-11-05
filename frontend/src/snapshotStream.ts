@@ -1,5 +1,6 @@
 import type { AnalysisJob, ExportJob } from './api'
 import { parseDiagnostic } from './diagnostics.ts'
+import { parseTextProgress } from './textProgress.ts'
 
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/
 const STAGE_STATUS = new Set(['BLOCKED', 'READY', 'RUNNING', 'RETRY_WAIT', 'SUCCEEDED', 'FAILED', 'CANCELLED', 'SKIPPED'])
@@ -37,9 +38,10 @@ export function parseAnalysisSnapshot(raw: unknown, id: string): AnalysisJob {
       || typeof actions.can_cancel !== 'boolean' || typeof actions.can_retry !== 'boolean' || !integer(actions.max_attempts, 1)
       || ![null, 'JOB_NOT_RETRYABLE', 'ATTEMPTS_EXHAUSTED'].includes(actions.retry_block_reason as string | null)) invalid()
   const stages = raw.stages.map(stage => {
-    const { diagnostic: rawDiagnostic, ...rest } = stage
+    const { diagnostic: rawDiagnostic, text_progress: rawProgress, ...rest } = stage
     const diagnostic = parseDiagnostic(rawDiagnostic, stage.attempt, stage.error_code)
-    return diagnostic ? { ...rest, diagnostic } : rest
+    const progress = stage.stage_type === 'SEGMENT' ? parseTextProgress(rawProgress) : undefined
+    return { ...rest, ...(diagnostic ? { diagnostic } : {}), ...(progress ? { text_progress: progress } : {}) }
   })
   return { ...raw, stages } as unknown as AnalysisJob
 }

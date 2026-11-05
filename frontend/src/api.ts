@@ -1,4 +1,5 @@
 import type { StageDiagnostic } from './diagnostics'
+import type { TextProgress } from './textProgress'
 
 export interface VideoAsset {
   id: string
@@ -9,7 +10,7 @@ export interface VideoAsset {
   media_validation_status: string
   created_at: string
 }
-export interface Stage { id: string; stage_type: string; status: string; attempt: number; error_code: string | null; diagnostic?: StageDiagnostic }
+export interface Stage { id: string; stage_type: string; status: string; attempt: number; error_code: string | null; diagnostic?: StageDiagnostic; text_progress?: TextProgress }
 export interface JobActions {
   can_cancel: boolean
   can_retry: boolean

@@ -246,10 +246,13 @@ def _temporary_output(target: Path) -> Path:
         raise MediaError("OUTPUT_WRITE_FAILED", f"Cannot create temporary output: {exc}") from exc
 
 
-def _check_duration(actual_ms: int, expected_ms: int, frame_rate: float | None = None) -> None:
+def _check_duration(actual_ms: int, expected_ms: int, frame_rate: float | None = None,
+                    *, interval_count: int = 1) -> None:
     # AAC packet padding and video frame boundaries prevent arbitrary sub-frame
     # duration guarantees. Large drift is an error, never a successful export.
-    tolerance_ms = max(100, math.ceil(2000 / frame_rate)) if frame_rate else 100
+    if type(interval_count) is not int or not 1 <= interval_count <= 12:
+        raise MediaError("INVALID_ARGUMENT", "Invalid edit interval count")
+    tolerance_ms = (max(100, math.ceil(2000 / frame_rate)) if frame_rate else 100) * interval_count
     if abs(actual_ms - expected_ms) > tolerance_ms:
         raise MediaError(
             "OUTPUT_VALIDATION_FAILED",
@@ -339,6 +342,64 @@ def export_clip(
         _check_duration(result.duration_ms, end_ms - start_ms, result.frame_rate)
         if (result.audio_codec is None) != (info.audio_codec is None):
             raise MediaError("OUTPUT_VALIDATION_FAILED", "Export unexpectedly changed audio stream presence")
+        _publish(temporary, target)
+        return replace(result, path=target)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def export_composed_clip(
+    source: str | Path, output: str | Path, parts: list[dict], *,
+    ffmpeg_path: str | Path = "ffmpeg", ffprobe_path: str | Path = "ffprobe",
+    timeout_seconds: float = 300,
+) -> MediaInfo:
+    """Accurately seek each ordered source interval and encode one continuous MP4.
+
+    No stream-copy concatenation: audio is encoded once, avoiding an AAC priming
+    gap at every edit. Frame rounding can accumulate across the bounded parts.
+    """
+    if not isinstance(parts, list) or not 1 <= len(parts) <= 12:
+        raise MediaError("INVALID_INTERVAL", "Expected 1 to 12 source intervals")
+    previous = 0
+    for index, part in enumerate(parts):
+        if (not isinstance(part, dict) or set(part) != {"start_ms", "end_ms"}
+                or type(part["start_ms"]) is not int or type(part["end_ms"]) is not int
+                or not 0 <= part["start_ms"] < part["end_ms"]
+                or (index and part["start_ms"] < previous)):
+            raise MediaError("INVALID_INTERVAL", "Source intervals must be ordered and non-overlapping")
+        previous = part["end_ms"]
+    info = probe_media(source, ffprobe_path=ffprobe_path, timeout_seconds=timeout_seconds)
+    _require_aligned_timeline(info)
+    if parts[-1]["end_ms"] > info.duration_ms:
+        raise MediaError("INVALID_INTERVAL", "Interval exceeds the original video duration")
+    target = _output_file(info.path, output, ".mp4")
+    temporary = _temporary_output(target)
+    command = [str(ffmpeg_path), "-hide_banner", "-loglevel", "error", "-nostdin", "-y"]
+    filters, inputs = [], []
+    for index, part in enumerate(parts):
+        duration = (part["end_ms"] - part["start_ms"]) / 1000
+        command += ["-threads", "1", "-accurate_seek", "-ss", f'{part["start_ms"] / 1000:.3f}',
+                    "-t", f"{duration:.3f}", "-i", str(info.path)]
+        filters.append(f"[{index}:v:0]trim=duration={duration:.3f},setpts=PTS-STARTPTS[v{index}]")
+        inputs.append(f"[v{index}]")
+        if info.audio_codec is not None:
+            filters.append(f"[{index}:a:0]atrim=duration={duration:.3f},asetpts=PTS-STARTPTS[a{index}]")
+            inputs.append(f"[a{index}]")
+    audio = info.audio_codec is not None
+    filters.append("".join(inputs) + f"concat=n={len(parts)}:v=1:a={int(audio)}[v]" + ("[a]" if audio else ""))
+    command += ["-filter_complex_threads", "1", "-filter_complex", ";".join(filters), "-map", "[v]"]
+    if audio:
+        command += ["-map", "[a]", "-c:a", "aac"]
+    command += ["-c:v", "libx264", "-threads", "2", "-preset", "veryfast", "-crf", "23",
+                "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(temporary)]
+    try:
+        _run_process(command, timeout_seconds=timeout_seconds, failure_code="TRANSCODE_FAILED")
+        result = probe_media(temporary, ffprobe_path=ffprobe_path, timeout_seconds=timeout_seconds)
+        expected = sum(part["end_ms"] - part["start_ms"] for part in parts)
+        # Reuse the single-part bound while accounting for each edit's rounding.
+        _check_duration(result.duration_ms, expected, result.frame_rate, interval_count=len(parts))
+        if (result.audio_codec is None) != (info.audio_codec is None):
+            raise MediaError("OUTPUT_VALIDATION_FAILED", "Composed export changed audio stream presence")
         _publish(temporary, target)
         return replace(result, path=target)
     finally:

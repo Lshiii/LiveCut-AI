@@ -17,6 +17,11 @@ public class ModelCallController {
         return calls.reserve(request);
     }
 
+    @PostMapping("/lookup")
+    public ModelCallModels.CallResponse lookup(@RequestBody ModelCallModels.ReserveRequest request) {
+        return calls.lookup(request);
+    }
+
     @PostMapping("/{requestId}/update")
     public ModelCallModels.CallResponse update(@PathVariable String requestId, @RequestBody ModelCallModels.UpdateRequest request) {
         return calls.update(requestId, request);
