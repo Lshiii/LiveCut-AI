@@ -20,6 +20,19 @@ from urllib.parse import urlsplit
 import httpcore
 import httpx
 
+from .text_circuit import (
+    LOOKUP_FOUND,
+    ROUTED_IDENTITY,
+    WIRE_DISPATCHED,
+    WIRE_RESPONSE_READ,
+    TextCircuit,
+    TextCircuitPolicy,
+    atomic_state,
+    profile_key,
+    read_state,
+    stage_state_directory,
+)
+
 _ACTIVE_DEADLINE: ContextVar[tuple[float, Callable] | None] = ContextVar("text_deadline", default=None)
 _TRANSIENT = (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout,
               httpx.WriteTimeout, httpx.ReadError, httpx.WriteError, httpx.RemoteProtocolError)
@@ -277,11 +290,12 @@ def _digest(value):
 
 class ResilientTextTransport(httpx.BaseTransport):
     def __init__(self, inner, context, *, policy=None, progress=None, sleep=time.sleep,
-                 monotonic=time.monotonic):
+                 monotonic=time.monotonic, circuit_policy=None):
         self.inner, self.context = inner, context
         self.policy = policy or TextRetryPolicy.from_env()
         self.progress, self.sleep, self.monotonic = progress, sleep, monotonic
         self.fallbacks = _fallbacks(context)
+        self.circuit = TextCircuit(context, circuit_policy)
         self.trace = {"schema_version": 1, "job_id": context.lease.job_id,
                       "stage_id": context.lease.stage_id, "calls": []}
         self._logical_hash = None
@@ -290,33 +304,120 @@ class ResilientTextTransport(httpx.BaseTransport):
     def close(self):
         self.inner.close()
 
-    def _freeze(self, logical_hash, value):
-        from .worker import _native_path
-        path = self.context.storage_root / "jobs" / self.context.lease.job_id / "stages" / self.context.lease.stage_id / "text-retry-policies" / (logical_hash + ".json")
-        path = _native_path(path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        started_at = int(time.time() * 1000)
-        frozen = {"policy": value, "started_at_ms": started_at}
+    @staticmethod
+    def _validate_frozen(value):
+        common = {"version", "max_attempts", "attempt_timeout_seconds", "total_timeout_seconds",
+                  "backoff_seconds", "profiles"}
+        if (not isinstance(value, dict) or type(value.get("version")) is not int
+                or value["version"] not in {1, 2}):
+            raise TextRecoveryError("INVALID_TEXT_RETRY_STATE")
+        version = value["version"]
+        extra = {"circuit", "route_profile_indices", "probe_profile_indices"} if version == 2 else set()
         try:
-            with path.open("x", encoding="utf-8") as output:
-                output.write(_json(frozen))
-                output.flush()
-                os.fsync(output.fileno())
-        except FileExistsError:
+            if set(value) != common | extra:
+                raise ValueError
+            TextRetryPolicy(value["max_attempts"], value["attempt_timeout_seconds"],
+                            value["total_timeout_seconds"], value["backoff_seconds"])
+            profiles = value["profiles"]
+            if not isinstance(profiles, list) or not 1 <= len(profiles) <= 3:
+                raise ValueError
+            for index, profile in enumerate(profiles):
+                if (not isinstance(profile, dict)
+                        or set(profile) != {"name", "endpoint", "api_style", "model", "key_env"}
+                        or any(not isinstance(profile[k], str)
+                               for k in ("name", "endpoint", "api_style", "model"))
+                        or not _SAFE_NAME.fullmatch(profile["name"])
+                        or not _MODEL.fullmatch(profile["model"])
+                        or profile["api_style"] not in {"openai", "dashscope"}):
+                    raise ValueError
+                endpoint = urlsplit(profile["endpoint"])
+                if (endpoint.scheme not in {"https", "http"} or not endpoint.hostname
+                        or endpoint.username or endpoint.password or endpoint.query or endpoint.fragment):
+                    raise ValueError
+                if (index == 0 and (profile["name"] != "primary" or profile["key_env"] is not None)
+                        or index > 0 and (not isinstance(profile["key_env"], str)
+                            or not re.fullmatch(r"LIVECUT_[A-Z][A-Z0-9_]{0,100}", profile["key_env"]))):
+                    raise ValueError
+            if len({p["name"] for p in profiles}) != len(profiles):
+                raise ValueError
+            if version == 2:
+                circuit = value["circuit"]
+                if not isinstance(circuit, dict) or set(circuit) != {"failure_threshold", "cooldown_seconds"}:
+                    raise ValueError
+                TextCircuitPolicy(**circuit)
+                route, probes = value["route_profile_indices"], value["probe_profile_indices"]
+                if (not isinstance(route, list) or not route or not isinstance(probes, list)
+                        or any(type(i) is not int or not 0 <= i < len(profiles) for i in route + probes)
+                        or route != sorted(set(route)) or probes != sorted(set(probes))
+                        or not set(probes) <= set(route)):
+                    raise ValueError
+        except (ValueError, TypeError, KeyError, TextRecoveryError):
+            raise TextRecoveryError("INVALID_TEXT_RETRY_STATE") from None
+
+    def _legacy_call_exists(self, request, logical_hash, base):
+        from .model_budget import ModelBudgetError
+
+        # Before advisory routing a window without a policy, preserve work paid
+        # before retry policies existed. This lookup cannot reserve or dispatch.
+        extensions = {**request.extensions,
+                      "livecut_text_retry": {"slot": 0, "logical_hash": logical_hash,
+                                             "policy_hash": _digest(base)},
+                      "livecut_text_replay_only": True}
+        extensions.pop(ROUTED_IDENTITY, None)
+        probe = httpx.Request("POST", request.url, headers=request.headers,
+                              content=request.content, extensions=extensions)
+        response = None
+        try:
+            response = self.inner.handle_request(probe)
+        except ModelBudgetError as error:
+            if error.code not in {"TEXT_PREVIOUS_OUTCOME_UNKNOWN", "TEXT_RECOVERY_NOT_RECORDED"}:
+                raise
+        finally:
+            if response is not None:
+                response.close()
+        return probe.extensions.get(LOOKUP_FOUND) is True
+
+    def _freeze(self, logical_hash, base, keys, request):
+        self.context.guard.check()
+        try:
+            directory = stage_state_directory(self.context, "text-retry-policies")
+            path = directory / (logical_hash + ".json")
             try:
-                old = json.loads(path.read_text(encoding="utf-8"))
-            except (ValueError, OSError):
-                raise TextRecoveryError("INVALID_TEXT_RETRY_STATE") from None
-            if (not isinstance(old, dict) or set(old) != {"policy", "started_at_ms"}
-                    or type(old["started_at_ms"]) is not int):
-                raise TextRecoveryError("INVALID_TEXT_RETRY_STATE")
-            if old["policy"] != value:
+                frozen = read_state(path)
+            except FileNotFoundError:
+                if self._legacy_call_exists(request, logical_hash, base):
+                    value = base
+                else:
+                    route, probes = self.circuit.route(keys)
+                    value = {**base, "version": 2, "circuit": self.circuit.policy.public(),
+                             "route_profile_indices": route, "probe_profile_indices": probes}
+                self._validate_frozen(value)
+                frozen = {"policy": value, "started_at_ms": int(time.time() * 1000)}
+                self.context.guard.check()
+                try:
+                    atomic_state(path, frozen, create_only=True)
+                except FileExistsError:
+                    frozen = read_state(path)
+            if (not isinstance(frozen, dict) or set(frozen) != {"policy", "started_at_ms"}
+                    or type(frozen["started_at_ms"]) is not int
+                    or not 0 <= frozen["started_at_ms"] <= 2 ** 53 - 1):
+                raise ValueError
+            value = frozen["policy"]
+            self._validate_frozen(value)
+            expected = dict(base)
+            if value["version"] == 2:
+                expected.update(version=2, circuit=self.circuit.policy.public())
+            actual = {k: v for k, v in value.items()
+                      if k not in {"route_profile_indices", "probe_profile_indices"}}
+            if actual != expected:
                 raise TextRecoveryError("TEXT_RETRY_POLICY_CONFLICT")
-            started_at = old["started_at_ms"]
+            started_at = frozen["started_at_ms"]
+        except (OSError, ValueError, TypeError, UnicodeError):
+            raise TextRecoveryError("INVALID_TEXT_RETRY_STATE") from None
         age = time.time() - started_at / 1000
         if age < -1:
             raise TextRecoveryError("TEXT_RETRY_CLOCK_CONFLICT")
-        return max(0, age)
+        return value, max(0, age)
 
     def _emit(self, state, number, profile, started, *, code=None, delay=0):
         from .worker import _write
@@ -364,21 +465,31 @@ class ResilientTextTransport(httpx.BaseTransport):
         except (ValueError, KeyError, TypeError):
             raise ModelBudgetError("INVALID_PROVIDER_REQUEST") from None
         primary = _Profile("primary", str(request.url), "openai" if request.url.path.endswith("/chat/completions") else "dashscope", model)
+        profiles = [primary, *self.fallbacks]
+        credentials = ["Bearer " + os.environ[p.key_env] if p.key_env
+                       else request.headers.get("Authorization", "") for p in profiles]
+        health_keys = [profile_key(p, credential) for p, credential in zip(profiles, credentials)]
         logical_hash = _digest({"endpoint": str(request.url), "body": primary_body})
         self._logical_hash = logical_hash
         policy = {"version": 1, "max_attempts": self.policy.max_attempts,
                   "attempt_timeout_seconds": float(self.policy.attempt_timeout_seconds),
                   "total_timeout_seconds": float(self.policy.total_timeout_seconds),
                   "backoff_seconds": float(self.policy.backoff_seconds),
-                  "profiles": [p.public() for p in [primary, *self.fallbacks]]}
-        prior_elapsed = self._freeze(logical_hash, policy)
+                  "profiles": [p.public() for p in profiles]}
+        policy, prior_elapsed = self._freeze(logical_hash, policy, health_keys, request)
         policy_hash = _digest(policy)
         started = self.monotonic() - prior_elapsed
         total_deadline = min(started + self.policy.total_timeout_seconds,
                              self.monotonic() + self.context.guard.remaining_seconds())
-        profile, fallback_index = primary, 0
+        route = policy.get("route_profile_indices", list(range(len(profiles))))
+        probes = policy.get("probe_profile_indices", [])
+        route_position = 0
+        profile_index = route[route_position]
+        profile = profiles[profile_index]
         last_code = "PROVIDER_UNAVAILABLE"
         expired = False
+        if profile_index:
+            self._emit("SWITCHING_PROVIDER", 1, profile, started, code="PROVIDER_CIRCUIT_OPEN")
         for slot in range(self.policy.max_attempts):
             self.context.guard.check()
             remaining = total_deadline - self.monotonic()
@@ -390,16 +501,16 @@ class ResilientTextTransport(httpx.BaseTransport):
             self._emit("REQUESTING", slot + 1, profile, started)
             extensions = {**request.extensions, "livecut_text_retry": {"slot": slot, "logical_hash": logical_hash, "policy_hash": policy_hash},
                           "livecut_deadline_at": time.monotonic() + timeout, "livecut_guard": self.context.guard.check}
+            extensions.pop(ROUTED_IDENTITY, None)
+            if policy["version"] == 2 and profile_index:
+                extensions[ROUTED_IDENTITY] = True
             if expired:
                 extensions["livecut_text_replay_only"] = True
             extensions["timeout"] = {name: min(value, timeout) if isinstance(value, (int, float)) else timeout
                                       for name, value in request.extensions.get("timeout", {}).items()}
             headers = {"Content-Type": "application/json"}
-            key = os.environ.get(profile.key_env, "") if profile.key_env else None
-            if key is not None:
-                headers["Authorization"] = "Bearer " + key
-            elif "Authorization" in request.headers:
-                headers["Authorization"] = request.headers["Authorization"]
+            if credentials[profile_index]:
+                headers["Authorization"] = credentials[profile_index]
             candidate = httpx.Request("POST", profile.endpoint, headers=headers,
                 json=primary_body if profile is primary else self._body(profile, messages), extensions=extensions)
             response, auth_failed, retry_after = None, False, 0
@@ -413,6 +524,8 @@ class ResilientTextTransport(httpx.BaseTransport):
                     raw = None
                 partial = response.headers.get("x-dashscope-partialresponse", "").lower() == "true"
                 failure = _provider_failure(status, raw, partial)
+                if candidate.extensions.get(WIRE_DISPATCHED) is True:
+                    self.circuit.record(health_keys[profile_index], None if failure is None else failure[0])
                 if failure is None:
                     self._emit("SUCCEEDED", slot + 1, profile, started)
                     return response
@@ -421,14 +534,20 @@ class ResilientTextTransport(httpx.BaseTransport):
                     retry_after = min(30, int(retry_header))
                 last_code, auth_failed = failure
                 if auth_failed:
-                    if fallback_index >= len(self.fallbacks):
+                    if route_position + 1 >= len(route):
                         self._emit("EXHAUSTED", slot + 1, profile, started, code=last_code)
                         return response
                 elif last_code == "PROVIDER_REQUEST_INVALID":
                     self._emit("EXHAUSTED", slot + 1, profile, started, code="PROVIDER_REQUEST_INVALID")
                     return response
             except _TRANSIENT as error:
+                if (candidate.extensions.get(WIRE_DISPATCHED) is not True
+                        or candidate.extensions.get(WIRE_RESPONSE_READ) is True):
+                    # Transport-shaped Java/storage/callback errors are not a
+                    # provider outcome and cannot alter its circuit or route.
+                    raise
                 last_code = "PROVIDER_TIMEOUT" if isinstance(error, httpx.TimeoutException) else "PROVIDER_UNAVAILABLE"
+                self.circuit.record(health_keys[profile_index], last_code)
             except ModelBudgetError as error:
                 if error.code not in {"TEXT_PREVIOUS_OUTCOME_UNKNOWN", "TEXT_RECOVERY_NOT_RECORDED"}:
                     raise
@@ -436,16 +555,18 @@ class ResilientTextTransport(httpx.BaseTransport):
                     raise
                 last_code = "PREVIOUS_OUTCOME_UNKNOWN"
             finally:
-                if response is not None and not 200 <= response.status_code < 300:
+                if response is not None:
                     response.close()
             if slot + 1 >= self.policy.max_attempts:
                 break
             # With one backup, give the primary one transient retry. Auth failures
             # skip directly to the next provider. Two backups receive one slot each.
-            switch = fallback_index < len(self.fallbacks) and (auth_failed or len(self.fallbacks) > 1 or slot >= 1)
+            switch = route_position + 1 < len(route) and (
+                auth_failed or len(route) > 2 or slot >= 1 or profile_index in probes)
             if switch:
-                profile = self.fallbacks[fallback_index]
-                fallback_index += 1
+                route_position += 1
+                profile_index = route[route_position]
+                profile = profiles[profile_index]
                 self._emit("SWITCHING_PROVIDER", slot + 2, profile, started, code=last_code)
             delay = min(30, max(retry_after, self.policy.backoff_seconds * (2 ** slot)))
             if expired:

@@ -14,6 +14,7 @@ from urllib.parse import unquote
 
 import httpx
 
+from .text_circuit import LOOKUP_FOUND, ROUTED_IDENTITY, WIRE_DISPATCHED, WIRE_RESPONSE_READ
 from .worker_client import WorkerClient, WorkerClientError
 
 if TYPE_CHECKING:
@@ -178,6 +179,9 @@ class BudgetTransport(httpx.BaseTransport):
         return response
 
     def handle_request(self, request: httpx.Request) -> httpx.Response:
+        request.extensions[WIRE_DISPATCHED] = False
+        request.extensions[WIRE_RESPONSE_READ] = False
+        request.extensions[LOOKUP_FOUND] = False
         self.context.guard.check()
         if self.context.lease.stage_type == "EXPORT_CLIP":
             raise ModelBudgetError("MODEL_OPERATION_NOT_ALLOWED")
@@ -213,6 +217,9 @@ class BudgetTransport(httpx.BaseTransport):
         else:
             identity = {"endpoint": endpoint, "body": body}
         recovery = request.extensions.get("livecut_text_retry")
+        routed = request.extensions.get(ROUTED_IDENTITY, False)
+        if type(routed) is not bool or routed and (kind != "TEXT" or recovery is None):
+            raise ModelBudgetError("INVALID_TEXT_RETRY_STATE")
         if recovery is not None:
             if (kind != "TEXT" or not isinstance(recovery, dict)
                     or set(recovery) != {"slot", "logical_hash", "policy_hash"}
@@ -224,7 +231,7 @@ class BudgetTransport(httpx.BaseTransport):
                 raise ModelBudgetError("INVALID_TEXT_RETRY_STATE")
             # Ordinal zero retains the historic identity, so an already paid
             # success remains reusable when recovery is enabled for old work.
-            if recovery["slot"]:
+            if recovery["slot"] or routed:
                 identity["recovery"] = recovery
         serialized = json.dumps(identity, ensure_ascii=False, sort_keys=True,
                                 separators=(",", ":"), allow_nan=False).encode()
@@ -249,6 +256,8 @@ class BudgetTransport(httpx.BaseTransport):
         if (not isinstance(call, dict) or call.get("input_hash") != input_hash
                 or call.get("request_id") != request_id):
             raise ModelBudgetError("INVALID_BUDGET_RESPONSE")
+        if replay_only:
+            request.extensions[LOOKUP_FOUND] = True
         status = call.get("status")
         if status == "SUCCEEDED" or (kind == "ASR" and status in {"SUBMITTED", "UNKNOWN_OUTCOME"}
                                       and call.get("provider_task_id")):
@@ -274,10 +283,15 @@ class BudgetTransport(httpx.BaseTransport):
         if dispatch.get("outcome") != "UPDATED" or dispatch.get("call", {}).get("status") != "DISPATCHING":
             raise ModelBudgetError("MODEL_DISPATCH_NOT_GRANTED")
         self.context.guard.check()
+        response = None
         try:
+            request.extensions[WIRE_DISPATCHED] = True
             response = self.inner.handle_request(request)
             response.read()
+            request.extensions[WIRE_RESPONSE_READ] = True
         except Exception:
+            if response is not None:
+                response.close()
             try:
                 self._update(request_id, "UNKNOWN_OUTCOME")
             except WorkerClientError:
@@ -286,8 +300,14 @@ class BudgetTransport(httpx.BaseTransport):
         try:
             response_key, response_hash = self._record(request_id, response)
         except OSError:
-            self._emergency_response(request_id, kind, response)
+            try:
+                self._emergency_response(request_id, kind, response)
+            finally:
+                response.close()
             raise ModelBudgetError("MODEL_RESPONSE_PERSISTENCE_FAILED") from None
+        except Exception:
+            response.close()
+            raise
         try:
             raw = response.json()
         except ValueError:
@@ -308,10 +328,14 @@ class BudgetTransport(httpx.BaseTransport):
             status = "FAILED"
         else:
             status = "UNKNOWN_OUTCOME"
-        self._update(request_id, status, task_id=task_id, usage=usage,
-                     response_key=response_key, response_hash=response_hash)
-        if kind == "ASR" and status == "SUBMITTED" and isinstance(task_id, str):
-            self._remember_asr(task_id, request_id)
+        try:
+            self._update(request_id, status, task_id=task_id, usage=usage,
+                         response_key=response_key, response_hash=response_hash)
+            if kind == "ASR" and status == "SUBMITTED" and isinstance(task_id, str):
+                self._remember_asr(task_id, request_id)
+        except Exception:
+            response.close()
+            raise
         return response
 
 
