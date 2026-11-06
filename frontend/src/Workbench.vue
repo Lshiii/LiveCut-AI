@@ -112,8 +112,13 @@ function tabKey(event: KeyboardEvent) {
   void nextTick(() => document.getElementById(`workbench-tab-${next}`)?.focus())
 }
 function openNewAnalysis() {
+  closeTasks()
   selectVideo()
   if (!selectedJob.value) { activeTab.value = 'task'; closeTasks() }
+}
+function openTask(id: string) {
+  closeTasks()
+  void loadDetail(id)
 }
 async function chooseUpload() {
   closeTasks()
@@ -395,7 +400,7 @@ onUnmounted(() => { stopped = true; compactQuery.removeEventListener('change', u
       <select v-model="filter" class="sidebar-filter" aria-label="筛选任务状态"><option value="ALL">全部状态</option><option value="RUNNING">正在分析</option><option value="QUEUED">等待执行</option><option value="REVIEW_READY">待人工审核</option><option value="FAILED">执行失败</option><option value="CANCELLED">已取消</option></select>
       <div v-if="loading" class="sidebar-empty">正在读取任务…</div>
       <div v-else-if="!visibleJobs.length" class="sidebar-empty">{{ jobs.length ? '没有匹配的任务' : '上传第一段视频，开始整理。' }}</div>
-      <div v-else class="task-list" aria-label="分析任务列表"><button v-for="job in visibleJobs" :key="job.id" class="task-row" :class="{ active: selectedJob?.id === job.id }" :aria-current="selectedJob?.id === job.id ? 'true' : undefined" :disabled="!!pending" @click="loadDetail(job.id)"><span class="video-tile" aria-hidden="true">▷</span><span class="task-info"><strong :title="videoName(job.video_id)">{{ videoName(job.video_id) }}</strong><span>第 {{ job.generation }} 次分析 · {{ date(job.created_at) }}</span><span class="task-row-bottom"><span class="status" :class="job.status.toLowerCase()">{{ names[job.status] ?? job.status }}</span><small>#{{ job.id.slice(0, 8) }}</small></span></span></button></div>
+      <div v-else class="task-list" aria-label="分析任务列表"><button v-for="job in visibleJobs" :key="job.id" class="task-row" :class="{ active: selectedJob?.id === job.id }" :aria-current="selectedJob?.id === job.id ? 'true' : undefined" :disabled="!!pending" @click="openTask(job.id)"><span class="video-tile" aria-hidden="true">▷</span><span class="task-info"><strong :title="videoName(job.video_id)">{{ videoName(job.video_id) }}</strong><span>第 {{ job.generation }} 次分析 · {{ date(job.created_at) }}</span><span class="task-row-bottom"><span class="status" :class="job.status.toLowerCase()">{{ names[job.status] ?? job.status }}</span><small>#{{ job.id.slice(0, 8) }}</small></span></span></button></div>
       <div class="sidebar-footer"><span class="small-dot"></span>本地工作区 <span>{{ videos.length }} 个视频素材</span></div>
     </aside>
     <main class="workbench-main" :inert="compactLayout && mobileTasksOpen ? true : undefined">
