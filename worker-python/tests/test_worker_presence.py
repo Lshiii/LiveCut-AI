@@ -383,7 +383,10 @@ def test_type_queries_reach_segment_beyond_twenty_blocked_media_stages(tmp_path)
     assert all(query['limit'] == 4 for query in queries)
 
 
-def test_heartbeat_http_timeout_is_tightened_to_short_server_ttl():
+def test_heartbeat_http_timeout_is_tightened_to_short_server_ttl(monkeypatch):
+    # This checks the configured TTL cap, not elapsed network time. A zero
+    # clock origin avoids cancellation error in (started + timeout) - started.
+    monkeypatch.setattr('livecut.worker_client.time.monotonic', lambda: 0.0)
     session, requests = str(uuid4()), []
 
     def receive(request):
@@ -395,7 +398,10 @@ def test_heartbeat_http_timeout_is_tightened_to_short_server_ttl():
         client.heartbeat_worker('worker-1', session, timeout_seconds=5 / 3)
     finally:
         client.close()
-    assert requests[0].extensions['timeout'] == {
+    timeouts = requests[0].extensions['timeout']
+    assert set(timeouts) == {'connect', 'read', 'write', 'pool'}
+    assert all(0 < value <= 5 / 3 for value in timeouts.values())
+    assert timeouts == {
         phase: 5 / 3 for phase in ('connect', 'read', 'write', 'pool')}
 
 
