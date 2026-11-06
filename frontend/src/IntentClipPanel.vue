@@ -5,9 +5,9 @@ import FailureDiagnostic from './FailureDiagnostic.vue'
 import TextRequestProgress from './TextRequestProgress.vue'
 import { newestSnapshot, parseExportSnapshot, SnapshotError } from './snapshotStream'
 import { topicTime } from './topics'
-import { editIntentBoundary, intentCanConfirm, intentCanExport, intentOutputValidation, intentPayload,
+import { editIntentBoundary, intentCanCancel, intentCanConfirm, intentCanExport, intentCanResume, intentOutputValidation, intentPayload, intentResumeReceipt,
   IntentReadScope, IntentResponseError, newestIntentSnapshot, parseIntentSnapshot, refreshIntentEvidence,
-  type IntentOutput, type IntentPart, type IntentSnapshot } from './intentClips'
+  parseResumedIntentSnapshot, type IntentOutput, type IntentPart, type IntentResumeReceipt, type IntentSnapshot } from './intentClips'
 
 const props = defineProps<{ jobId: string; videoUrl: string }>()
 const instruction = ref(''), maxCalls = ref(6), requests = ref<IntentSnapshot[]>([])
@@ -18,6 +18,7 @@ const batches = ref<ExportJob[]>([]), previewUrl = ref(''), sourcePlayer = ref<H
 const scope = new IntentReadScope()
 let stopped = false, refreshing = false, timer: number | undefined, selectionVersion = 0
 let pendingCreate: { input: string; key: string } | null = null
+const pendingResumes = new Map<string, IntentResumeReceipt>()
 const pending = computed(() => !!action.value)
 const planDirty = computed(() => !!snapshot.value?.plan && JSON.stringify(intentPayload(outputs.value)) !== baseline.value)
 const dirty = computed(() => planDirty.value || !!instruction.value.trim())
@@ -25,6 +26,8 @@ const validation = computed(() => snapshot.value?.plan
   ? intentOutputValidation(outputs.value, snapshot.value.utterances, snapshot.value.source.duration_ms, snapshot.value.plan.goals) : '')
 const canConfirm = computed(() => !instruction.value.trim() && intentCanConfirm(snapshot.value, outputs.value, planDirty.value, pending.value))
 const canExport = computed(() => !instruction.value.trim() && intentCanExport(snapshot.value, planDirty.value, pending.value))
+const canCancel = computed(() => intentCanCancel(snapshot.value, planDirty.value, pending.value))
+const canResume = computed(() => intentCanResume(snapshot.value, dirty.value, pending.value))
 const selectedCount = computed(() => outputs.value.filter(value => value.enabled).length)
 const unresolved = computed(() => outputs.value.filter(value => value.status !== 'FOUND').length)
 const confirmed = computed(() => !!snapshot.value && snapshot.value.confirmed_revisions.includes(snapshot.value.revision))
@@ -37,7 +40,7 @@ function message(value: unknown) {
   const code = value instanceof ApiError ? value.code : value instanceof IntentResponseError || value instanceof SnapshotError ? 'INVALID_CLIP_RESPONSE' : 'CLIENT_ERROR'
   const messages: Record<string, string> = {
     NETWORK_UNAVAILABLE: '无法连接服务，本页输入和方案修改仍然保留。',
-    REQUEST_TIMEOUT: '请求超时。创建请求可再次点击，系统会复用同一个请求标识；其余操作请先重新读取核对服务端状态。',
+    REQUEST_TIMEOUT: '请求超时。创建或继续查找可再次点击，系统会复用同一个请求标识；其余操作请先重新读取核对服务端状态。',
     CLIP_PLAN_REVISION_CONFLICT: '此方案已有新版本。本页修改仍保留，请核对后再决定是否放弃并重新读取。',
     CLIP_REQUEST_NOT_READY: '候选尚未生成，请等待执行完成。',
     CLIP_PLAN_NOT_CONFIRMED: '请先保存并确认当前方案版本，再导出。',
@@ -45,6 +48,11 @@ function message(value: unknown) {
     INVALID_CLIP_PLAN: '标题、原句区间或证据不符合要求，请检查后再保存。',
     INVALID_CLIP_RESPONSE: '返回的剪辑方案不完整、来源不匹配或版本过期，已保留本页内容。',
     MODEL_BUDGET_EXHAUSTED: '本次请求的模型次数已用尽，请查看执行原因，调整要求后另建请求。',
+    CLIP_REQUEST_NOT_CANCELLABLE: '当前请求已不在等待或执行状态，无法取消。请核对自动更新后的结果。',
+    CLIP_REQUEST_NOT_RESUMABLE: '只有失败或已取消的请求可以继续查找。原请求记录保持不变。',
+    CLIP_RESUME_SOURCE_CHANGED: '原视频或转写来源已变化，无法复用本次请求。请重新核对来源。',
+    IDEMPOTENCY_CONFLICT: '这次操作的请求标识与内容不一致，已保留本页内容，请重新读取核对。',
+    INVALID_CLIP_REQUEST: '剪辑要求或文本请求上限无效，请检查后再操作。',
   }
   return messages[code] ?? `剪辑操作未完成：${code}`
 }
@@ -151,6 +159,48 @@ async function create() {
   } catch (value) { if (!stopped && version === selectionVersion) fail(value) }
   finally { if (!stopped && version === selectionVersion) action.value = '' }
 }
+async function cancelRequest() {
+  if (!canCancel.value || !snapshot.value) return
+  const id = selectedId.value, version = selectionVersion
+  action.value = 'cancel'; error.value = ''; notice.value = ''; scope.invalidate()
+  try {
+    const raw = await post<unknown>(`/api/clip-requests/${id}/cancel`, {})
+    if (!validOperation(id, version)) return
+    const value = parseIntentSnapshot(raw, props.jobId, id)
+    if (value.status !== 'CANCELLED') throw new IntentResponseError()
+    accept(value)
+    notice.value = '已取消后续处理，原视频、已完成转写和调用记录仍保留。已发出的模型请求可能仍由服务方处理。'
+  } catch (value) { if (validOperation(id, version)) fail(value) }
+  finally { if (validOperation(id, version)) action.value = '' }
+}
+async function resumeRequest() {
+  const source = snapshot.value
+  if (!source || !canChangeRequest() || !intentCanResume(source, dirty.value, pending.value)) return
+  if (!Number.isInteger(maxCalls.value) || maxCalls.value < 1 || maxCalls.value > 24) { error.value = '模型请求上限须为 1～24 的整数。'; return }
+  const jobId = props.jobId, id = source.id, budget = maxCalls.value
+  const storageKey = `livecut-intent-resume-${id}-${budget}`
+  let saved: unknown = pendingResumes.get(storageKey)
+  if (!saved) { try { saved = JSON.parse(localStorage.getItem(storageKey) ?? 'null') } catch { /* Only valid receipts are reused. */ } }
+  const receipt = intentResumeReceipt(saved, id, budget, () => crypto.randomUUID())
+  pendingResumes.set(storageKey, receipt)
+  try { localStorage.setItem(storageKey, JSON.stringify(receipt)) } catch { /* Keep the mounted-view receipt if storage is unavailable. */ }
+  action.value = 'resume'; error.value = ''; notice.value = ''; scope.invalidate()
+  const version = ++selectionVersion
+  try {
+    const raw = await post<unknown>(`/api/clip-requests/${id}/resume`, { max_text_calls: budget }, { 'Idempotency-Key': receipt.key })
+    if (!validOperation(id, version) || props.jobId !== jobId) return
+    const value = parseResumedIntentSnapshot(raw, source, budget)
+    selectedId.value = value.id; snapshot.value = null; outputs.value = []; batches.value = []; previewUrl.value = ''
+    accept(value, true)
+    pendingResumes.delete(storageKey)
+    try {
+      const current = JSON.parse(localStorage.getItem(storageKey) ?? 'null')
+      if (current?.key === receipt.key) localStorage.removeItem(storageKey)
+    } catch { /* The accepted new request remains visible. */ }
+    notice.value = '已复用原转写，新建一次文本分析。新请求按设置的次数上限执行，旧请求和调用记录仍保留。'
+  } catch (value) { if (validOperation(id, version) && props.jobId === jobId) fail(value) }
+  finally { if (!stopped && version === selectionVersion) action.value = '' }
+}
 async function save() {
   if (!snapshot.value?.plan || pending.value || !planDirty.value || validation.value || draftRevision.value === null) return
   const id = selectedId.value, version = selectionVersion, revision = draftRevision.value
@@ -233,9 +283,19 @@ onBeforeUnmount(() => { stopped = true; selectionVersion++; scope.dispose(); win
       <div class="intent-result" v-if="snapshot">
         <div class="intent-subheading"><h3>当前方案 <span v-if="snapshot.plan">r{{ draftRevision }} · {{ selectedCount }} 个目标已选</span></h3><button v-if="dirty" class="text-button" :disabled="pending" @click="discard">放弃本页修改</button></div>
         <p class="intent-original">{{ snapshot.instruction }}</p>
+        <p v-if="snapshot.resumed_from_request_id" class="help">本次继续自请求 #{{ snapshot.resumed_from_request_id.slice(0, 8) }}，原转写复用，文本分析与预算独立。</p>
         <p class="help">本次已预留文本请求 {{ snapshot.budget.text_calls_reserved }} / {{ snapshot.budget.max_text_calls }}，包含自动恢复尝试，为次数上限。</p>
+        <div v-if="['QUEUED', 'RUNNING'].includes(snapshot.status)" class="intent-recovery-actions">
+          <p class="help">不再需要继续查找时可取消，已经完成的语音转写会保留。</p>
+          <button class="text-button" :disabled="!canCancel" @click="cancelRequest">{{ action === 'cancel' ? '正在取消…' : '取消本次查找' }}</button>
+        </div>
+        <div v-if="['FAILED', 'CANCELLED'].includes(snapshot.status)" class="intent-recovery-actions">
+          <p class="help">继续查找会复用已完成转写，新建一次文本分析，使用上方设置的调用次数上限；旧请求与调用记录保留。</p>
+          <p v-if="instruction.trim()" class="help">上方有尚未提交的新要求，请先提交或放弃输入，再继续当前请求。</p>
+          <button class="primary" :disabled="!canResume" @click="resumeRequest">{{ action === 'resume' ? '正在继续…' : '继续查找' }}</button>
+        </div>
         <TextRequestProgress :progress="snapshot.stage.text_progress" :terminal="['PLAN_READY', 'FAILED', 'CANCELLED'].includes(snapshot.status)" />
-        <FailureDiagnostic :error-code="snapshot.stage.error_code" :attempt="snapshot.stage.attempt" />
+        <FailureDiagnostic v-if="snapshot.status !== 'CANCELLED'" :error-code="snapshot.stage.error_code" :attempt="snapshot.stage.attempt" />
         <p v-if="!snapshot.plan" class="intent-empty">{{ snapshot.status === 'FAILED' ? '本次查找未完成。请查看执行原因，原视频和原话题结果仍保留。' : snapshot.status === 'CANCELLED' ? '本次请求已取消。' : snapshot.status === 'RUNNING' ? '正在查找候选片段，执行进度会自动更新。你可以继续回看原视频。' : '正在等待执行服务生成候选方案。你可以继续回看原视频。' }}</p>
         <template v-else>
           <video ref="sourcePlayer" :src="videoUrl" controls preload="metadata" playsinline class="intent-source"></video>
@@ -288,6 +348,7 @@ h3 { color: #52634b; font-size: 13px; } h3 > span { font-size: 10px; font-weight
 .intent-request strong { font-size: 11px; font-weight: 500; color: #59684f; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; line-height: 1.7; }
 .intent-request > span { display: block; color: #939c89; font-size: 9px; margin-top: 6px; }
 .intent-original { padding-bottom: 10px; }
+.intent-recovery-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; padding: 10px 12px; margin: 12px 0; border: 1px solid #e5e9df; border-radius: 6px; background: #f8faf6; }.intent-recovery-actions p { flex: 1; min-width: 180px; margin: 0; }.intent-recovery-actions button { flex-shrink: 0; }
 .intent-source { width: 100%; max-height: 360px; display: block; border-radius: 6px; background: #20251e; margin: 14px 0 8px; }
 .intent-empty { padding: 25px 12px; font-size: 12px; color: #8b957e; line-height: 1.8; background: #f8faf6; margin-top: 15px; border-radius: 6px; }
 .intent-output { border: 1px solid #e4e9dc; border-radius: 7px; padding: 16px; margin-top: 16px; min-width: 0; }

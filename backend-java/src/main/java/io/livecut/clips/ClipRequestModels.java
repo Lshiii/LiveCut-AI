@@ -10,6 +10,7 @@ import tools.jackson.databind.JsonNode;
 public final class ClipRequestModels {
     private ClipRequestModels() {}
     public record CreateRequest(String instruction, @JsonProperty("max_text_calls") Integer maxTextCalls) {}
+    public record ResumeRequest(@JsonProperty("max_text_calls") Integer maxTextCalls) {}
     public record Budget(@JsonProperty("max_text_calls") int maxTextCalls,
                          @JsonProperty("text_calls_reserved") int textCallsReserved) {}
     public record Source(@JsonProperty("video_sha256") String videoSha256,
@@ -25,6 +26,7 @@ public final class ClipRequestModels {
         @JsonProperty("state_version") long stateVersion,@JsonProperty("created_at") Instant createdAt,
         @JsonProperty("updated_at") Instant updatedAt,Budget budget,Stage stage,Source source,long revision,
         @JsonProperty("plan_hash") String planHash,@JsonProperty("confirmed_revisions") List<Long> confirmedRevisions,
-        JsonNode plan,JsonNode utterances) {}
+        JsonNode plan,JsonNode utterances,
+        @JsonProperty("resumed_from_request_id") @JsonInclude(JsonInclude.Include.NON_NULL) String resumedFromRequestId) {}
     public record Page(List<Snapshot> items) {}
 }

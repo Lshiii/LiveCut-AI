@@ -17,6 +17,7 @@ export interface IntentPlan {
 }
 export interface IntentSnapshot {
   id: string; job_id: string; video_id: string; instruction: string
+  resumed_from_request_id?: string
   status: 'QUEUED' | 'RUNNING' | 'PLAN_READY' | 'FAILED' | 'CANCELLED'; state_version: number
   created_at: string; updated_at: string
   budget: { max_text_calls: number; text_calls_reserved: number }
@@ -94,7 +95,9 @@ export function parseIntentSnapshot(raw: unknown, jobId: string, requestId?: str
     || !row(raw.source) || !digest(raw.source.video_sha256) || !digest(raw.source.transcript_hash) || !integer(raw.source.duration_ms, 1)
     || !integer(raw.revision) || !(raw.plan_hash === null || digest(raw.plan_hash))
     || !Array.isArray(raw.confirmed_revisions) || raw.confirmed_revisions.some(value => !integer(value) || value > (raw.revision as number))
-    || new Set(raw.confirmed_revisions).size !== raw.confirmed_revisions.length || !Array.isArray(raw.utterances)) invalid()
+    || new Set(raw.confirmed_revisions).size !== raw.confirmed_revisions.length || !Array.isArray(raw.utterances)
+    || !(raw.resumed_from_request_id === undefined || raw.resumed_from_request_id === null
+      || (typeof raw.resumed_from_request_id === 'string' && uuid.test(raw.resumed_from_request_id) && raw.resumed_from_request_id !== raw.id))) invalid()
   const ids = new Set<string>(); let end = 0
   for (const value of raw.utterances) {
     if (!row(value) || !id(value.utterance_id) || ids.has(value.utterance_id) || !text(value.text, 20000)
@@ -125,12 +128,43 @@ export function parseIntentSnapshot(raw: unknown, jobId: string, requestId?: str
   }
   const { text_progress: rawProgress, ...stage } = raw.stage
   const progress = parseTextProgress(rawProgress)
-  return { ...raw, stage: { ...stage, ...(progress ? { text_progress: progress } : {}) } } as unknown as IntentSnapshot
+  const { resumed_from_request_id: resumedFrom, ...value } = raw
+  return { ...value, ...(typeof resumedFrom === 'string' ? { resumed_from_request_id: resumedFrom } : {}),
+    stage: { ...stage, ...(progress ? { text_progress: progress } : {}) } } as unknown as IntentSnapshot
+}
+
+/** A continued request has new accounting, but exactly the same frozen media and instruction. */
+export function parseResumedIntentSnapshot(raw: unknown, source: IntentSnapshot, maxTextCalls: number): IntentSnapshot {
+  const value = parseIntentSnapshot(raw, source.job_id)
+  if (value.id === source.id || value.resumed_from_request_id !== source.id || value.video_id !== source.video_id
+    || value.instruction !== source.instruction || value.source.video_sha256 !== source.source.video_sha256
+    || value.source.transcript_hash !== source.source.transcript_hash || value.source.duration_ms !== source.source.duration_ms
+    || value.budget.max_text_calls !== maxTextCalls) invalid()
+  return value
+}
+
+export interface IntentResumeReceipt { input: string; key: string }
+export function intentResumeReceipt(saved: unknown, requestId: string, maxTextCalls: number, newKey: () => string): IntentResumeReceipt {
+  if (!uuid.test(requestId) || !integer(maxTextCalls, 1) || maxTextCalls > 24) invalid()
+  const input = JSON.stringify({ request_id: requestId, max_text_calls: maxTextCalls })
+  if (row(saved) && saved.input === input && typeof saved.key === 'string' && uuid.test(saved.key)) return { input, key: saved.key }
+  const key = newKey()
+  if (!uuid.test(key)) invalid()
+  return { input, key }
+}
+
+export function intentCanCancel(snapshot: IntentSnapshot | null, unsavedPlan: boolean, pending: boolean): boolean {
+  return !!snapshot && ['QUEUED', 'RUNNING'].includes(snapshot.status) && !unsavedPlan && !pending
+}
+export function intentCanResume(snapshot: IntentSnapshot | null, unsavedInput: boolean, pending: boolean): boolean {
+  return !!snapshot && ['FAILED', 'CANCELLED'].includes(snapshot.status) && !unsavedInput && !pending
 }
 
 export function newestIntentSnapshot(known: IntentSnapshot | null | undefined, incoming: IntentSnapshot): IntentSnapshot {
   if (!known || known.id !== incoming.id) return incoming
-  if (known.source.video_sha256 !== incoming.source.video_sha256 || known.source.transcript_hash !== incoming.source.transcript_hash) invalid()
+  if (known.job_id !== incoming.job_id || known.video_id !== incoming.video_id || known.instruction !== incoming.instruction
+    || known.resumed_from_request_id !== incoming.resumed_from_request_id || known.source.duration_ms !== incoming.source.duration_ms
+    || known.source.video_sha256 !== incoming.source.video_sha256 || known.source.transcript_hash !== incoming.source.transcript_hash) invalid()
   if (incoming.state_version < known.state_version || incoming.revision < known.revision
     || (incoming.state_version === known.state_version && incoming.status !== known.status)
     || known.confirmed_revisions.some(value => !incoming.confirmed_revisions.includes(value))) return known

@@ -2,9 +2,9 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { reactive } from 'vue'
 import type { TextProgress } from '../textProgress.ts'
-import { editIntentBoundary, intentCanConfirm, intentCanExport, intentOutputValidation, intentPartIds,
+import { editIntentBoundary, intentCanCancel, intentCanConfirm, intentCanExport, intentCanResume, intentOutputValidation, intentPartIds,
   intentPayload, IntentReadScope, IntentResponseError, newestIntentSnapshot, parseIntentSnapshot,
-  refreshIntentEvidence, type IntentSnapshot } from '../intentClips.ts'
+  parseResumedIntentSnapshot, intentResumeReceipt, refreshIntentEvidence, type IntentSnapshot } from '../intentClips.ts'
 
 const JOB = '11111111-1111-4111-8111-111111111111'
 const REQUEST = '22222222-2222-4222-8222-222222222222'
@@ -156,4 +156,94 @@ test('selection changes invalidate late GET responses even when the same request
   assert.equal(requestB.current(), false); assert.equal(newA.current(), true)
   newA.release(); scope.dispose(); assert.equal(newA.current(), false)
   const afterUnmount = scope.begin(); assert.equal(afterUnmount.current(), false); assert.equal(afterUnmount.signal.aborted, true)
+})
+
+function failedSnapshot(): IntentSnapshot {
+  const value = snapshot()
+  value.plan = null; value.plan_hash = null; value.status = 'FAILED'; value.confirmed_revisions = []
+  value.stage.status = 'FAILED'; value.stage.error_code = 'TEXT_RETRIES_EXHAUSTED'
+  return value
+}
+function continuedSnapshot(source: IntentSnapshot): IntentSnapshot {
+  return { ...source, id: '55555555-5555-4555-8555-555555555555', resumed_from_request_id: source.id,
+    status: 'QUEUED', state_version: 0, budget: { max_text_calls: 6, text_calls_reserved: 0 },
+    stage: { id: '66666666-6666-4666-8666-666666666666', stage_type: 'SEGMENT', status: 'READY', attempt: 0, error_code: null } }
+}
+
+test('continued request ancestry is optional for old snapshots but must be a distinct valid request ID', () => {
+  const source = failedSnapshot(), next = continuedSnapshot(source)
+  assert.equal(parseIntentSnapshot(source, JOB).resumed_from_request_id, undefined)
+  assert.equal(parseIntentSnapshot({ ...source, resumed_from_request_id: null }, JOB).resumed_from_request_id, undefined)
+  assert.equal(parseIntentSnapshot(next, JOB).resumed_from_request_id, source.id)
+  for (const value of [next.id, '', 12, 'https://unexpected.example/private']) {
+    assert.throws(() => parseIntentSnapshot({ ...next, resumed_from_request_id: value }, JOB), IntentResponseError)
+  }
+})
+
+test('cancel and continue actions protect terminal results, pending operations and unsaved input', () => {
+  for (const status of ['QUEUED', 'RUNNING', 'PLAN_READY', 'FAILED', 'CANCELLED'] as const) {
+    const value = failedSnapshot(); value.status = status
+    assert.equal(intentCanCancel(value, false, false), status === 'QUEUED' || status === 'RUNNING')
+    assert.equal(intentCanResume(value, false, false), status === 'FAILED' || status === 'CANCELLED')
+    assert.equal(intentCanCancel(value, true, false), false)
+    assert.equal(intentCanCancel(value, false, true), false)
+    assert.equal(intentCanResume(value, true, false), false)
+    assert.equal(intentCanResume(value, false, true), false)
+  }
+  assert.equal(intentCanCancel(null, false, false), false)
+  assert.equal(intentCanResume(null, false, false), false)
+})
+
+test('continuing after a lost POST response reuses the same receipt while another request or budget cannot reuse it', () => {
+  const firstKey = '77777777-7777-4777-8777-777777777777', nextKey = '88888888-8888-4888-8888-888888888888'
+  const receipt = intentResumeReceipt(null, REQUEST, 6, () => firstKey)
+  const stored = JSON.parse(JSON.stringify(receipt))
+  assert.deepEqual(intentResumeReceipt(stored, REQUEST, 6, () => { throw new Error('must reuse the existing key') }), receipt)
+  assert.equal(intentResumeReceipt(stored, REQUEST, 7, () => nextKey).key, nextKey)
+  assert.equal(intentResumeReceipt(stored, '55555555-5555-4555-8555-555555555555', 6, () => nextKey).key, nextKey)
+  for (const invalid of [{ ...stored, key: 'unsafe\nkey' }, { ...stored, key: '' }, [], 12]) {
+    assert.equal(intentResumeReceipt(invalid, REQUEST, 6, () => nextKey).key, nextKey)
+  }
+  for (const budget of [0, 25, 2.5, Number.NaN]) assert.throws(() => intentResumeReceipt(null, REQUEST, budget, () => firstKey), IntentResponseError)
+})
+
+test('resume accepts the new request already running but never changes old accounting or evidence', () => {
+  const source = failedSnapshot(), old = JSON.stringify(source), next = continuedSnapshot(source)
+  next.status = 'RUNNING'; next.stage.status = 'RUNNING'; next.stage.attempt = 1; next.budget.text_calls_reserved = 1
+  const accepted = parseResumedIntentSnapshot(next, source, 6)
+  assert.equal(accepted.id, next.id); assert.equal(accepted.status, 'RUNNING')
+  assert.equal(JSON.stringify(source), old)
+  assert.equal(source.budget.text_calls_reserved, 2)
+  assert.equal(accepted.budget.text_calls_reserved, 1)
+})
+
+test('an unrelated or source-changed resume response cannot replace the selected request', () => {
+  const source = failedSnapshot()
+  for (const change of [
+    (v: IntentSnapshot) => { v.id = source.id },
+    (v: IntentSnapshot) => { delete v.resumed_from_request_id },
+    (v: IntentSnapshot) => { v.resumed_from_request_id = '99999999-9999-4999-8999-999999999999' },
+    (v: IntentSnapshot) => { v.video_id = '99999999-9999-4999-8999-999999999999' },
+    (v: IntentSnapshot) => { v.instruction = '其他剪辑要求' },
+    (v: IntentSnapshot) => { v.source.video_sha256 = 'c'.repeat(64) },
+    (v: IntentSnapshot) => { v.source.transcript_hash = 'd'.repeat(64) },
+    (v: IntentSnapshot) => { v.source.duration_ms = 7000 },
+    (v: IntentSnapshot) => { v.budget.max_text_calls = 7 },
+  ]) {
+    const value = structuredClone(continuedSnapshot(source)); change(value)
+    assert.throws(() => parseResumedIntentSnapshot(value, source, 6), IntentResponseError)
+  }
+})
+
+test('late polling cannot rewrite immutable continuation ancestry or instruction', () => {
+  const source = failedSnapshot(), known = continuedSnapshot(source)
+  for (const change of [
+    (v: IntentSnapshot) => { delete v.resumed_from_request_id },
+    (v: IntentSnapshot) => { v.instruction = '迟到的其他内容' },
+    (v: IntentSnapshot) => { v.source.duration_ms = 7000 },
+  ]) {
+    const value = structuredClone(known); value.state_version++
+    change(value)
+    assert.throws(() => newestIntentSnapshot(known, value), IntentResponseError)
+  }
 })

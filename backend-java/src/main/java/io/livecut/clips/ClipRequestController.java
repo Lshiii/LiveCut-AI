@@ -11,11 +11,15 @@ public class ClipRequestController {
     private final ExportService exports;
     public ClipRequestController(ClipRequestService requests,ExportService exports){this.requests=requests;this.exports=exports;}
     @PostMapping("/api/jobs/{jobId}/clip-requests")
-    public ClipRequestModels.Snapshot create(@PathVariable String jobId,@RequestBody ClipRequestModels.CreateRequest request,@RequestHeader("Idempotency-Key") String key){return requests.create(jobId,request,key);}
+    public ClipRequestModels.Snapshot create(@PathVariable String jobId,@RequestBody ClipRequestModels.CreateRequest request,@RequestHeader(value="Idempotency-Key",required=false) String key){return requests.create(jobId,request,key);}
     @GetMapping("/api/jobs/{jobId}/clip-requests")
     public ClipRequestModels.Page list(@PathVariable String jobId){return requests.list(jobId);}
     @GetMapping("/api/clip-requests/{id}")
     public ClipRequestModels.Snapshot get(@PathVariable String id){return requests.get(id);}
+    @PostMapping("/api/clip-requests/{id}/cancel")
+    public ClipRequestModels.Snapshot cancel(@PathVariable String id){return requests.cancel(id);}
+    @PostMapping("/api/clip-requests/{id}/resume")
+    public ClipRequestModels.Snapshot resume(@PathVariable String id,@RequestBody(required=false) ClipRequestModels.ResumeRequest request,@RequestHeader(value="Idempotency-Key",required=false) String key){return requests.resume(id,request,key);}
     @PutMapping("/api/clip-requests/{id}/plan")
     public ClipRequestModels.Snapshot save(@PathVariable String id,@RequestBody JsonNode request){return requests.save(id,request);}
     @PostMapping("/api/clip-requests/{id}/confirm")

@@ -47,14 +47,7 @@ public class ClipRequestService {
             List<Map<String,Object>> existing=jdbc.queryForList("SELECT * FROM clip_request WHERE idempotency_key=? FOR UPDATE",key);
             if(!existing.isEmpty())return existingCreate(existing.getFirst(),fingerprint);
             FrozenSource source=source(job);
-            String id=UUID.randomUUID().toString(),stage=UUID.randomUUID().toString();
-            String sourceJson=canonicalJson(JSON.valueToTree(Map.of("utterances",source.utterances())));
-            List<String> fallbackModels=TextExecutionPolicy.configuredFallbacks(configuredFallbackModels);
-            jdbc.update("INSERT INTO clip_request (id,job_id,video_id,idempotency_key,request_hash,instruction,text_model_id,source_hash,transcript_hash,transcript_key,source_json,duration_ms,max_text_calls,text_fallback_models_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                id,parent,source.video(),key,fingerprint,instruction,source.model(),source.hash(),source.transcriptHash(),source.transcriptKey(),sourceJson,source.duration(),budget,TextExecutionPolicy.serialize(fallbackModels));
-            jdbc.update("INSERT INTO job_stage (id,job_id,owner_type,owner_id,stage_type,shard_key,status,input_hash) VALUES (?,?,'CLIP_REQUEST',?,'SEGMENT',?,'READY',?)",
-                stage,parent,id,"clip-"+id,sha(fingerprint+"\n"+source.hash()+"\n"+source.transcriptHash()+"\n"+source.model()+"\n"+TextExecutionPolicy.serialize(fallbackModels)));
-            return snapshot(lockOwner(id,parent));
+            return insertRequest(parent,source,instruction,budget,key,fingerprint,null);
         });}catch(DuplicateKeyException collision){return tx.execute(status->{lockAnalysis(parent);var rows=jdbc.queryForList("SELECT * FROM clip_request WHERE idempotency_key=? FOR UPDATE",key);if(rows.isEmpty())throw collision;return existingCreate(rows.getFirst(),fingerprint);});}
     }
     private Snapshot existingCreate(Map<String,Object> existing,String fingerprint){
@@ -63,6 +56,47 @@ public class ClipRequestService {
     }
     public Page list(String parentId){String parent=uuid(parentId);return tx.execute(status->{lockAnalysis(parent);return new Page(jdbc.queryForList("SELECT * FROM clip_request WHERE job_id=? ORDER BY created_at DESC,id DESC LIMIT 100",parent).stream().map(this::snapshot).toList());});}
     public Snapshot get(String id){return tx.execute(status->snapshot(lockPublicOwner(uuid(id))));}
+    /** Cancellation fences execution, while old dispatched calls may still settle their accounting. */
+    public Snapshot cancel(String id){
+        String requestId=uuid(id);
+        return tx.execute(status->{
+            var owner=lockPublicOwner(requestId);
+            if("CANCELLED".equals(owner.get("status")))return snapshot(owner);
+            if(!active(owner))throw conflict("CLIP_REQUEST_NOT_CANCELLABLE","Only queued or running clipping requests can be cancelled");
+            var stages=jdbc.queryForList("SELECT id,status FROM job_stage FORCE INDEX (idx_stage_owner_status) WHERE owner_type='CLIP_REQUEST' AND owner_id=? FOR UPDATE",requestId);
+            if(stages.size()!=1||!Set.of("READY","RUNNING","RETRY_WAIT").contains(stages.getFirst().get("status")))throw conflict("CLIP_STAGE_UNAVAILABLE","The clipping stage has already changed");
+            jdbc.update("UPDATE job_stage SET status='CANCELLED',run_token=NULL,worker_id=NULL,worker_session_id=NULL,lease_until=NULL,hard_deadline_at=NULL,last_retryable=FALSE,error_code='USER_CANCELLED',diagnostic_json=NULL,text_progress_json=NULL,updated_at=CURRENT_TIMESTAMP(6) WHERE id=?",stages.getFirst().get("id"));
+            jdbc.update("UPDATE clip_request SET status='CANCELLED',state_version=state_version+1,updated_at=CURRENT_TIMESTAMP(6) WHERE id=?",requestId);
+            return snapshot(lockOwner(requestId,String.valueOf(owner.get("job_id"))));
+        });
+    }
+    /** A deliberate new recovery round never resets the old request's budget or call records. */
+    public Snapshot resume(String id,ResumeRequest input,String key){
+        String requestId=uuid(id);
+        if(key==null||!key.matches("[A-Za-z0-9_-]{1,100}"))throw bad("INVALID_CLIP_REQUEST","A recovery idempotency key is required");
+        int budget=input==null||input.maxTextCalls()==null?6:input.maxTextCalls();
+        if(budget<1||budget>24)throw bad("INVALID_CLIP_REQUEST","Text budget must be 1..24");
+        String fingerprint=sha("resume\n"+requestId+"\n"+budget);
+        try{return tx.execute(status->{
+            var prior=lockPublicOwner(requestId);String parent=String.valueOf(prior.get("job_id"));
+            var existing=jdbc.queryForList("SELECT * FROM clip_request WHERE idempotency_key=? FOR UPDATE",key);
+            if(!existing.isEmpty())return existingCreate(existing.getFirst(),fingerprint);
+            if(!Set.of("FAILED","CANCELLED").contains(prior.get("status")))throw conflict("CLIP_REQUEST_NOT_RESUMABLE","Only failed or cancelled requests may start a new recovery round");
+            FrozenSource source=source(lockAnalysis(parent));
+            if(!source.video().equals(prior.get("video_id"))||!source.hash().equals(prior.get("source_hash"))||!source.transcriptHash().equals(prior.get("transcript_hash"))||source.duration()!=((Number)prior.get("duration_ms")).longValue())throw conflict("CLIP_RESUME_SOURCE_CHANGED","The frozen source no longer matches this clipping request");
+            return insertRequest(parent,source,String.valueOf(prior.get("instruction")),budget,key,fingerprint,requestId);
+        });}catch(DuplicateKeyException collision){return tx.execute(status->{lockPublicOwner(requestId);var rows=jdbc.queryForList("SELECT * FROM clip_request WHERE idempotency_key=? FOR UPDATE",key);if(rows.isEmpty())throw collision;return existingCreate(rows.getFirst(),fingerprint);});}
+    }
+    private Snapshot insertRequest(String parent,FrozenSource source,String instruction,int budget,String key,String fingerprint,String resumedFrom){
+        String id=UUID.randomUUID().toString(),stage=UUID.randomUUID().toString();
+        String sourceJson=canonicalJson(JSON.valueToTree(Map.of("utterances",source.utterances())));
+        List<String> fallbackModels=TextExecutionPolicy.configuredFallbacks(configuredFallbackModels);
+        jdbc.update("INSERT INTO clip_request (id,job_id,video_id,idempotency_key,request_hash,instruction,text_model_id,source_hash,transcript_hash,transcript_key,source_json,duration_ms,max_text_calls,text_fallback_models_json,resumed_from_request_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            id,parent,source.video(),key,fingerprint,instruction,source.model(),source.hash(),source.transcriptHash(),source.transcriptKey(),sourceJson,source.duration(),budget,TextExecutionPolicy.serialize(fallbackModels),resumedFrom);
+        jdbc.update("INSERT INTO job_stage (id,job_id,owner_type,owner_id,stage_type,shard_key,status,input_hash) VALUES (?,?,'CLIP_REQUEST',?,'SEGMENT',?,'READY',?)",
+            stage,parent,id,"clip-"+id,sha(fingerprint+"\n"+source.hash()+"\n"+source.transcriptHash()+"\n"+source.model()+"\n"+TextExecutionPolicy.serialize(fallbackModels)));
+        return snapshot(lockOwner(id,parent));
+    }
     public Snapshot save(String id,JsonNode input){
         fields(input,Set.of("base_revision","outputs"));long base=number(input,"base_revision");
         return tx.execute(status->{var owner=lockPublicOwner(uuid(id));requireReady(owner);requireCurrent(owner,base);
@@ -89,8 +123,9 @@ public class ClipRequestService {
         boolean pending=stages.stream().anyMatch(s->Set.of("READY","RUNNING","RETRY_WAIT").contains(s.get("status")));
         boolean attempted=stages.stream().anyMatch(s->((Number)s.get("attempt")).intValue()>0);
         boolean failed=stages.stream().anyMatch(s->"FAILED".equals(s.get("status")));
-        String state=pending?(attempted?"RUNNING":"QUEUED"):failed?"FAILED":"PLAN_READY";
-        jdbc.update("UPDATE clip_request SET status=?,state_version=state_version+1,updated_at=CURRENT_TIMESTAMP(6) WHERE id=?",state,id);
+        boolean cancelled=stages.stream().anyMatch(s->"CANCELLED".equals(s.get("status")));
+        String state=cancelled?"CANCELLED":pending?(attempted?"RUNNING":"QUEUED"):failed?"FAILED":"PLAN_READY";
+        jdbc.update("UPDATE clip_request SET status=?,state_version=state_version+1,updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND status<>'CANCELLED'",state,id);
     }
     public Map<String,Object> claimConfig(StageRow stage){
         var owner=jdbc.queryForMap("SELECT * FROM clip_request WHERE id=?",stage.ownerId());Map<String,Object> clip=new TreeMap<>();
@@ -126,7 +161,7 @@ public class ClipRequestService {
         Stage stage=new Stage(String.valueOf(s.get("id")),String.valueOf(s.get("stage_type")),String.valueOf(s.get("status")),((Number)s.get("attempt")).intValue(),(String)s.get("error_code"),StageDiagnostics.read((String)s.get("diagnostic_json"),(String)s.get("error_code"),((Number)s.get("attempt")).intValue()),TextExecutionPolicy.readProgress(s.get("text_progress_json")));
         return new Snapshot(id,String.valueOf(owner.get("job_id")),String.valueOf(owner.get("video_id")),String.valueOf(owner.get("instruction")),String.valueOf(owner.get("status")),((Number)owner.get("state_version")).longValue(),instant(owner.get("created_at")),instant(owner.get("updated_at")),
             new Budget(((Number)owner.get("max_text_calls")).intValue(),((Number)owner.get("text_calls_reserved")).intValue()),stage,new Source(String.valueOf(owner.get("source_hash")),String.valueOf(owner.get("transcript_hash")),((Number)owner.get("duration_ms")).longValue()),rev,
-            planRows.isEmpty()?null:String.valueOf(planRows.getFirst().get("plan_hash")),jdbc.queryForList("SELECT revision FROM clip_plan_confirmation WHERE request_id=? ORDER BY revision",Long.class,id),plan,JSON.readTree(String.valueOf(owner.get("source_json"))).path("utterances"));
+            planRows.isEmpty()?null:String.valueOf(planRows.getFirst().get("plan_hash")),jdbc.queryForList("SELECT revision FROM clip_plan_confirmation WHERE request_id=? ORDER BY revision",Long.class,id),plan,JSON.readTree(String.valueOf(owner.get("source_json"))).path("utterances"),(String)owner.get("resumed_from_request_id"));
     }
     private FrozenSource source(Map<String,Object> job){
         if(!"REVIEW_READY".equals(job.get("status"))||!"topics".equals(JSON.readTree(String.valueOf(job.get("config_json"))).path("analysis_mode").asText()))throw conflict("CLIP_SOURCE_NOT_READY","A completed topic analysis is required");

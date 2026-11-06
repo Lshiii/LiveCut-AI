@@ -50,3 +50,10 @@ def test_intent_worker_checks_frozen_transcript_hash_before_any_provider_call(tm
     ctx.lease.config['clip_request']['source_transcript_hash'] = 'f' * 64
     with pytest.raises(WorkerError, match='SOURCE_HASH_MISMATCH'):
         AnalysisStageExecutor(transport_factory=lambda *args: pytest.fail('must not call provider'))(ctx)
+
+
+def test_intent_worker_checks_actual_video_bytes_before_any_provider_call(tmp_path):
+    ctx = intent_context(tmp_path)
+    _native_path(ctx.storage_root / ctx.lease.source_key).write_bytes(b"changed source video")
+    with pytest.raises(WorkerError, match='SOURCE_HASH_MISMATCH'):
+        AnalysisStageExecutor(transport_factory=lambda *args: pytest.fail('must not call provider'))(ctx)

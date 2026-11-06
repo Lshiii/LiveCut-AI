@@ -98,6 +98,90 @@ class ClipRequestIntegrationTests {
         assertEquals("STALE_ATTEMPT",failure(()->calls.lookup(stale)));
         assertEquals(1,clips.get(request.id()).budget().textCallsReserved());
     }
+
+    @Test void queuedCancellationIsIdempotentAndLeavesAnalysisAndDraftUntouched() throws Exception {
+        Fixture f=fixture();var before=jobs.get(f.job());var request=create(f,4);
+        var cancelled=clips.cancel(request.id());assertEquals("CANCELLED",cancelled.status());assertEquals("CANCELLED",cancelled.stage().status());
+        assertEquals(cancelled,clips.cancel(request.id()));assertEquals("NO_WORK",claim(cancelled).outcome());
+        clips.refreshLocked(request.id());assertEquals(cancelled,clips.get(request.id()));
+        assertEquals(before,jobs.get(f.job()));assertEquals(0,cancelled.budget().textCallsReserved());
+        assertEquals(0,jdbc.queryForObject("SELECT COUNT(*) FROM review_document WHERE job_id=?",Integer.class,f.job()));
+    }
+
+    @Test void runningCancellationFencesLateResultsButDispatchedCallsCanSettle() throws Exception {
+        Fixture f=fixture();var before=jobs.get(f.job());var request=create(f,4);var lease=claim(request);
+        var completion=publishPlan(f,request,lease,null);String callId="6".repeat(64);
+        calls.reserve(new ReserveRequest(lease.stageId(),lease.attempt(),lease.runToken(),callId,"5".repeat(64),"cancelled-dispatch","qwen-plus","TEXT"));
+        calls.update(callId,new UpdateRequest(lease.stageId(),lease.attempt(),lease.runToken(),"DISPATCHING",null,Map.of()));
+        var cancelled=clips.cancel(request.id());assertEquals(1,cancelled.budget().textCallsReserved());
+        Map<String,Object> row=jdbc.queryForMap("SELECT run_token,worker_id,worker_session_id,lease_until,hard_deadline_at FROM job_stage WHERE id=?",lease.stageId());assertTrue(row.values().stream().allMatch(Objects::isNull));
+        assertEquals("STALE_ATTEMPT",failure(()->jobs.heartbeat(lease.stageId(),new Credential(lease.attempt(),lease.runToken()))));
+        assertEquals("STALE_ATTEMPT",failure(()->jobs.complete(lease.stageId(),completion)));
+        assertEquals("STALE_ATTEMPT",failure(()->calls.reserve(new ReserveRequest(lease.stageId(),lease.attempt(),lease.runToken(),"4".repeat(64),"3".repeat(64),"after-cancel","qwen-plus","TEXT"))));
+        assertEquals("UPDATED",calls.update(callId,new UpdateRequest(lease.stageId(),lease.attempt(),lease.runToken(),"UNKNOWN_OUTCOME",null,Map.of())).outcome());
+        assertEquals("UPDATED",calls.update(callId,new UpdateRequest(lease.stageId(),lease.attempt(),lease.runToken(),"SUCCEEDED",null,Map.of("total_tokens",12))).outcome());
+        assertEquals("CANCELLED",clips.get(request.id()).status());assertEquals(before,jobs.get(f.job()));
+        assertEquals(0,jdbc.queryForObject("SELECT COUNT(*) FROM clip_plan_revision WHERE request_id=?",Integer.class,request.id()));
+    }
+
+    @Test void resumeCreatesOneIndependentRoundWithCurrentProviderAndFrozenSource() throws Exception {
+        Fixture f=fixture();var before=jobs.get(f.job());var old=create(f,2);var lease=claim(old);
+        calls.reserve(new ReserveRequest(lease.stageId(),lease.attempt(),lease.runToken(),"2".repeat(64),"1".repeat(64),"old-budget","qwen-plus","TEXT"));
+        var cancelled=clips.cancel(old.id());String key="resume-"+UUID.randomUUID();
+        org.springframework.test.util.ReflectionTestUtils.setField(clips,"preferredTextModel","deepseek-flash");
+        try {
+            var first=CompletableFuture.supplyAsync(()->clips.resume(old.id(),new ClipRequestModels.ResumeRequest(3),key));
+            var second=CompletableFuture.supplyAsync(()->clips.resume(old.id(),new ClipRequestModels.ResumeRequest(3),key));
+            var resumed=first.join();assertEquals(resumed.id(),second.join().id());
+            assertNotEquals(old.id(),resumed.id());assertNotEquals(old.stage().id(),resumed.stage().id());
+            assertEquals(old.id(),resumed.resumedFromRequestId());assertEquals(old.jobId(),resumed.jobId());assertEquals(old.videoId(),resumed.videoId());
+            assertEquals(old.source(),resumed.source());assertEquals(old.instruction(),resumed.instruction());assertEquals(old.utterances(),resumed.utterances());
+            assertEquals(3,resumed.budget().maxTextCalls());assertEquals(0,resumed.budget().textCallsReserved());assertEquals(0,resumed.stage().attempt());
+            assertEquals("deepseek-flash",jdbc.queryForObject("SELECT text_model_id FROM clip_request WHERE id=?",String.class,resumed.id()));
+            assertEquals(2,clips.list(f.job()).items().size());assertEquals(cancelled,clips.get(old.id()));assertEquals(before,jobs.get(f.job()));
+            var newLease=claim(resumed);assertEquals(0,newLease.config().get("max_asr_submissions"));
+            assertTrue(newLease.artifacts().stream().anyMatch(a->a.stageType().equals("ASR")));
+            assertEquals("IDEMPOTENCY_CONFLICT",failure(()->clips.resume(old.id(),new ClipRequestModels.ResumeRequest(4),key)));
+        } finally {org.springframework.test.util.ReflectionTestUtils.setField(clips,"preferredTextModel","");}
+    }
+
+    @Test void readyPlansCannotBeCancelledOrResumedAndInvalidRoundsAreRejected() throws Exception {
+        Fixture f=fixture();var request=ready(f);String key="resume-"+UUID.randomUUID();
+        assertEquals("CLIP_REQUEST_NOT_CANCELLABLE",failure(()->clips.cancel(request.id())));
+        assertEquals("CLIP_REQUEST_NOT_RESUMABLE",failure(()->clips.resume(request.id(),new ClipRequestModels.ResumeRequest(4),key)));
+        assertEquals(request,clips.get(request.id()));var pending=create(f,4);
+        assertEquals("CLIP_REQUEST_NOT_RESUMABLE",failure(()->clips.resume(pending.id(),null,key)));
+        clips.cancel(pending.id());assertEquals("INVALID_CLIP_REQUEST",failure(()->clips.resume(pending.id(),new ClipRequestModels.ResumeRequest(25),key)));
+        assertEquals("INVALID_CLIP_REQUEST",failure(()->clips.resume(pending.id(),new ClipRequestModels.ResumeRequest(0),key)));
+        assertEquals("INVALID_CLIP_REQUEST",failure(()->clips.resume(pending.id(),null,"unsafe/key")));
+    }
+
+    @Test void failedRecoveryChecksSourceAgainAndDoesNotReuseAnOldAcceptedCreateKey() throws Exception {
+        Fixture f=fixture();String createKey="ordinary-"+UUID.randomUUID();var old=clips.create(f.job(),new ClipRequestModels.CreateRequest("继续找原因",4),createKey);var l=claim(old);
+        jobs.fail(l.stageId(),new FailRequest(l.attempt(),l.runToken(),"TEXT_RETRIES_EXHAUSTED",false));
+        assertEquals("FAILED",clips.get(old.id()).status());
+        assertEquals("CLIP_REQUEST_NOT_CANCELLABLE",failure(()->clips.cancel(old.id())));
+        assertEquals("IDEMPOTENCY_CONFLICT",failure(()->clips.resume(old.id(),null,createKey)));
+        jdbc.update("UPDATE clip_request SET transcript_hash=? WHERE id=?","f".repeat(64),old.id());
+        assertEquals("CLIP_RESUME_SOURCE_CHANGED",failure(()->clips.resume(old.id(),null,"changed-"+UUID.randomUUID())));
+        assertEquals(1,clips.list(f.job()).items().size());
+        jdbc.update("UPDATE clip_request SET transcript_hash=? WHERE id=?",old.source().transcriptHash(),old.id());
+        String manifest=jdbc.queryForObject("SELECT manifest_key FROM job_stage WHERE job_id=? AND owner_type='ANALYSIS' AND stage_type='ASR'",String.class,f.job());
+        Files.writeString(root.resolve(manifest),"tampered");
+        assertEquals("ARTIFACT_HASH_MISMATCH",failure(()->clips.resume(old.id(),null,"tampered-"+UUID.randomUUID())));
+        assertEquals(1,clips.list(f.job()).items().size());
+    }
+
+    @Test void recoveryHttpRoutesKeepLineageAndReplayTheAcceptedNewRequest() throws Exception {
+        Fixture f=fixture();var old=create(f,4);
+        var cancelled=send("POST","/api/clip-requests/"+old.id()+"/cancel",Map.of(),null,false);assertEquals(200,cancelled.statusCode());
+        assertEquals("CANCELLED",JSON.readTree(cancelled.body()).path("status").asText());
+        String path="/api/clip-requests/"+old.id()+"/resume",key="http-resume-"+UUID.randomUUID();
+        var resumed=send("POST",path,Map.of("max_text_calls",5),key,false);assertEquals(200,resumed.statusCode());
+        JsonNode result=JSON.readTree(resumed.body());assertEquals(old.id(),result.path("resumed_from_request_id").asText());assertEquals(5,result.path("budget").path("max_text_calls").asInt());
+        assertEquals(result,JSON.readTree(send("POST",path,Map.of("max_text_calls",5),key,false).body()));
+        assertEquals(400,send("POST",path,Map.of("max_text_calls",5),null,false).statusCode());
+    }
     @Test void concurrentReservationsCannotOverspendLastClipSlot() throws Exception {
         Fixture f=fixture();var request=create(f,1);var lease=claim(request);
         var a=CompletableFuture.supplyAsync(()->reserveOutcome(lease,"a"));var b=CompletableFuture.supplyAsync(()->reserveOutcome(lease,"b"));

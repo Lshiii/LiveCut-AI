@@ -27,6 +27,44 @@ _SAFE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}\Z")
 _MODEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}\Z")
 
 
+def _provider_failure(status: int, raw: object, partial: bool) -> tuple[str, bool] | None:
+    """Classify wire failures without inspecting or publishing arbitrary messages.
+
+    Exact service codes matter: InternalError.Algo.InvalidParameter and quota
+    exhaustion must not be retried as transient InternalError or rate limiting.
+    The boolean means switch service without retrying these credentials.
+    """
+    codes = []
+    if isinstance(raw, dict):
+        error = raw.get("error")
+        candidates = [raw.get("code")]
+        if isinstance(error, dict):
+            candidates.extend((error.get("code"), error.get("type")))
+        for value in candidates:
+            if isinstance(value, str) and value.isascii() and len(value) <= 128:
+                codes.append(value.lower())
+    if any(code in {"throttling.allocationquota", "insufficient_quota", "arrearage",
+                    "insufficient_balance", "balance_not_enough"} for code in codes) or status == 402:
+        return "PROVIDER_QUOTA_EXHAUSTED", True
+    if any(code in {"invalidapikey", "invalid_api_key", "authentication_error",
+                    "accessdenied", "access_denied", "permission_denied"} for code in codes) or status in {401, 403}:
+        return "PROVIDER_UNAUTHORIZED", True
+    if status == 429 or any(code in {"throttling", "throttling.ratequota", "ratelimitexceeded",
+                                    "rate_limit_exceeded", "rate_limit_error", "toomanyrequests"} for code in codes):
+        return "PROVIDER_RATE_LIMITED", False
+    if status == 408 or any(code in {"requesttimeout", "request_timeout", "timeout"} for code in codes):
+        return "PROVIDER_TIMEOUT", False
+    if status >= 500 or partial or any(code in {"internalerror", "internal_server_error", "server_error",
+                                              "serviceunavailable", "service_unavailable", "overloaded_error"} for code in codes):
+        return "PROVIDER_UNAVAILABLE", False
+    if 200 <= status < 300:
+        if not isinstance(raw, dict) or not raw:
+            return "PROVIDER_RESPONSE_INVALID", False
+        if not raw.get("code") and not raw.get("error"):
+            return None
+    return "PROVIDER_REQUEST_INVALID", False
+
+
 class TextRecoveryError(Exception):
     def __init__(self, code: str):
         super().__init__(code)
@@ -50,7 +88,23 @@ class _DeadlineStream(httpcore.NetworkStream):
         self.inner = inner
 
     def read(self, max_bytes, timeout=None):
-        return self.inner.read(max_bytes, _timeout(timeout, httpcore.ReadTimeout))
+        if _ACTIVE_DEADLINE.get() is None:
+            return self.inner.read(max_bytes, timeout)
+        # Poll the same socket, without issuing another HTTP request. A silent
+        # provider must not hold the worker for 90s after its lease is fenced.
+        # Preserve the original idle deadline across these short read waits.
+        idle_deadline = None if timeout is None else time.monotonic() + timeout
+        while True:
+            idle_left = None if idle_deadline is None else idle_deadline - time.monotonic()
+            if idle_left is not None and idle_left <= 0:
+                raise httpcore.ReadTimeout("Text response idle deadline exceeded")
+            remaining = _timeout(idle_left, httpcore.ReadTimeout)
+            try:
+                return self.inner.read(max_bytes, min(.25, remaining) if remaining is not None else .25)
+            except httpcore.ReadTimeout:
+                # The next pass checks cancellation and both deadlines. No
+                # bytes were returned by recv, so no protocol data is replayed.
+                continue
 
     def write(self, buffer, timeout=None):
         self.inner.write(buffer, _timeout(timeout, httpcore.WriteTimeout))
@@ -357,28 +411,20 @@ class ResilientTextTransport(httpx.BaseTransport):
                     raw = response.json()
                 except ValueError:
                     raw = None
-                provider_error = raw.get("code") or raw.get("error") if isinstance(raw, dict) else None
                 partial = response.headers.get("x-dashscope-partialresponse", "").lower() == "true"
-                if 200 <= status < 300 and not provider_error and not partial:
+                failure = _provider_failure(status, raw, partial)
+                if failure is None:
                     self._emit("SUCCEEDED", slot + 1, profile, started)
                     return response
                 retry_header = response.headers.get("retry-after", "")
                 if retry_header.isascii() and retry_header.isdigit() and len(retry_header) <= 6:
                     retry_after = min(30, int(retry_header))
-                if status in {401, 403}:
-                    last_code, auth_failed = "PROVIDER_UNAUTHORIZED", True
+                last_code, auth_failed = failure
+                if auth_failed:
                     if fallback_index >= len(self.fallbacks):
                         self._emit("EXHAUSTED", slot + 1, profile, started, code=last_code)
                         return response
-                elif status == 429:
-                    last_code = "PROVIDER_RATE_LIMITED"
-                elif status == 408:
-                    last_code = "PROVIDER_TIMEOUT"
-                elif status >= 500:
-                    last_code = "PROVIDER_UNAVAILABLE"
-                elif partial:
-                    last_code = "PROVIDER_UNAVAILABLE"
-                else:
+                elif last_code == "PROVIDER_REQUEST_INVALID":
                     self._emit("EXHAUSTED", slot + 1, profile, started, code="PROVIDER_REQUEST_INVALID")
                     return response
             except _TRANSIENT as error:
