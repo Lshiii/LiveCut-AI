@@ -17,12 +17,15 @@ const selected = computed(() => sessions.value.find(session => session.id === se
 const activeTurn = computed(() => selected.value?.turns.find(agentTurnActive))
 const recentAnswer = computed(() => [...(selected.value?.turns ?? [])].reverse().find(turn => !!turn.result))
 const recentCitations = computed(() => recentAnswer.value?.result?.citations ?? [])
+const allEvidenceVisible = ref(false)
+const visibleCitations = computed(() => allEvidenceVisible.value ? recentCitations.value : recentCitations.value.slice(0, 3))
 const pending = computed(() => !!action.value), dirty = computed(() => !!question.value.trim())
 const citation = ref<AgentCitation | null>(null), sourcePlayer = ref<HTMLVideoElement | null>(null), playbackError = ref('')
 const messageList = ref<HTMLOListElement | null>(null)
 const panel = ref<HTMLElement | null>(null), referenceDock = ref<HTMLElement | null>(null), referenceEvidence = ref<HTMLElement | null>(null)
 const compactReference = ref(true), referenceExpanded = ref(false)
-const referenceVisible = computed(() => !compactReference.value || referenceExpanded.value)
+const conversationFocused = ref(false)
+const referenceVisible = computed(() => compactReference.value ? referenceExpanded.value : !conversationFocused.value)
 const sessionListOpen = ref(false)
 const historyPanel = ref<HTMLElement | null>(null), historyToggle = ref<HTMLButtonElement | null>(null)
 function closeHistory(restoreFocus = true) {
@@ -85,8 +88,13 @@ function scrollToLatest(force = false) {
   void nextTick(() => {
     if (!sessionId || stopped || props.active === false || selectedId.value !== sessionId || !messageList.value) return
     if (!force && !initialScrollPending && !followLatest) return
-    messageList.value.scrollTo({ top: messageList.value.scrollHeight })
-    followLatest = true; initialScrollPending = false
+    const list = messageList.value, last = list.lastElementChild
+    // Open a long answer at its question, rather than dropping the reader into its ending.
+    const top = (force || initialScrollPending) && last
+      ? list.scrollTop + last.getBoundingClientRect().top - list.getBoundingClientRect().top - 18
+      : list.scrollHeight
+    list.scrollTo({ top })
+    followLatest = list.scrollHeight - list.scrollTop - list.clientHeight <= 64; initialScrollPending = false
   })
 }
 function messageScroll(event: Event) {
@@ -223,6 +231,7 @@ function suggest(value: string) {
 }
 async function preview(value: AgentCitation) {
   if (stopped || props.active === false) return
+  conversationFocused.value = false
   referenceExpanded.value = true
   citation.value = value; playbackError.value = ''; const version = ++previewVersion
   pendingCitationPlay = version; playIntentVersion = version
@@ -245,6 +254,7 @@ function seekCitation() {
 }
 function pauseReference() { previewVersion++; pendingCitationPlay = null; playIntentVersion = null; sourcePlayer.value?.pause() }
 function toggleReference() { pauseReference(); referenceExpanded.value = !referenceExpanded.value }
+function toggleConversationFocus() { pauseReference(); conversationFocused.value = !conversationFocused.value }
 function guardPlayback(event: Event) { if (!mediaActive()) (event.currentTarget as HTMLVideoElement).pause() }
 function closePreview() { pauseReference(); citation.value = null; playbackError.value = '' }
 function previewTime() { if (sourcePlayer.value && citation.value && sourcePlayer.value.currentTime >= citation.value.end_ms / 1000) sourcePlayer.value.pause() }
@@ -262,6 +272,7 @@ onMounted(() => {
   if (panel.value) referenceObserver.observe(panel.value)
 })
 watch(selectedId, id => { initialScrollPending = !!id; followLatest = true; if (id) scrollToLatest(true) }, { flush: 'post' })
+watch(() => recentAnswer.value?.id, () => { allEvidenceVisible.value = false })
 watch(() => {
   const last = selected.value?.turns.at(-1)
   return `${selectedId.value}:${last?.id ?? ''}:${last?.state_version ?? 0}`
@@ -279,19 +290,19 @@ onBeforeUnmount(() => { stopped = true; selectionVersion++; pauseReference(); re
     <div v-if="sessionListOpen" class="agent-history-backdrop" aria-hidden="true" @click="closeHistory()"></div>
     <p v-if="error" class="message error" role="alert">{{ error }}</p><p v-if="notice" class="message notice" role="status">{{ notice }}</p>
     <p v-if="refreshError" class="agent-refresh-error" role="status">{{ refreshError }} 已有记录与输入仍保留。</p>
-    <div class="agent-layout">
+    <div class="agent-layout" :class="{ 'conversation-focused': conversationFocused && !compactReference }">
       <aside v-show="sessionListOpen" ref="historyPanel" role="dialog" aria-modal="true" @keydown="historyKey" :id="`agent-history-${jobId}`" class="agent-sessions" aria-label="视频对话列表"><div class="agent-section-heading"><h3>对话记录 · {{ sessions.length }}</h3><div class="agent-history-actions"><button class="text-button" @click="closeHistory()">关闭对话记录</button><button class="text-button" :disabled="pending" @click="refresh">刷新</button></div></div><p v-if="loading && !sessions.length" class="help">正在读取对话…</p><p v-else-if="!sessions.length" class="help">发送第一个问题，即可开始对话。</p><button v-for="session in sessions" :key="session.id" class="agent-session" :class="{ selected: selectedId === session.id }" :aria-pressed="selectedId === session.id" :disabled="pending || dirty" @click="session.id === selectedId ? closeHistory() : selectSession(session.id)"><strong>{{ session.turns[0]?.question ?? '新对话' }}</strong><small>{{ date(session.created_at) }} · {{ session.turns.length }} 轮</small></button></aside>
-      <aside ref="referenceDock" class="agent-reference" :inert="sessionListOpen ? true : undefined" aria-label="视频参考">
-        <div class="agent-reference-heading"><h3>视频参考</h3><button class="text-button agent-reference-toggle" :aria-expanded="referenceVisible" :aria-controls="`agent-reference-${jobId}`" @click="toggleReference">{{ referenceVisible ? '收起' : '展开视频' }}</button></div>
+      <aside v-show="compactReference || !conversationFocused" ref="referenceDock" class="agent-reference" :inert="sessionListOpen ? true : undefined" aria-label="视频参考">
+        <div class="agent-reference-heading"><h3><span class="agent-video-icon" aria-hidden="true">▶</span> 原视频</h3><span class="agent-reference-caption">点击原句，定位回看</span><button class="text-button agent-reference-toggle" :aria-expanded="referenceVisible" :aria-controls="`agent-reference-${jobId}`" @click="toggleReference">{{ referenceVisible ? '收起视频' : '展开视频' }}</button></div>
         <div v-show="referenceVisible" :id="`agent-reference-${jobId}`" class="agent-reference-body">
           <div class="agent-reference-video"><video ref="sourcePlayer" :src="videoUrl" controls preload="metadata" playsinline @loadedmetadata="seekCitation" @timeupdate="previewTime" @play="guardPlayback"></video></div>
           <p v-if="playbackError" class="agent-reference-help" role="status">{{ playbackError }}</p>
-          <div class="agent-evidence-heading"><h4>原句依据</h4><span v-if="recentAnswer">最近第 {{ recentAnswer.sequence }} 轮 · {{ recentCitations.length }} 条</span></div>
-          <div ref="referenceEvidence" class="agent-reference-evidence"><div v-if="citation" class="agent-current-citation"><strong>当前定位 {{ topicTime(citation.start_ms) }} → {{ topicTime(citation.end_ms) }}</strong><button class="text-button" @click="closePreview">关闭定位</button><p>{{ citation.text }}</p></div><p v-if="!recentCitations.length" class="agent-evidence-empty">{{ recentAnswer ? '最近回答未引用视频原句，仍可直接回看视频。' : '提问后，这里会列出回答引用的原句。' }}</p><button v-for="source in recentCitations" :key="source.utterance_id" class="agent-evidence-item" :class="{ selected: citation?.utterance_id === source.utterance_id }" @click="preview(source)"><span>{{ topicTime(source.start_ms) }} → {{ topicTime(source.end_ms) }}</span><p>{{ source.text }}</p></button></div>
+          <div class="agent-evidence-heading"><h4>回答引用 <span>{{ recentCitations.length }}</span></h4><button v-if="recentCitations.length > 3" class="text-button" :aria-expanded="allEvidenceVisible" :aria-controls="`agent-evidence-${jobId}`" @click="allEvidenceVisible = !allEvidenceVisible">{{ allEvidenceVisible ? '收起列表' : `查看全部 ${recentCitations.length} 条` }}</button></div>
+          <div :id="`agent-evidence-${jobId}`" ref="referenceEvidence" class="agent-reference-evidence"><div v-if="citation" class="agent-current-citation"><strong>正在回看 {{ topicTime(citation.start_ms) }} → {{ topicTime(citation.end_ms) }}</strong><button class="text-button" @click="closePreview">关闭定位</button><p>{{ citation.text }}</p></div><p v-if="!recentCitations.length" class="agent-evidence-empty">{{ recentAnswer ? '最近回答未引用视频原句，仍可直接回看视频。' : '提问后，这里会列出回答引用的原句。' }}</p><button v-for="(source, index) in visibleCitations" :key="source.utterance_id" class="agent-evidence-item" :class="{ selected: citation?.utterance_id === source.utterance_id }" :title="source.text" @click="preview(source)"><span class="agent-evidence-number" aria-hidden="true">{{ String(index + 1).padStart(2, '0') }}</span><span class="agent-evidence-copy"><span class="agent-evidence-time">{{ topicTime(source.start_ms) }} → {{ topicTime(source.end_ms) }}</span><span class="agent-evidence-text">{{ source.text }}</span></span><span class="agent-evidence-play" aria-hidden="true">▶</span></button></div>
         </div>
       </aside>
       <div class="agent-conversation" :inert="sessionListOpen ? true : undefined">
-        <div class="agent-toolbar"><h2>视频对话</h2><div class="agent-toolbar-actions"><button ref="historyToggle" class="secondary" :aria-expanded="sessionListOpen" :aria-controls="`agent-history-${jobId}`" @click="toggleHistory">对话记录 <span>{{ sessions.length }}</span></button><button class="secondary" :disabled="pending || dirty" @click="newSession">＋ 新对话</button></div></div>
+        <div class="agent-toolbar"><h2><span class="agent-ai-icon" aria-hidden="true">✦</span> 视频助手</h2><div class="agent-toolbar-actions"><button class="secondary agent-focus-toggle" :aria-pressed="conversationFocused" @click="toggleConversationFocus">{{ conversationFocused ? '并排回看' : '专注对话' }}</button><button ref="historyToggle" class="secondary" :aria-expanded="sessionListOpen" :aria-controls="`agent-history-${jobId}`" @click="toggleHistory">对话记录 <span>{{ sessions.length }}</span></button><button class="secondary" :disabled="pending || dirty" @click="newSession">＋ 新对话</button></div></div>
         <div v-if="!selected?.turns.length" class="agent-welcome"><h3>从视频里找答案</h3><p>可以先概括内容，也可以沿着已有回答继续追问。证据不足时会明确说明。</p></div>
         <ol v-else ref="messageList" class="agent-turns" aria-label="对话记录" @scroll.passive="messageScroll"><li v-for="turn in selected.turns" :key="turn.id" class="agent-turn"><div class="agent-question"><span>你的问题 · 第 {{ turn.sequence }} 轮</span><p>{{ turn.question }}</p></div><div class="agent-answer"><div class="agent-answer-heading"><strong>视频助手</strong><span class="agent-status">{{ names[turn.status] }}</span><button v-if="agentTurnActive(turn)" class="text-button" :disabled="pending" @click="cancel(turn)">{{ action === 'cancel' ? '正在取消…' : '取消本轮' }}</button></div><TextRequestProgress :progress="turn.stage.text_progress" :terminal="!agentTurnActive(turn)" /><FailureDiagnostic :diagnostic="turn.stage.diagnostic" :error-code="turn.stage.error_code" :attempt="turn.stage.attempt" />
           <template v-if="turn.result"><span class="agent-scope" :class="turn.result.answer_scope.toLowerCase()">{{ scopes[turn.result.answer_scope] }}</span><AgentAnswer class="agent-answer-text" :text="turn.result.answer" /><p v-if="turn.result.answer_scope === 'GENERAL'" class="help">这部分是通用知识补充，不能当作视频中已经说过的话。</p><p v-else-if="turn.result.answer_scope === 'INSUFFICIENT'" class="help">当前视频证据不足，可换个说法，或补充想找的具体内容。</p>
@@ -300,6 +311,7 @@ onBeforeUnmount(() => { stopped = true; selectionVersion++; pauseReference(); re
             <div v-if="turn.result.suggested_clip_instruction" class="agent-clip-suggestion"><p>{{ turn.result.suggested_clip_instruction }}</p><button class="secondary" :disabled="pending || clipTargetBusy" @click="suggest(turn.result.suggested_clip_instruction)">送到剪辑要求</button><small v-if="clipTargetBusy">请先保存或放弃剪辑区域的未提交内容。</small><small v-else>仅填入要求，你仍需在剪辑区域点击查找、核对并确认。</small></div>
           </template><p v-else class="help">{{ turn.status === 'CANCELLED' ? '本轮已取消，已有对话和视频结果仍保留。' : turn.status === 'FAILED' ? '本轮未生成可用回答。请查看原因，原转写与此前回答仍保留。' : turn.status === 'QUEUED' ? '问题已保存，正在等待执行服务。' : '正在结合视频内容查找证据并回答，进度会自动更新。' }}</p>
         </div></li></ol>
+        <div v-if="selected?.turns.length" class="agent-reading-actions"><span>当前视频 · {{ selected.turns.length }} 轮对话</span><button class="text-button" @click="scrollToLatest(true)">定位最新一轮 ↓</button></div>
         <form class="agent-compose" @submit.prevent="send">
           <div v-if="!selected?.turns.length" class="agent-examples"><button v-for="example in examples" :key="example" type="button" class="secondary" :disabled="pending || dirty" @click="chooseExample(example)">{{ example }}</button></div>
           <div class="agent-input-box"><label for="agent-question" class="visually-hidden">向视频助手提问</label><textarea id="agent-question" v-model="question" :disabled="pending" maxlength="2000" rows="2" placeholder="问问这段视频，例如：概括主要内容，列出关键观点。"></textarea>
@@ -316,33 +328,43 @@ onBeforeUnmount(() => { stopped = true; selectionVersion++; pauseReference(); re
 .agent-panel h2, .agent-panel h3, .agent-panel h4, .agent-panel p { margin: 0; }
 .agent-panel > .message, .agent-refresh-error { flex: none; max-height: 60px; overflow-y: auto; margin: 0 0 10px; padding: 9px 12px; font-size: 13px; line-height: 1.6; }
 .agent-refresh-error { color: #9a5a37; }
-.agent-layout { display: grid; grid-template-columns: min(44%, 640px) minmax(0, 1fr); gap: 16px; flex: 1; min-width: 0; min-height: 0; overflow: hidden; }
+.agent-layout { display: grid; grid-template-columns: min(42%, 600px) minmax(0, 1fr); gap: 16px; flex: 1; min-width: 0; min-height: 0; overflow: hidden; }
+.agent-layout.conversation-focused { grid-template-columns: minmax(0, 1fr); }
 .agent-reference, .agent-conversation { min-width: 0; min-height: 0; border: 1px solid #e2e8f0; border-radius: 10px; background: #fff; overflow: hidden; }
 .agent-reference { display: flex; flex-direction: column; }
-.agent-reference-heading, .agent-toolbar { display: flex; flex: none; min-height: 52px; align-items: center; justify-content: space-between; gap: 10px; padding: 9px 14px; border-bottom: 1px solid #edf1f5; }
-.agent-reference-heading h3, .agent-toolbar h2 { color: #1f2937; font-size: 15px; line-height: 1.6; font-weight: 600; white-space: nowrap; }
+.agent-reference-heading, .agent-toolbar { display: flex; flex: none; min-height: 56px; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 16px; border-bottom: 1px solid #edf1f5; }
+.agent-reference-heading h3, .agent-toolbar h2 { display: flex; align-items: center; gap: 7px; color: #1f2937; font-size: 14px; line-height: 1.6; font-weight: 650; white-space: nowrap; }
+.agent-video-icon { color: #7b8799; font-size: 11px; }
+.agent-ai-icon { display: inline-flex; align-items: center; justify-content: center; width: 26px; height: 26px; border-radius: 8px; background: #fff0e8; color: #d26a44; font-size: 20px; }
+.agent-reference-caption { margin-left: auto; color: #8491a2; font-size: 11px; }
 .agent-reference-toggle { display: none; align-items: center; min-height: 30px; color: #475569; font-size: 13px; }
-.agent-reference-body { display: flex; flex-direction: column; flex: 1; min-height: 0; min-width: 0; gap: 10px; padding: 12px; overflow: hidden; }
-.agent-reference-video { position: relative; flex: none; width: 100%; aspect-ratio: 16/9; background: #0f172a; border-radius: 6px; overflow: hidden; }
+.agent-reference-body { display: flex; flex-direction: column; flex: 1; min-height: 0; min-width: 0; gap: 0; padding: 0; overflow: hidden; }
+.agent-reference-video { position: relative; flex: none; width: 100%; aspect-ratio: 16/9; background: #101520; overflow: hidden; }
 .agent-reference-video video { position: absolute; inset: 0; display: block; width: 100%; height: 100%; object-fit: contain; }
 .agent-current-citation { display: flex; flex: none; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 4px 10px; border: 1px solid #f0d8cc; border-radius: 5px; padding: 6px 9px; background: #fff7f2; }
 .agent-current-citation strong { color: #a85635; font-size: 13px; line-height: 1.6; font-weight: 500; }
 .agent-current-citation .text-button { min-height: 28px; color: #64748b; font-size: 12px; white-space: normal; }
 .agent-current-citation > p { flex-basis: 100%; color: #334155; font-size: 14px; line-height: 1.8; white-space: pre-wrap; overflow-wrap: anywhere; }
 .agent-reference-help { flex: none; color: #9a5a37; font-size: 13px; line-height: 1.7; overflow-wrap: anywhere; }
-.agent-evidence-heading { display: flex; flex: none; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 4px 8px; padding-top: 3px; }
-.agent-evidence-heading h4 { color: #334155; font-size: 14px; line-height: 1.6; font-weight: 600; }
-.agent-evidence-heading > span { color: #64748b; font-size: 12px; }
-.agent-reference-evidence { flex: 1; min-height: 0; min-width: 0; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; scrollbar-width: thin; border-top: 1px solid #edf1f5; }
+.agent-evidence-heading { display: flex; flex: none; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 4px 8px; padding: 14px 16px 10px; }
+.agent-evidence-heading h4 { color: #334155; font-size: 13px; line-height: 1.6; font-weight: 600; }
+.agent-evidence-heading h4 > span { display: inline-block; min-width: 20px; margin-left: 4px; padding: 1px 5px; border-radius: 4px; color: #7b8799; background: #f1f4f8; font-size: 11px; text-align: center; }
+.agent-evidence-heading .text-button { font-size: 12px; }
+.agent-reference-evidence { flex: 1; min-height: 0; min-width: 0; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; scrollbar-width: thin; padding: 0 12px 12px; }
 .agent-evidence-empty { padding: 12px 7px; color: #64748b; font-size: 13px; line-height: 1.8; }
-.agent-evidence-item { display: block; width: 100%; min-width: 0; border: 0; border-bottom: 1px solid #edf1f5; border-left: 2px solid transparent; border-radius: 0; padding: 10px 8px; background: #fff; text-align: left; color: #334155; }
+.agent-evidence-item { display: flex; align-items: flex-start; gap: 10px; width: 100%; min-width: 0; border: 1px solid #edf1f5; border-radius: 7px; margin-top: 8px; padding: 11px 10px; background: #fff; text-align: left; color: #334155; }
 .agent-evidence-item:hover { background: #f8fafc; }
-.agent-evidence-item.selected, .agent-evidence-item.selected:hover { border-left-color: #e47650; background: #fff7f2; }
-.agent-evidence-item > span { color: #64748b; font-size: 12px; font-variant-numeric: tabular-nums; }
-.agent-evidence-item > p { margin-top: 5px; font-size: 14px; line-height: 1.8; white-space: pre-wrap; overflow-wrap: anywhere; }
+.agent-evidence-item.selected, .agent-evidence-item.selected:hover { border-color: #efc6b5; background: #fff7f2; }
+.agent-evidence-number { flex: none; color: #a0aaba; font-size: 11px; line-height: 20px; font-variant-numeric: tabular-nums; }
+.agent-evidence-copy { min-width: 0; flex: 1; }
+.agent-evidence-time { display: block; color: #a35d42; font-size: 11px; line-height: 20px; font-variant-numeric: tabular-nums; }
+.agent-evidence-text { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; margin-top: 4px; color: #475569; font-size: 13px; line-height: 1.7; overflow-wrap: anywhere; }
+.agent-evidence-play { flex: none; color: #bdc6d2; font-size: 10px; line-height: 20px; }
 .agent-conversation { display: flex; flex-direction: column; }
-.agent-toolbar-actions { display: flex; flex: none; align-items: center; gap: 8px; }
-.agent-toolbar-actions button { min-height: 34px; padding: 7px 10px; color: #475569; background: #fff; font-size: 12px; line-height: 1.6; white-space: nowrap; }
+.agent-toolbar-actions { display: flex; flex: none; align-items: center; gap: 6px; }
+.agent-toolbar-actions button { min-height: 32px; padding: 6px 9px; color: #64748b; background: #fff; font-size: 12px; line-height: 1.6; white-space: nowrap; }
+.agent-toolbar-actions .agent-focus-toggle { border-color: transparent; background: #f5f7fa; }
+.agent-focus-toggle[aria-pressed=true] { color: #b95431; background: #fff0e8; }
 .agent-toolbar-actions button > span { margin-left: 4px; color: #64748b; }
 .agent-history-backdrop { position: absolute; inset: 0; z-index: 9; background: #0f172a20; }
 .agent-sessions { position: absolute; top: 65px; right: 24px; z-index: 10; width: min(340px, calc(100% - 32px)); max-height: min(420px, calc(100% - 90px)); overflow-y: auto; overscroll-behavior: contain; border: 1px solid #dce4ed; border-radius: 8px; background: #fff; padding: 14px; box-shadow: 0 12px 36px #0f172a20; }
@@ -354,25 +376,25 @@ onBeforeUnmount(() => { stopped = true; selectionVersion++; pauseReference(); re
 .agent-session strong { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; font-size: 13px; font-weight: 500; line-height: 1.6; }
 .agent-session small { display: block; margin-top: 4px; color: #64748b; font-size: 12px; }
 .agent-session.selected, .agent-session.selected:hover { border-color: #f0c9ba; background: #fff4ee; }
-.agent-turns, .agent-welcome { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; padding: 18px max(20px, calc((100% - 820px) / 2)); margin: 0; list-style: none; scrollbar-width: thin; }
+.agent-turns, .agent-welcome { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; padding: 22px max(24px, calc((100% - 740px) / 2)); margin: 0; list-style: none; scrollbar-width: thin; }
 .agent-welcome { display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; color: #64748b; }
 .agent-welcome h3 { margin-bottom: 10px; color: #1e293b; font-size: 20px; font-weight: 600; }
 .agent-welcome p { max-width: 380px; font-size: 14px; line-height: 1.8; }
 .agent-turn { margin: 0 0 26px; }
 .agent-turn:last-child { margin-bottom: 0; }
-.agent-question { width: fit-content; max-width: 94%; margin-left: auto; padding: 11px 14px; border-radius: 10px 10px 3px 10px; background: #f1f5f9; }
+.agent-question { width: fit-content; max-width: 94%; margin-left: auto; padding: 12px 16px; border-radius: 12px 12px 3px 12px; background: #f3f5f8; }
 .agent-question span { display: block; margin-bottom: 5px; color: #64748b; font-size: 12px; }
 .agent-question p, .agent-clip-suggestion > p { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.85; font-size: 15px; }
 .agent-answer { padding-top: 18px; }
-.agent-answer-text { font-size: 15px; line-height: 1.85; }
+.agent-answer-text { font-size: 14px; line-height: 1.9; }
 .agent-answer-heading { margin-bottom: 10px; }
 .agent-answer-heading > strong { font-size: 14px; font-weight: 600; }
 .agent-status { color: #64748b; font-size: 12px; }
 .agent-scope { display: inline-block; margin-bottom: 8px; padding: 3px 7px; border-radius: 4px; color: #55745c; background: #edf5ef; font-size: 12px; }
 .agent-scope.general { background: #eff6ff; color: #526985; }
 .agent-scope.insufficient { background: #fff7ed; color: #9a6238; }
-.agent-citations, .agent-tools { margin: 12px 0; border: 1px solid #e2e8f0; border-radius: 6px; color: #64748b; font-size: 13px; }
-.agent-citations summary, .agent-tools summary { padding: 9px 11px; cursor: pointer; color: #475569; }
+.agent-citations, .agent-tools { margin: 8px 0; border: 1px solid #edf1f5; border-radius: 6px; color: #64748b; font-size: 12px; background: #fafbfc; }
+.agent-citations summary, .agent-tools summary { padding: 8px 10px; cursor: pointer; color: #64748b; }
 .agent-citation { display: block; width: calc(100% - 20px); padding: 9px 10px; margin: 0 10px 10px; border: 1px solid #e2e8f0; border-radius: 5px; background: #fff; text-align: left; color: #334155; }
 .agent-citation span { color: #64748b; font-size: 12px; }
 .agent-citation p { margin-top: 5px; font-size: 14px; line-height: 1.8; overflow-wrap: anywhere; }
@@ -385,14 +407,16 @@ onBeforeUnmount(() => { stopped = true; selectionVersion++; pauseReference(); re
 .agent-clip-suggestion { margin-top: 12px; border: 1px solid #e2e8f0; border-radius: 6px; padding: 11px; background: #f8fafc; }
 .agent-clip-suggestion > p { margin-bottom: 9px; }
 .agent-clip-suggestion small { display: block; margin-top: 8px; color: #64748b; font-size: 12px; line-height: 1.7; }
-.agent-compose { position: relative; flex: none; width: min(876px, 100%); margin: 0 auto; padding: 12px 20px 16px; border-top: 1px solid #f1f5f9; background: #fff; }
-.agent-input-box { border: 1px solid #d8e0e9; border-radius: 9px; padding: 10px 12px; background: #fff; }
+.agent-reading-actions { display: flex; flex: none; align-items: center; justify-content: space-between; gap: 8px; padding: 7px 20px; border-top: 1px solid #edf1f5; color: #94a3b8; font-size: 11px; }
+.agent-reading-actions .text-button { padding: 3px 0; color: #64748b; font-size: 11px; }
+.agent-compose { position: relative; flex: none; width: min(820px, 100%); margin: 0 auto; padding: 6px 16px 12px; background: #fff; }
+.agent-input-box { border: 1px solid #d8e0e9; border-radius: 9px; padding: 8px 10px; background: #fff; }
 .agent-input-box:focus-within { border-color: #d49a80; box-shadow: 0 0 0 2px #fcf0e9; }
-.agent-compose textarea { display: block; width: 100%; height: 64px; min-height: 50px; max-height: 120px; resize: vertical; margin: 0; border: 0; padding: 0; color: #1e293b; background: transparent; font: inherit; font-size: 14px; line-height: 1.8; }
+.agent-compose textarea { display: block; width: 100%; height: 44px; min-height: 40px; max-height: 100px; resize: vertical; margin: 0; border: 0; padding: 0; color: #1e293b; background: transparent; font: inherit; font-size: 14px; line-height: 1.8; }
 .agent-compose textarea:focus { outline: 0; }
 .agent-compose textarea::placeholder { color: #8491a2; }
 .agent-compose-actions { position: relative; margin-top: 8px; gap: 8px 10px; }
-.agent-compose-actions .primary { min-height: 38px; margin-left: auto; padding: 9px 14px; font-size: 13px; line-height: 1.5; }
+.agent-compose-actions .primary { min-height: 34px; margin-left: auto; padding: 7px 12px; font-size: 13px; line-height: 1.5; }
 .agent-character-count { color: #64748b; font-size: 12px; }
 .agent-options { position: relative; margin-right: auto; color: #64748b; font-size: 12px; }
 .agent-options summary { padding: 5px 0; cursor: pointer; }
@@ -407,17 +431,19 @@ onBeforeUnmount(() => { stopped = true; selectionVersion++; pauseReference(); re
 .agent-compose > .help { margin-top: 8px; font-size: 12px; }
 .agent-panel :deep(.text-recovery) { color: #475569; background: #f8fafc; border-color: #cbd5e1; }
 @container agent (max-width:960px) {
-  .agent-layout { display: flex; flex-direction: column; gap: 10px; overflow-y: auto; }
-  .agent-reference { flex: 0 1 auto; max-height: max(46px, min(300px, calc(100% - 240px))); }
+  .agent-layout { display: flex; flex-direction: column; gap: 10px; overflow: hidden; }
+  .agent-reference { flex: 0 1 auto; max-height: max(46px, min(260px, calc(100% - 280px))); }
   .agent-reference-heading { min-height: 44px; padding: 6px 12px; }
+  .agent-reference-caption, .agent-focus-toggle { display: none; }
   .agent-reference-toggle { display: inline-flex; }
-  .agent-reference-body { display: block; overflow-y: auto; padding: 10px 12px; }
+  .agent-reference-body { display: block; overflow-y: auto; padding: 0; }
   .agent-reference-video { max-height: 200px; }
-  .agent-current-citation, .agent-evidence-heading { margin-top: 10px; }
-  .agent-reference-evidence { overflow: visible; margin-top: 8px; scrollbar-gutter: auto; }
-  .agent-conversation { flex: 1 0 240px; min-height: 240px; }
+  .agent-current-citation { margin-top: 10px; }
+  .agent-reference-evidence { overflow: visible; scrollbar-gutter: auto; }
+  .agent-conversation { flex: 1; min-height: 240px; }
   .agent-toolbar { padding: 8px 12px; }
   .agent-turns, .agent-welcome { padding: 16px; }
+  .agent-reading-actions { padding-inline: 12px; }
   .agent-compose { max-height: calc(100% - 52px); overflow-y: auto; padding: 10px 12px 12px; }
   .agent-options[open] { flex-basis: 100%; margin-right: 0; }
   .agent-options-body { position: static; width: 100%; max-width: none; margin-top: 8px; padding: 12px; box-shadow: none; }
@@ -438,5 +464,18 @@ onBeforeUnmount(() => { stopped = true; selectionVersion++; pauseReference(); re
 @media (max-height:650px) {
   .agent-compose { padding-bottom: 10px; }
   .agent-compose textarea { height: 50px; max-height: 80px; }
+}
+@media (max-height:600px) {
+  .agent-reference-body { overflow-y: auto; }
+  .agent-reference-evidence { flex: none; overflow: visible; }
+}
+@media (max-height:420px) {
+  @container agent (max-width:960px) {
+    .agent-layout { overflow-y: auto; }
+    .agent-reference { flex: none; max-height: 180px; }
+    .agent-conversation { flex: none; min-height: 0; overflow: visible; }
+    .agent-turns, .agent-welcome { flex: none; min-height: 120px; max-height: 200px; }
+    .agent-compose { max-height: none; overflow: visible; }
+  }
 }
 </style>
