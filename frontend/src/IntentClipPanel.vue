@@ -8,6 +8,8 @@ import CaptionPanel from './CaptionPanel.vue'
 import { CaptionBatchError, prepareCaptionBatch } from './captions'
 import { newestSnapshot, parseExportSnapshot, SnapshotError } from './snapshotStream'
 import { topicTime } from './topics'
+import { intentPreviewParts } from './intentPreviewParts'
+import { SequencePreview, type SequencePreviewPart, type SequencePreviewState } from './sequencePreview'
 import { editIntentBoundary, intentCanCancel, intentCanConfirm, intentCanExport, intentCanResume, intentOutputValidation, intentPayload, intentResumeReceipt,
   IntentReadScope, IntentResponseError, newestIntentSnapshot, parseIntentSnapshot, refreshIntentEvidence,
   parseResumedIntentSnapshot, type IntentOutput, type IntentPart, type IntentResumeReceipt, type IntentSnapshot } from './intentClips'
@@ -30,6 +32,20 @@ const previewSection = ref<HTMLElement | null>(null)
 const intentPanel = ref<HTMLElement | null>(null), sourceContextOpen = ref(true)
 let contextObserver: ResizeObserver | undefined, compactContext = false
 let viewChosen = false, defaultViewRequest = '', navigationVersion = 0
+const sequenceState = ref<SequencePreviewState | null>(null), preparingSequence = ref(''), sequenceFeedback = ref('')
+const sequenceDescription = ref<{ id: string; title: string; partIndex?: number } | null>(null)
+const previewPageVisible = ref(!document.hidden)
+interface PreparedSequence {
+  generation: number; requestId: string; selection: number; navigation: number; sourceUrl: string
+  outputId: string; signature: string; id: string; parts: SequencePreviewPart[]; player: HTMLVideoElement
+}
+let preparedSequence: PreparedSequence | null = null, sequencePreparationVersion = 0, sequencePreparationTimer: number | undefined
+const sequence = new SequencePreview((state, reason) => {
+  const previous = sequenceState.value
+  sequenceState.value = state
+  if (reason === 'finished' && previous?.id === sequenceDescription.value?.id) sequenceFeedback.value = sequenceDescription.value?.partIndex === undefined ? '该目标的区间回看已结束。' : '本段回看已结束。'
+  else if (reason === 'failed') sequenceFeedback.value = '区间预览暂时未能播放。可先点击原视频播放按钮，再重试预览。'
+})
 const scope = new IntentReadScope()
 let stopped = false, refreshing = false, timer: number | undefined, selectionVersion = 0, focusVersion = 0
 let pendingCreate: { input: string; key: string } | null = null
@@ -52,6 +68,11 @@ const primaryAction = computed(() => planDirty.value
   : confirmed.value
     ? { label: action.value === 'export' ? '正在创建…' : '生成独立 MP4', enabled: canExport.value, run: exportPlan }
     : { label: action.value === 'confirm' ? '正在确认…' : '确认所选目标', enabled: canConfirm.value, run: confirm })
+const sequenceOptions = computed(() => new Map(outputs.value.map(output => [output.output_id, {
+  all: snapshot.value ? intentPreviewParts(output, snapshot.value.utterances, snapshot.value.source.duration_ms) : null,
+  parts: output.parts.map((_, index) => snapshot.value ? intentPreviewParts(output, snapshot.value.utterances, snapshot.value.source.duration_ms, index) : null),
+}])))
+const outputPartsSignature = computed(() => JSON.stringify(outputs.value.map(output => ({ id: output.output_id, status: output.status, parts: output.parts }))))
 const names: Record<string, string> = { QUEUED: '等待执行', RUNNING: '正在查找', PLAN_READY: '候选已生成', FAILED: '执行失败', CANCELLED: '已取消',
   FOUND: '已找到证据', NOT_FOUND: '未找到', NEEDS_REVIEW: '需进一步核对', READY: '等待领取', BLOCKED: '等待前序',
   RETRY_WAIT: '等待重试', SUCCEEDED: '已完成', PARTIAL_FAILED: '部分失败', SKIPPED: '已跳过' }
@@ -302,7 +323,76 @@ function removePart(output: IntentOutput, index: number) { output.parts.splice(i
 function unexclude(output: IntentOutput, index: number) { output.excluded.splice(index, 1) }
 function sourceText(id: string) { return snapshot.value?.utterances.find(value => value.utterance_id === id)?.text ?? '原句不可用' }
 function sourceTime(id: string) { return snapshot.value?.utterances.find(value => value.utterance_id === id)?.start_ms ?? -1 }
+function sequenceId(output: IntentOutput, partIndex?: number) { return partIndex === undefined ? `goal:${output.output_id}` : `part:${output.output_id}:${partIndex}` }
+function sequenceSelected(output: IntentOutput, partIndex?: number) {
+  const id = sequenceId(output, partIndex)
+  return sequenceState.value?.id === id || preparingSequence.value === id
+}
+function partsForPreview(output: IntentOutput, partIndex?: number) {
+  const options = sequenceOptions.value.get(output.output_id)
+  return partIndex === undefined ? options?.all ?? null : options?.parts[partIndex] ?? null
+}
+function canPreviewSequence(output: IntentOutput, partIndex?: number) { return previewPageVisible.value && !document.hidden && !pending.value && !!partsForPreview(output, partIndex) && mediaActive('review') }
+function stopSequencePreview(feedback = '') {
+  preparedSequence = null; preparingSequence.value = ''; sequencePreparationVersion++
+  window.clearTimeout(sequencePreparationTimer); sequencePreparationTimer = undefined
+  sequence.cancel(); sequenceFeedback.value = feedback
+}
+function previewSignature(output: IntentOutput) { return JSON.stringify({ id: output.output_id, status: output.status, parts: output.parts }) }
+function preparationCurrent(value: PreparedSequence) {
+  const output = outputs.value.find(output => output.output_id === value.outputId)
+  return preparedSequence === value && value.generation === sequencePreparationVersion
+    && validOperation(value.requestId, value.selection) && navigationVersion === value.navigation
+    && props.videoUrl === value.sourceUrl && sourcePlayer.value === value.player && sourceContextOpen.value && previewPageVisible.value && !document.hidden
+    && mediaActive('review') && !pending.value && !!output && previewSignature(output) === value.signature
+}
+async function startPreparedSequence(value: PreparedSequence) {
+  await nextTick()
+  if (preparedSequence !== value) return
+  if (!preparationCurrent(value)) { stopSequencePreview(); return }
+  if (value.player.readyState < 1) return
+  preparedSequence = null; preparingSequence.value = ''
+  window.clearTimeout(sequencePreparationTimer); sequencePreparationTimer = undefined
+  if (compactContext) value.player.scrollIntoView({ block: 'nearest' })
+  const result = await sequence.start(value.player, { id: value.id, parts: value.parts })
+  if (result === 'failed' && sequencePreparationVersion === value.generation) sequenceFeedback.value = '区间预览暂时未能播放。可先点击原视频播放按钮，再重试预览。'
+}
+async function previewSequence(output: IntentOutput, partIndex?: number) {
+  if (sequenceSelected(output, partIndex)) { stopSequencePreview('区间预览已停止。'); return }
+  const parts = partsForPreview(output, partIndex), player = sourcePlayer.value
+  if (!canPreviewSequence(output, partIndex) || !parts || !player) return
+  stopSequencePreview(); sourceContextOpen.value = true
+  const id = sequenceId(output, partIndex)
+  sequenceDescription.value = { id, title: output.title, partIndex }
+  preparingSequence.value = id
+  const prepared: PreparedSequence = {
+    generation: sequencePreparationVersion, requestId: selectedId.value, selection: selectionVersion,
+    navigation: navigationVersion, sourceUrl: props.videoUrl, outputId: output.output_id,
+    signature: previewSignature(output), id, parts: parts.map(part => ({ ...part })), player,
+  }
+  preparedSequence = prepared
+  sequencePreparationTimer = window.setTimeout(() => {
+    if (preparedSequence === prepared) stopSequencePreview('原视频还未准备好。请确认原视频可播放后，再试一次区间预览。')
+  }, 15000)
+  await startPreparedSequence(prepared)
+}
+function sourceMetadata(event: Event) {
+  if (preparedSequence?.player === event.currentTarget) void startPreparedSequence(preparedSequence)
+}
+function sourceSequenceTime(event: Event) { sequence.timeUpdate(event.currentTarget as HTMLVideoElement) }
+function sourceSequenceSeeking(event: Event) {
+  if (preparedSequence?.player === event.currentTarget) stopSequencePreview()
+  sequence.seeking(event.currentTarget as HTMLVideoElement)
+}
+function sourceSequenceError(event: Event) {
+  if (event.currentTarget === sourcePlayer.value && sourcePlayer.value?.error) stopSequencePreview('原视频暂时无法播放。方案修改仍保留，可以稍后重试。')
+}
+function updatePreviewVisibility() {
+  previewPageVisible.value = !document.hidden
+  if (!previewPageVisible.value && (preparedSequence || sequenceState.value)) stopSequencePreview()
+}
 async function locate(id: string) {
+  stopSequencePreview()
   const start = sourceTime(id)
   if (start < 0 || !mediaActive('review')) return
   const requestId = selectedId.value, version = selectionVersion, navigation = navigationVersion
@@ -320,7 +410,7 @@ function goal(output: IntentOutput) { return snapshot.value?.plan?.goals.find(va
 function duration(output: IntentOutput) { return output.parts.reduce((sum, part) => sum + Math.max(0, part.end_ms - part.start_ms), 0) }
 function date(value: string) { return new Date(value).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) }
 function unload(event: BeforeUnloadEvent) { if (dirty.value || pending.value) { event.preventDefault(); event.returnValue = '' } }
-function pauseMedia() { sourcePlayer.value?.pause(); exportPlayer.value?.pause() }
+function pauseMedia() { stopSequencePreview(); sourcePlayer.value?.pause(); exportPlayer.value?.pause() }
 function mediaActive(view: IntentView) { return props.active !== false && !stopped && !(captionTarget.value && intentView.value === 'deliveries') && !historyOpen.value && intentView.value === view }
 function guardPlayback(event: Event) {
   const player = event.currentTarget as HTMLVideoElement
@@ -328,6 +418,7 @@ function guardPlayback(event: Event) {
 }
 function setView(view: IntentView, userInitiated = true) {
   if (view !== 'compose' && !snapshot.value) return
+  if (preparedSequence) stopSequencePreview()
   if (userInitiated) { viewChosen = true; navigationVersion++ }
   intentView.value = view
   if (!userInitiated) {
@@ -389,10 +480,13 @@ async function downloadBatchPackage(batch: ExportJob) {
   } finally { if (packageBusyId.value === batch.id) packageBusyId.value = '' }
 }
 watch(intentView, () => { focusVersion++; pauseMedia() }, { flush: 'sync' })
-watch(sourceContextOpen, open => { if (!open) sourcePlayer.value?.pause() }, { flush: 'sync' })
+watch(sourceContextOpen, open => { if (!open) { stopSequencePreview(); sourcePlayer.value?.pause() } }, { flush: 'sync' })
+watch(outputPartsSignature, () => { stopSequencePreview() }, { flush: 'sync' })
+watch(() => props.videoUrl, () => { pauseMedia() }, { flush: 'sync' })
+watch(pending, value => { if (value) stopSequencePreview() }, { flush: 'sync' })
 watch(() => props.active, value => { if (value === false) { focusVersion++; closeHistory(false); pauseMedia() } }, { flush: 'sync' })
 onMounted(() => {
-  window.addEventListener('beforeunload', unload); void poll()
+  window.addEventListener('beforeunload', unload); document.addEventListener('visibilitychange', updatePreviewVisibility); updatePreviewVisibility(); void poll()
   contextObserver = new ResizeObserver(entries => {
     const width = entries[0]?.contentRect.width
     if (stopped || !width) return
@@ -401,7 +495,7 @@ onMounted(() => {
   })
   if (intentPanel.value) contextObserver.observe(intentPanel.value)
 })
-onBeforeUnmount(() => { stopped = true; selectionVersion++; focusVersion++; pauseMedia(); contextObserver?.disconnect(); scope.dispose(); window.clearTimeout(timer); window.removeEventListener('beforeunload', unload) })
+onBeforeUnmount(() => { stopped = true; selectionVersion++; focusVersion++; pauseMedia(); contextObserver?.disconnect(); scope.dispose(); window.clearTimeout(timer); window.removeEventListener('beforeunload', unload); document.removeEventListener('visibilitychange', updatePreviewVisibility) })
 </script>
 
 <template>
@@ -426,7 +520,9 @@ onBeforeUnmount(() => { stopped = true; selectionVersion++; focusVersion++; paus
           <div v-if="snapshot" class="intent-review-layout">
             <aside class="intent-context" aria-label="剪辑原视频与执行信息">
               <details class="intent-source-details" :open="sourceContextOpen" @toggle="sourceContextOpen = ($event.target as HTMLDetailsElement).open"><summary>回看原视频 <span>{{ sourceContextOpen ? '收起' : '展开' }}</span></summary>
-              <video ref="sourcePlayer" :src="videoUrl" controls preload="metadata" playsinline class="intent-source" @play="guardPlayback"></video>
+              <video ref="sourcePlayer" :src="videoUrl" controls preload="metadata" playsinline class="intent-source" @play="guardPlayback" @loadedmetadata="sourceMetadata" @timeupdate="sourceSequenceTime" @playing="sourceSequenceTime" @seeking="sourceSequenceSeeking" @seeked="sequence.seeked($event.currentTarget as HTMLVideoElement)" @pause="sequence.pause($event.currentTarget as HTMLVideoElement)" @ended="sequence.ended($event.currentTarget as HTMLVideoElement)" @ratechange="sequence.rateChange($event.currentTarget as HTMLVideoElement)" @error="sourceSequenceError"></video>
+              <div v-if="preparingSequence || sequenceState" class="intent-sequence-preview"><div class="intent-sequence-heading"><strong>{{ sequenceDescription?.title }}</strong><button class="text-button" @click="stopSequencePreview('区间预览已停止。')">停止预览</button></div><p role="status">{{ preparingSequence ? '正在准备原视频…' : sequenceDescription?.partIndex !== undefined ? `正在回看保留第 ${sequenceDescription.partIndex + 1} 段` : `正在回看第 ${(sequenceState?.part_index ?? 0) + 1} / ${sequenceState?.part_count ?? 1} 段` }}</p><template v-if="sequenceState"><progress :value="sequenceState.played_ms" :max="sequenceState.total_ms" aria-label="目标区间预览进度" :aria-valuetext="`${topicTime(sequenceState.played_ms)} / ${topicTime(sequenceState.total_ms)}`"></progress><span class="intent-sequence-time">{{ topicTime(sequenceState.played_ms) }} / {{ topicTime(sequenceState.total_ms) }} · 当前 {{ topicTime(sequenceState.start_ms) }} → {{ topicTime(sequenceState.end_ms) }}</span></template><small>浏览器按原视频区间回看，正式拼接以导出文件为准。</small></div>
+              <p v-if="sequenceFeedback" class="intent-sequence-feedback" role="status">{{ sequenceFeedback }}</p>
               <p class="help">点击候选原句可定位回看；多段内容按所列顺序拼接。</p>
               <details class="intent-original-details"><summary>本次剪辑要求</summary><p class="intent-original">{{ snapshot.instruction }}</p></details>
               </details>
@@ -451,11 +547,11 @@ onBeforeUnmount(() => { stopped = true; selectionVersion++; focusVersion++; paus
           <p v-if="unresolved" class="intent-warning">有 {{ unresolved }} 个目标未找到充分证据，不能勾选导出。你可以只确认已经核对的目标，或另建更明确的请求。</p>
           <datalist :id="`intent-utterances-${jobId}`"><option v-for="utterance in snapshot.utterances" :key="utterance.utterance_id" :value="utterance.utterance_id">{{ topicTime(utterance.start_ms) }} {{ utterance.text.slice(0, 60) }}</option></datalist>
           <article v-for="(output, index) in outputs" :key="output.output_id" class="intent-output">
-            <div class="intent-output-heading"><label><input v-model="output.enabled" type="checkbox" :disabled="pending || output.status !== 'FOUND'" :aria-label="`选择剪辑目标 ${goal(output)}`">目标 {{ index + 1 }}：{{ goal(output) }}</label><span>{{ names[output.status] }}</span></div>
+            <div class="intent-output-heading"><label><input v-model="output.enabled" type="checkbox" :disabled="pending || output.status !== 'FOUND'" :aria-label="`选择剪辑目标 ${goal(output)}`">目标 {{ index + 1 }}：{{ goal(output) }}</label><div class="intent-output-actions"><span>{{ names[output.status] }}</span><button class="secondary" :disabled="!canPreviewSequence(output)" :aria-label="`${sequenceSelected(output) ? '停止预览' : '预览'}目标 ${index + 1} 全部区间`" @click="previewSequence(output)">{{ sequenceSelected(output) ? '停止预览' : '预览全部区间' }}</button></div></div>
             <p class="intent-reason">{{ output.reason }}</p>
             <label class="intent-title-label">成片标题<input v-model="output.title" maxlength="120" :disabled="pending" :aria-label="`剪辑标题 ${index + 1}`"></label>
             <div v-for="(part, partIndex) in output.parts" :key="partIndex" class="intent-part">
-              <div class="intent-part-label"><b>保留第 {{ partIndex + 1 }} 段</b><button class="text-button" :disabled="pending" @click="locate(part.start_utterance_id)">定位原视频 ↗</button></div>
+              <div class="intent-part-label"><b>保留第 {{ partIndex + 1 }} 段</b><div class="intent-part-actions"><button class="text-button" :disabled="!canPreviewSequence(output, partIndex)" :aria-label="`${sequenceSelected(output, partIndex) ? '停止预览' : '预览'}目标 ${index + 1} 第 ${partIndex + 1} 段`" @click="previewSequence(output, partIndex)">{{ sequenceSelected(output, partIndex) ? '停止本段' : '预览本段' }}</button><button class="text-button" :disabled="pending" @click="locate(part.start_utterance_id)">定位原视频 ↗</button></div></div>
               <details class="intent-part-editor"><summary>调整起止原句</summary><div class="intent-boundaries"><label>起始原句<input :value="part.start_utterance_id" :list="`intent-utterances-${jobId}`" :disabled="pending" :aria-label="`目标 ${index + 1} 第 ${partIndex + 1} 段起始原句`" @input="editBoundary(output, partIndex, 'start_utterance_id', $event)"></label><label>结束原句<input :value="part.end_utterance_id" :list="`intent-utterances-${jobId}`" :disabled="pending" :aria-label="`目标 ${index + 1} 第 ${partIndex + 1} 段结束原句`" @input="editBoundary(output, partIndex, 'end_utterance_id', $event)"></label></div></details>
               <p class="help">{{ topicTime(part.start_ms) }} → {{ topicTime(part.end_ms) }}</p><p class="intent-quote">{{ sourceText(part.start_utterance_id) }}<template v-if="part.end_utterance_id !== part.start_utterance_id"> … {{ sourceText(part.end_utterance_id) }}</template></p>
               <button class="text-button intent-remove" :disabled="pending" @click="removePart(output, partIndex)">移除此段</button>
