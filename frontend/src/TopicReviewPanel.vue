@@ -218,12 +218,16 @@ onBeforeUnmount(() => { stopped = true; version++; preview.cancel(); player.valu
         <p v-if="validation" class="topic-validation" role="alert">{{ validation }}</p>
         <footer class="topic-savebar"><div><b>{{ dirty ? '修改尚未保存' : `当前修订 r${review.revision}` }}</b><small>{{ enabledCount ? `已选 ${enabledCount} 段；确认后可创建切分任务。` : '请勾选需要切分的话题。' }}</small></div><button class="secondary" :disabled="pending || !dirty || !!validation" @click="save">保存修订</button><button class="primary" :disabled="pending || dirty || !!validation || !enabledCount || review.status === 'CONFIRMED'" @click="confirm">{{ review.status === 'CONFIRMED' ? '本版已确认' : '确认所选片段' }}</button></footer>
       </div>
-      <div v-show="reviewView === 'exports'" :id="`topic-export-view-${jobId}`" class="topic-exports-page" role="tabpanel" :aria-labelledby="`topic-export-tab-${jobId}`"><div v-if="review.confirmed_revisions.length" class="topic-download"><label>留档版本 <select v-model.number="downloadRevision" aria-label="下载话题确认版本" :disabled="pending"><option v-for="revision in review.confirmed_revisions" :key="revision" :value="revision">r{{ revision }}</option></select></label><button class="text-button" :disabled="pending || downloadRevision === null" @click="downloadConfirmed">下载话题 JSON ↓</button></div><p v-if="dirty" class="topic-export-hint">审核页的未保存修改仍保留。这里查看的是已确认版本与已有成片。</p><ExportPanel ref="exportEditor" :key="review.job_id" :job-id="review.job_id" :confirmed-revisions="review.confirmed_revisions" :current-revision="review.revision" :dirty="dirty" :active="props.active && reviewView === 'exports'" analysis-mode="topics" /></div>
+      <div v-show="reviewView === 'exports'" :id="`topic-export-view-${jobId}`" class="topic-exports-page" role="tabpanel" :aria-labelledby="`topic-export-tab-${jobId}`">
+        <p v-if="dirty" class="topic-export-hint">审核页的未保存修改仍保留。这里查看的是已确认版本与已有成片。</p>
+        <ExportPanel ref="exportEditor" :key="review.job_id" :job-id="review.job_id" :confirmed-revisions="review.confirmed_revisions" :current-revision="review.revision" :dirty="dirty" :active="props.active && reviewView === 'exports'" analysis-mode="topics" />
+        <details v-if="review.confirmed_revisions.length" class="topic-archive"><summary>审核版本与 JSON 留档</summary><div class="topic-download"><label>留档版本 <select v-model.number="downloadRevision" aria-label="下载话题确认版本" :disabled="pending"><option v-for="revision in review.confirmed_revisions" :key="revision" :value="revision">r{{ revision }}</option></select></label><button class="text-button" :disabled="pending || downloadRevision === null" @click="downloadConfirmed">下载话题 JSON ↓</button></div></details>
+      </div>
     </template>
   </section>
 </template>
 <style scoped>
-.topic-review.panel { container: topic-review / inline-size; display: flex; flex-direction: column; height: 100%; min-height: 0; min-width: 0; margin: 0; padding: 0; overflow: hidden; border: 0; border-radius: 0; box-shadow: none; background: #fff; color: #182230; font-size: 14px; }
+.topic-review.panel { container: topic-review / inline-size; display: flex; flex-direction: column; height: 100%; min-height: 0; min-width: 0; margin: 0; padding: 0; overflow: hidden; border: 1px solid #e2e8f0; border-radius: 10px; box-shadow: 0 2px 6px #172b4d03; background: #fff; color: #182230; font-size: 14px; }
 .topic-toolbar { flex: none; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 0 14px; min-width: 0; padding: 0 12px; border-bottom: 1px solid #e6e9ed; }
 .topic-view-switch { display: flex; align-items: center; gap: 20px; min-width: 0; }
 .topic-view-switch > button { padding: 11px 0 9px; border: 0; border-bottom: 2px solid transparent; border-radius: 0; background: none; color: #657181; font: inherit; white-space: nowrap; }
@@ -238,8 +242,8 @@ onBeforeUnmount(() => { stopped = true; version++; preview.cancel(); player.valu
 .topic-review > .empty { margin: 0; padding: 24px 12px; }
 .topic-edit-page { flex: 1; display: flex; flex-direction: column; min-height: 0; min-width: 0; overflow: hidden; }
 .topic-review-main { display: grid; grid-template-columns: minmax(0, .95fr) minmax(0, 1.05fr); gap: 16px; flex: 1; min-height: 0; min-width: 0; padding: 12px 12px 10px; overflow: hidden; }
-.topic-media-column { display: flex; flex-direction: column; gap: 8px; min-width: 0; min-height: 0; overflow: hidden; }
-.topic-player { position: relative; flex: .95 1 0; min-height: 0; width: 100%; background: #182230; border-radius: 4px; overflow: hidden; }
+.topic-media-column { display: flex; flex-direction: column; gap: 8px; min-width: 0; min-height: 0; overflow-x: hidden; overflow-y: auto; }
+.topic-player { position: relative; flex: 1 1 0; min-height: 120px; width: 100%; background: #182230; border-radius: 6px; overflow: hidden; }
 .topic-player video { position: absolute; inset: 0; display: block; width: 100%; height: 100%; max-height: none; background: #182230; object-fit: contain; }
 .topic-playback-meta { flex: none; min-width: 0; }
 .topic-timeline { position: relative; height: 16px; margin: 0 0 5px; background: #f0f2f5; border-radius: 3px; overflow: hidden; }
@@ -249,8 +253,8 @@ onBeforeUnmount(() => { stopped = true; version++; preview.cancel(); player.valu
 .timeline-labels { display: flex; justify-content: space-between; gap: 6px; color: #74808f; font-size: 12px; font-variant-numeric: tabular-nums; line-height: 1.4; }
 .preview-status { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: center; margin: 5px 0 0; color: #657181; font-size: 12px; line-height: 1.4; }
 .preview-status .text-button { padding: 0; font-size: 12px; }
-.topic-evidence { position: relative; flex: 1.05 1 0; min-height: 0; overflow: hidden; border: 0; border-top: 1px solid #e6e9ed; border-radius: 0; background: #fafbfc; }
-.topic-evidence:not([open]) { flex: 0 0 34px; }
+.topic-evidence { position: relative; flex: 0 0 clamp(188px, 32%, 280px); min-height: 188px; overflow: hidden; border: 0; border-top: 1px solid #e6e9ed; border-radius: 0; background: #fafbfc; }
+.topic-evidence:not([open]) { flex: 0 0 34px; min-height: 34px; }
 .topic-evidence > summary { min-height: 34px; display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 7px 9px; cursor: pointer; list-style: none; box-sizing: border-box; }
 .topic-evidence > summary::-webkit-details-marker { display: none; }
 .topic-evidence h3 { margin: 0; color: #182230; font-size: 14px; font-weight: 600; }
@@ -295,6 +299,8 @@ onBeforeUnmount(() => { stopped = true; version++; preview.cancel(); player.valu
 .topic-savebar .primary { background: #e47650; }
 .topic-exports-page { flex: 1; min-height: 0; overflow-y: auto; padding: 12px; overscroll-behavior: contain; }
 .topic-download { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 14px; margin-bottom: 12px; color: #657181; font-size: 13px; }
+.topic-archive { margin-top: 20px; border-top: 1px solid #e2e8f0; color: #64748b; font-size: 13px; }
+.topic-archive > summary { cursor: pointer; padding: 14px 0; }
 .topic-download select { margin-left: 8px; font: inherit; color: #182230; }
 .topic-export-hint { color: #657181; background: #fafbfc; padding: 8px 10px; border: 1px solid #e6e9ed; border-radius: 4px; font-size: 13px; line-height: 1.6; }
 .topic-exports-page :deep(.exports) { margin: 0; }
@@ -306,7 +312,7 @@ onBeforeUnmount(() => { stopped = true; version++; preview.cancel(); player.valu
   .topic-review-main { display: flex; flex-direction: column; overflow-y: auto; gap: 14px; }
   .topic-media-column { flex: none; overflow: visible; }
   .topic-player { flex: none; height: auto; aspect-ratio: 16 / 9; max-height: 250px; }
-  .topic-evidence { flex: none; height: 210px; }
+  .topic-evidence { flex: none; height: 210px; min-height: 0; }
   .topic-evidence:not([open]) { flex: none; height: 34px; }
   .topic-fields { flex: none; height: auto; overflow: visible; }
   .topic-list { flex: none; overflow: visible; padding: 0; }

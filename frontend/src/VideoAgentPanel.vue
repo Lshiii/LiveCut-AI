@@ -15,10 +15,12 @@ const sessions = ref<AgentSession[]>([]), selectedId = ref(''), question = ref('
 const action = ref(''), error = ref(''), refreshError = ref(''), notice = ref(''), loading = ref(true)
 const selected = computed(() => sessions.value.find(session => session.id === selectedId.value) ?? null)
 const activeTurn = computed(() => selected.value?.turns.find(agentTurnActive))
+const recentAnswer = computed(() => [...(selected.value?.turns ?? [])].reverse().find(turn => !!turn.result))
+const recentCitations = computed(() => recentAnswer.value?.result?.citations ?? [])
 const pending = computed(() => !!action.value), dirty = computed(() => !!question.value.trim())
 const citation = ref<AgentCitation | null>(null), sourcePlayer = ref<HTMLVideoElement | null>(null), playbackError = ref('')
 const messageList = ref<HTMLOListElement | null>(null)
-const panel = ref<HTMLElement | null>(null), referenceDock = ref<HTMLElement | null>(null)
+const panel = ref<HTMLElement | null>(null), referenceDock = ref<HTMLElement | null>(null), referenceEvidence = ref<HTMLElement | null>(null)
 const compactReference = ref(true), referenceExpanded = ref(false)
 const referenceVisible = computed(() => !compactReference.value || referenceExpanded.value)
 const sessionListOpen = ref(false)
@@ -225,6 +227,7 @@ async function preview(value: AgentCitation) {
   citation.value = value; playbackError.value = ''; const version = ++previewVersion
   pendingCitationPlay = version; playIntentVersion = version
   await nextTick()
+  if (mediaActive() && version === previewVersion) referenceEvidence.value?.scrollTo({ top: 0 })
   if (mediaActive() && version === previewVersion && compactReference.value) referenceDock.value?.scrollIntoView({ block: 'nearest' })
   if (mediaActive() && version === previewVersion && sourcePlayer.value && sourcePlayer.value.readyState >= 1) seekCitation()
 }
@@ -252,7 +255,7 @@ onMounted(() => {
   referenceObserver = new ResizeObserver(entries => {
     const width = entries[0]?.contentRect.width
     if (stopped || !width) return
-    const compact = width <= 900
+    const compact = width <= 960
     if (compact && !compactReference.value) referenceExpanded.value = false
     compactReference.value = compact
   })
@@ -273,14 +276,22 @@ onBeforeUnmount(() => { stopped = true; selectionVersion++; pauseReference(); re
 
 <template>
   <section ref="panel" class="panel agent-panel" aria-label="视频对话助手" @keydown.esc="closeHistory()">
-    <div class="panel-heading agent-toolbar"><div><h2>与视频对话</h2><p class="agent-intro">提问、追问，点击原句依据回看视频。</p></div><div class="agent-toolbar-actions"><button ref="historyToggle" class="secondary" :aria-expanded="sessionListOpen" :aria-controls="`agent-history-${jobId}`" @click="toggleHistory">对话记录 <span>{{ sessions.length }}</span></button><button class="secondary" :disabled="pending || dirty" @click="newSession">＋ 新对话</button></div></div>
     <div v-if="sessionListOpen" class="agent-history-backdrop" aria-hidden="true" @click="closeHistory()"></div>
     <p v-if="error" class="message error" role="alert">{{ error }}</p><p v-if="notice" class="message notice" role="status">{{ notice }}</p>
     <p v-if="refreshError" class="agent-refresh-error" role="status">{{ refreshError }} 已有记录与输入仍保留。</p>
     <div class="agent-layout">
       <aside v-show="sessionListOpen" ref="historyPanel" role="dialog" aria-modal="true" @keydown="historyKey" :id="`agent-history-${jobId}`" class="agent-sessions" aria-label="视频对话列表"><div class="agent-section-heading"><h3>对话记录 · {{ sessions.length }}</h3><div class="agent-history-actions"><button class="text-button" @click="closeHistory()">关闭对话记录</button><button class="text-button" :disabled="pending" @click="refresh">刷新</button></div></div><p v-if="loading && !sessions.length" class="help">正在读取对话…</p><p v-else-if="!sessions.length" class="help">发送第一个问题，即可开始对话。</p><button v-for="session in sessions" :key="session.id" class="agent-session" :class="{ selected: selectedId === session.id }" :aria-pressed="selectedId === session.id" :disabled="pending || dirty" @click="session.id === selectedId ? closeHistory() : selectSession(session.id)"><strong>{{ session.turns[0]?.question ?? '新对话' }}</strong><small>{{ date(session.created_at) }} · {{ session.turns.length }} 轮</small></button></aside>
-      <aside ref="referenceDock" class="agent-reference" :inert="sessionListOpen ? true : undefined" aria-label="视频参考"><div class="agent-reference-heading"><h3>视频参考</h3><button class="text-button agent-reference-toggle" :aria-expanded="referenceVisible" :aria-controls="`agent-reference-${jobId}`" @click="toggleReference">{{ referenceVisible ? '收起' : '展开视频' }}</button></div><div v-show="referenceVisible" :id="`agent-reference-${jobId}`" class="agent-reference-body"><video ref="sourcePlayer" :src="videoUrl" controls preload="metadata" playsinline @loadedmetadata="seekCitation" @timeupdate="previewTime" @play="guardPlayback"></video><div v-if="citation" class="agent-reference-citation"><div><strong>{{ topicTime(citation.start_ms) }} → {{ topicTime(citation.end_ms) }}</strong><button class="text-button" @click="closePreview">关闭本次引用</button></div><p>{{ citation.text }}</p></div><p v-else class="agent-reference-help">可直接播放源视频。点击回答中的原句依据，可定位并回看对应内容。</p><p v-if="playbackError" class="agent-reference-help" role="status">{{ playbackError }}</p></div></aside>
+      <aside ref="referenceDock" class="agent-reference" :inert="sessionListOpen ? true : undefined" aria-label="视频参考">
+        <div class="agent-reference-heading"><h3>视频参考</h3><button class="text-button agent-reference-toggle" :aria-expanded="referenceVisible" :aria-controls="`agent-reference-${jobId}`" @click="toggleReference">{{ referenceVisible ? '收起' : '展开视频' }}</button></div>
+        <div v-show="referenceVisible" :id="`agent-reference-${jobId}`" class="agent-reference-body">
+          <div class="agent-reference-video"><video ref="sourcePlayer" :src="videoUrl" controls preload="metadata" playsinline @loadedmetadata="seekCitation" @timeupdate="previewTime" @play="guardPlayback"></video></div>
+          <p v-if="playbackError" class="agent-reference-help" role="status">{{ playbackError }}</p>
+          <div class="agent-evidence-heading"><h4>原句依据</h4><span v-if="recentAnswer">最近第 {{ recentAnswer.sequence }} 轮 · {{ recentCitations.length }} 条</span></div>
+          <div ref="referenceEvidence" class="agent-reference-evidence"><div v-if="citation" class="agent-current-citation"><strong>当前定位 {{ topicTime(citation.start_ms) }} → {{ topicTime(citation.end_ms) }}</strong><button class="text-button" @click="closePreview">关闭定位</button><p>{{ citation.text }}</p></div><p v-if="!recentCitations.length" class="agent-evidence-empty">{{ recentAnswer ? '最近回答未引用视频原句，仍可直接回看视频。' : '提问后，这里会列出回答引用的原句。' }}</p><button v-for="source in recentCitations" :key="source.utterance_id" class="agent-evidence-item" :class="{ selected: citation?.utterance_id === source.utterance_id }" @click="preview(source)"><span>{{ topicTime(source.start_ms) }} → {{ topicTime(source.end_ms) }}</span><p>{{ source.text }}</p></button></div>
+        </div>
+      </aside>
       <div class="agent-conversation" :inert="sessionListOpen ? true : undefined">
+        <div class="agent-toolbar"><h2>视频对话</h2><div class="agent-toolbar-actions"><button ref="historyToggle" class="secondary" :aria-expanded="sessionListOpen" :aria-controls="`agent-history-${jobId}`" @click="toggleHistory">对话记录 <span>{{ sessions.length }}</span></button><button class="secondary" :disabled="pending || dirty" @click="newSession">＋ 新对话</button></div></div>
         <div v-if="!selected?.turns.length" class="agent-welcome"><h3>从视频里找答案</h3><p>可以先概括内容，也可以沿着已有回答继续追问。证据不足时会明确说明。</p></div>
         <ol v-else ref="messageList" class="agent-turns" aria-label="对话记录" @scroll.passive="messageScroll"><li v-for="turn in selected.turns" :key="turn.id" class="agent-turn"><div class="agent-question"><span>你的问题 · 第 {{ turn.sequence }} 轮</span><p>{{ turn.question }}</p></div><div class="agent-answer"><div class="agent-answer-heading"><strong>视频助手</strong><span class="agent-status">{{ names[turn.status] }}</span><button v-if="agentTurnActive(turn)" class="text-button" :disabled="pending" @click="cancel(turn)">{{ action === 'cancel' ? '正在取消…' : '取消本轮' }}</button></div><TextRequestProgress :progress="turn.stage.text_progress" :terminal="!agentTurnActive(turn)" /><FailureDiagnostic :diagnostic="turn.stage.diagnostic" :error-code="turn.stage.error_code" :attempt="turn.stage.attempt" />
           <template v-if="turn.result"><span class="agent-scope" :class="turn.result.answer_scope.toLowerCase()">{{ scopes[turn.result.answer_scope] }}</span><AgentAnswer class="agent-answer-text" :text="turn.result.answer" /><p v-if="turn.result.answer_scope === 'GENERAL'" class="help">这部分是通用知识补充，不能当作视频中已经说过的话。</p><p v-else-if="turn.result.answer_scope === 'INSUFFICIENT'" class="help">当前视频证据不足，可换个说法，或补充想找的具体内容。</p>
@@ -301,130 +312,131 @@ onBeforeUnmount(() => { stopped = true; selectionVersion++; pauseReference(); re
 </template>
 
 <style scoped>
-.agent-panel { container: agent / inline-size; position: relative; display: flex; flex-direction: column; height: 100%; min-height: 0; min-width: 0; margin: 0; padding: 0; overflow: hidden; color: #1e293b; background: #fff; font-size: 14px; border: 0; border-radius: 0; }
-.agent-panel h2, .agent-panel h3, .agent-panel h4, .agent-panel p { margin-top: 0; }
-.agent-panel > .agent-toolbar { flex: none; min-height: 52px; padding: 9px 20px; border-bottom: 1px solid #f1f5f9; gap: 12px; }
-.agent-toolbar > div:first-child { display: flex; align-items: center; min-width: 0; gap: 12px; }
-.agent-toolbar h2 { font-size: 15px; font-weight: 650; line-height: 1.6; white-space: nowrap; }
-.agent-intro { font-size: 12px; color: #64748b; line-height: 1.6; margin: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.agent-toolbar-actions { display: flex; flex: none; align-items: center; gap: 8px; }
-.agent-toolbar-actions button { padding: 8px 11px; font-size: 12px; white-space: nowrap; background: #fff; }
-.agent-toolbar-actions button span { margin-left: 4px; color: #94a3b8; }
-.agent-panel > .message, .agent-refresh-error { flex: none; max-height: 70px; overflow-y: auto; margin: 8px 24px 0; padding: 9px 12px; font-size: 13px; line-height: 1.6; }
+.agent-panel { container: agent / inline-size; position: relative; display: flex; flex-direction: column; height: 100%; min-height: 0; min-width: 0; margin: 0; padding: 0; overflow: hidden; border: 0; border-radius: 0; background: transparent; color: #1e293b; font-size: 14px; }
+.agent-panel h2, .agent-panel h3, .agent-panel h4, .agent-panel p { margin: 0; }
+.agent-panel > .message, .agent-refresh-error { flex: none; max-height: 60px; overflow-y: auto; margin: 0 0 10px; padding: 9px 12px; font-size: 13px; line-height: 1.6; }
 .agent-refresh-error { color: #9a5a37; }
-.agent-layout { display: grid; grid-template-columns: clamp(280px, 32%, 380px) minmax(0, 1fr); flex: 1; min-height: 0; min-width: 0; overflow: hidden; }
-.agent-reference { display: flex; flex-direction: column; min-width: 0; min-height: 0; border-right: 1px solid #e2e8f0; background: #f8fafc; overflow: hidden; }
-.agent-reference-heading { display: flex; flex: none; align-items: center; justify-content: space-between; gap: 12px; padding: 14px 18px; border-bottom: 1px solid #e2e8f0; }
-.agent-reference-heading h3 { margin: 0; color: #334155; font-size: 14px; font-weight: 600; }
-.agent-reference-toggle { display: none; min-height: 30px; color: #475569; font-size: 13px; }
-.agent-reference-body { display: flex; flex-direction: column; flex: 1; min-height: 0; min-width: 0; overflow: hidden; padding: 16px; }
-.agent-reference-body > video { display: block; flex: none; width: 100%; min-width: 0; max-height: min(320px, 36dvh); height: auto; object-fit: contain; border-radius: 7px; background: #0f172a; }
-.agent-reference-help { flex: none; margin: 12px 0 0; color: #64748b; font-size: 13px; line-height: 1.8; overflow-wrap: anywhere; }
-.agent-reference-citation { display: flex; flex: 1; flex-direction: column; min-height: 0; margin-top: 14px; border: 1px solid #e2e8f0; border-radius: 7px; background: white; overflow: hidden; }
-.agent-reference-citation > div { flex: none; display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 5px 10px; padding: 9px 11px; border-bottom: 1px solid #edf1f5; }
-.agent-reference-citation strong { color: #a85635; font-size: 13px; font-weight: 500; }
-.agent-reference-citation .text-button { min-height: 30px; color: #64748b; font-size: 12px; white-space: normal; }
-.agent-reference-citation > p { flex: 1; min-height: 0; margin: 0; padding: 11px; overflow-y: auto; overscroll-behavior: contain; color: #334155; font-size: 14px; line-height: 1.85; white-space: pre-wrap; overflow-wrap: anywhere; }
-.agent-history-backdrop { position: absolute; inset: 0; z-index: 9; background: #0f172a15; cursor: default; }
-.agent-sessions { position: absolute; top: 64px; right: 24px; z-index: 10; width: min(340px, calc(100% - 32px)); max-height: min(420px, calc(100% - 100px)); overflow-y: auto; overscroll-behavior: contain; border: 1px solid #dce4ed; border-radius: 10px; background: #fff; padding: 16px; box-shadow: 0 12px 36px #0f172a20; }
+.agent-layout { display: grid; grid-template-columns: min(44%, 640px) minmax(0, 1fr); gap: 16px; flex: 1; min-width: 0; min-height: 0; overflow: hidden; }
+.agent-reference, .agent-conversation { min-width: 0; min-height: 0; border: 1px solid #e2e8f0; border-radius: 10px; background: #fff; overflow: hidden; }
+.agent-reference { display: flex; flex-direction: column; }
+.agent-reference-heading, .agent-toolbar { display: flex; flex: none; min-height: 52px; align-items: center; justify-content: space-between; gap: 10px; padding: 9px 14px; border-bottom: 1px solid #edf1f5; }
+.agent-reference-heading h3, .agent-toolbar h2 { color: #1f2937; font-size: 15px; line-height: 1.6; font-weight: 600; white-space: nowrap; }
+.agent-reference-toggle { display: none; align-items: center; min-height: 30px; color: #475569; font-size: 13px; }
+.agent-reference-body { display: flex; flex-direction: column; flex: 1; min-height: 0; min-width: 0; gap: 10px; padding: 12px; overflow: hidden; }
+.agent-reference-video { position: relative; flex: none; width: 100%; aspect-ratio: 16/9; background: #0f172a; border-radius: 6px; overflow: hidden; }
+.agent-reference-video video { position: absolute; inset: 0; display: block; width: 100%; height: 100%; object-fit: contain; }
+.agent-current-citation { display: flex; flex: none; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 4px 10px; border: 1px solid #f0d8cc; border-radius: 5px; padding: 6px 9px; background: #fff7f2; }
+.agent-current-citation strong { color: #a85635; font-size: 13px; line-height: 1.6; font-weight: 500; }
+.agent-current-citation .text-button { min-height: 28px; color: #64748b; font-size: 12px; white-space: normal; }
+.agent-current-citation > p { flex-basis: 100%; color: #334155; font-size: 14px; line-height: 1.8; white-space: pre-wrap; overflow-wrap: anywhere; }
+.agent-reference-help { flex: none; color: #9a5a37; font-size: 13px; line-height: 1.7; overflow-wrap: anywhere; }
+.agent-evidence-heading { display: flex; flex: none; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 4px 8px; padding-top: 3px; }
+.agent-evidence-heading h4 { color: #334155; font-size: 14px; line-height: 1.6; font-weight: 600; }
+.agent-evidence-heading > span { color: #64748b; font-size: 12px; }
+.agent-reference-evidence { flex: 1; min-height: 0; min-width: 0; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; scrollbar-width: thin; border-top: 1px solid #edf1f5; }
+.agent-evidence-empty { padding: 12px 7px; color: #64748b; font-size: 13px; line-height: 1.8; }
+.agent-evidence-item { display: block; width: 100%; min-width: 0; border: 0; border-bottom: 1px solid #edf1f5; border-left: 2px solid transparent; border-radius: 0; padding: 10px 8px; background: #fff; text-align: left; color: #334155; }
+.agent-evidence-item:hover { background: #f8fafc; }
+.agent-evidence-item.selected, .agent-evidence-item.selected:hover { border-left-color: #e47650; background: #fff7f2; }
+.agent-evidence-item > span { color: #64748b; font-size: 12px; font-variant-numeric: tabular-nums; }
+.agent-evidence-item > p { margin-top: 5px; font-size: 14px; line-height: 1.8; white-space: pre-wrap; overflow-wrap: anywhere; }
+.agent-conversation { display: flex; flex-direction: column; }
+.agent-toolbar-actions { display: flex; flex: none; align-items: center; gap: 8px; }
+.agent-toolbar-actions button { min-height: 34px; padding: 7px 10px; color: #475569; background: #fff; font-size: 12px; line-height: 1.6; white-space: nowrap; }
+.agent-toolbar-actions button > span { margin-left: 4px; color: #64748b; }
+.agent-history-backdrop { position: absolute; inset: 0; z-index: 9; background: #0f172a20; }
+.agent-sessions { position: absolute; top: 65px; right: 24px; z-index: 10; width: min(340px, calc(100% - 32px)); max-height: min(420px, calc(100% - 90px)); overflow-y: auto; overscroll-behavior: contain; border: 1px solid #dce4ed; border-radius: 8px; background: #fff; padding: 14px; box-shadow: 0 12px 36px #0f172a20; }
 .agent-section-heading, .agent-answer-heading, .agent-compose-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
 .agent-section-heading { justify-content: space-between; }
-.agent-section-heading h3 { margin: 0; font-size: 14px; font-weight: 600; }
-.agent-history-actions { display: flex; align-items: center; gap: 12px; }
-.agent-session { display: block; width: 100%; border: 1px solid transparent; border-radius: 7px; background: #fff; text-align: left; padding: 10px; margin-top: 8px; color: #334155; }
-.agent-session strong { font-size: 13px; font-weight: 500; line-height: 1.6; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
-.agent-session small { display: block; font-size: 12px; color: #64748b; margin-top: 4px; }
-.agent-session.selected { border-color: #f0c9ba; background: #fff4ee; }
-.agent-conversation { display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0; overflow: hidden; }
-.agent-turns, .agent-welcome { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; padding: 24px max(28px, calc((100% - 820px) / 2)); margin: 0; list-style: none; scrollbar-width: thin; }
-.agent-welcome { display: flex; flex-direction: column; justify-content: center; align-items: center; text-align: center; color: #64748b; }
-.agent-welcome h3 { font-size: 24px; color: #1e293b; font-weight: 600; margin-bottom: 12px; }
-.agent-welcome p { font-size: 14px; line-height: 1.8; max-width: 400px; }
-.agent-turn { margin: 0 0 30px; }
+.agent-section-heading h3 { font-size: 14px; font-weight: 600; }
+.agent-history-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+.agent-session { display: block; width: 100%; border: 1px solid transparent; border-radius: 6px; background: #fff; text-align: left; padding: 10px; margin-top: 8px; color: #334155; }
+.agent-session strong { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; font-size: 13px; font-weight: 500; line-height: 1.6; }
+.agent-session small { display: block; margin-top: 4px; color: #64748b; font-size: 12px; }
+.agent-session.selected, .agent-session.selected:hover { border-color: #f0c9ba; background: #fff4ee; }
+.agent-turns, .agent-welcome { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; padding: 18px max(20px, calc((100% - 820px) / 2)); margin: 0; list-style: none; scrollbar-width: thin; }
+.agent-welcome { display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; color: #64748b; }
+.agent-welcome h3 { margin-bottom: 10px; color: #1e293b; font-size: 20px; font-weight: 600; }
+.agent-welcome p { max-width: 380px; font-size: 14px; line-height: 1.8; }
+.agent-turn { margin: 0 0 26px; }
 .agent-turn:last-child { margin-bottom: 0; }
-.agent-question { width: fit-content; max-width: 90%; margin-left: auto; padding: 12px 16px; border-radius: 14px 14px 3px 14px; background: #f1f5f9; }
-.agent-question span { display: block; font-size: 11px; color: #64748b; margin-bottom: 5px; }
-.agent-question p, .agent-clip-suggestion > p { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.9; font-size: 15px; margin-bottom: 0; }
-.agent-answer { padding: 20px 0 0; }
-.agent-answer-text { font-size: 15px; line-height: 1.9; }
-.agent-answer-heading { margin-bottom: 12px; }
-.agent-answer-heading > strong { font-size: 14px; font-weight: 650; }
-.agent-status { font-size: 12px; color: #94a3b8; }
-.agent-scope { display: inline-block; padding: 3px 7px; border-radius: 4px; background: #edf5ef; color: #55745c; font-size: 11px; margin-bottom: 8px; }
+.agent-question { width: fit-content; max-width: 94%; margin-left: auto; padding: 11px 14px; border-radius: 10px 10px 3px 10px; background: #f1f5f9; }
+.agent-question span { display: block; margin-bottom: 5px; color: #64748b; font-size: 12px; }
+.agent-question p, .agent-clip-suggestion > p { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.85; font-size: 15px; }
+.agent-answer { padding-top: 18px; }
+.agent-answer-text { font-size: 15px; line-height: 1.85; }
+.agent-answer-heading { margin-bottom: 10px; }
+.agent-answer-heading > strong { font-size: 14px; font-weight: 600; }
+.agent-status { color: #64748b; font-size: 12px; }
+.agent-scope { display: inline-block; margin-bottom: 8px; padding: 3px 7px; border-radius: 4px; color: #55745c; background: #edf5ef; font-size: 12px; }
 .agent-scope.general { background: #eff6ff; color: #526985; }
 .agent-scope.insufficient { background: #fff7ed; color: #9a6238; }
-.agent-citations, .agent-tools { margin: 12px 0; border: 1px solid #e2e8f0; border-radius: 7px; color: #64748b; font-size: 13px; }
-.agent-citations summary, .agent-tools summary { cursor: pointer; padding: 10px 12px; color: #475569; }
-.agent-citation { display: block; width: calc(100% - 20px); padding: 10px 12px; background: white; border: 1px solid #e2e8f0; border-radius: 6px; text-align: left; margin: 0 10px 10px; color: #334155; }
-.agent-citation span { font-size: 12px; color: #64748b; }
-.agent-citation p { margin: 5px 0 0; font-size: 14px; line-height: 1.8; overflow-wrap: anywhere; }
-.agent-citation.selected { border-color: #e47650; background: #fff8f4; }
-.agent-tools ol { padding: 0 12px 10px; margin: 0; list-style: none; }
-.agent-tools li { padding: 6px 0 9px 12px; border-left: 2px solid #e2e8f0; overflow-wrap: anywhere; }
-.agent-tools strong { font-weight: 500; color: #334155; }
+.agent-citations, .agent-tools { margin: 12px 0; border: 1px solid #e2e8f0; border-radius: 6px; color: #64748b; font-size: 13px; }
+.agent-citations summary, .agent-tools summary { padding: 9px 11px; cursor: pointer; color: #475569; }
+.agent-citation { display: block; width: calc(100% - 20px); padding: 9px 10px; margin: 0 10px 10px; border: 1px solid #e2e8f0; border-radius: 5px; background: #fff; text-align: left; color: #334155; }
+.agent-citation span { color: #64748b; font-size: 12px; }
+.agent-citation p { margin-top: 5px; font-size: 14px; line-height: 1.8; overflow-wrap: anywhere; }
+.agent-citation.selected, .agent-citation.selected:hover { border-color: #e47650; background: #fff8f4; }
+.agent-tools ol { padding: 0 11px 10px; margin: 0; list-style: none; }
+.agent-tools li { padding: 6px 0 9px 11px; border-left: 2px solid #e2e8f0; overflow-wrap: anywhere; }
+.agent-tools strong { color: #334155; font-weight: 500; }
 .agent-tools p { margin: 4px 0; line-height: 1.7; }
 .agent-tools small { font-size: 12px; }
-.agent-clip-suggestion { border: 1px solid #e2e8f0; border-radius: 7px; padding: 12px; background: #f8fafc; margin-top: 14px; }
-.agent-clip-suggestion > p { margin-bottom: 10px; }
-.agent-clip-suggestion small { display: block; color: #64748b; font-size: 12px; line-height: 1.7; margin-top: 8px; }
-.agent-compose { position: relative; flex: none; width: min(876px, 100%); padding: 12px 28px 20px; margin: 0 auto; background: #fff; }
-.agent-input-box { border: 1px solid #d8e0e9; border-radius: 12px; padding: 10px 12px; box-shadow: 0 2px 8px #0f172a04; }
+.agent-clip-suggestion { margin-top: 12px; border: 1px solid #e2e8f0; border-radius: 6px; padding: 11px; background: #f8fafc; }
+.agent-clip-suggestion > p { margin-bottom: 9px; }
+.agent-clip-suggestion small { display: block; margin-top: 8px; color: #64748b; font-size: 12px; line-height: 1.7; }
+.agent-compose { position: relative; flex: none; width: min(876px, 100%); margin: 0 auto; padding: 12px 20px 16px; border-top: 1px solid #f1f5f9; background: #fff; }
+.agent-input-box { border: 1px solid #d8e0e9; border-radius: 9px; padding: 10px 12px; background: #fff; }
 .agent-input-box:focus-within { border-color: #d49a80; box-shadow: 0 0 0 2px #fcf0e9; }
-.agent-compose textarea { display: block; width: 100%; height: 64px; min-height: 50px; max-height: 130px; resize: vertical; border: 0; background: transparent; padding: 0 2px; margin: 0; font: inherit; font-size: 14px; line-height: 1.8; color: #1e293b; }
+.agent-compose textarea { display: block; width: 100%; height: 64px; min-height: 50px; max-height: 120px; resize: vertical; margin: 0; border: 0; padding: 0; color: #1e293b; background: transparent; font: inherit; font-size: 14px; line-height: 1.8; }
 .agent-compose textarea:focus { outline: 0; }
-.agent-compose textarea::placeholder { color: #94a3b8; }
-.agent-compose-actions { position: relative; margin-top: 8px; gap: 8px 12px; }
-.agent-compose-actions .primary { padding: 9px 16px; min-height: 38px; font-size: 13px; margin-left: auto; }
-.agent-character-count { color: #94a3b8; font-size: 11px; }
+.agent-compose textarea::placeholder { color: #8491a2; }
+.agent-compose-actions { position: relative; margin-top: 8px; gap: 8px 10px; }
+.agent-compose-actions .primary { min-height: 38px; margin-left: auto; padding: 9px 14px; font-size: 13px; line-height: 1.5; }
+.agent-character-count { color: #64748b; font-size: 12px; }
 .agent-options { position: relative; margin-right: auto; color: #64748b; font-size: 12px; }
-.agent-options summary { cursor: pointer; padding: 5px 0; }
-.agent-options summary > span { color: #94a3b8; }
-.agent-options-body { position: absolute; bottom: calc(100% + 16px); left: 0; width: 270px; max-width: calc(100vw - 64px); border: 1px solid #dce4ed; padding: 16px; background: #fff; border-radius: 8px; box-shadow: 0 8px 32px #0f172a15; z-index: 3; }
+.agent-options summary { padding: 5px 0; cursor: pointer; }
+.agent-options summary > span { color: #8491a2; }
+.agent-options-body { position: absolute; bottom: calc(100% + 16px); left: 0; z-index: 3; width: 270px; max-width: calc(100vw - 64px); border: 1px solid #dce4ed; border-radius: 7px; padding: 14px; background: #fff; box-shadow: 0 8px 32px #0f172a15; }
 .agent-options-body label { display: flex; align-items: center; gap: 12px; font-size: 13px; }
-.agent-options-body input { min-width: 0; width: 60px; padding: 7px; border: 1px solid #cbd5e1; border-radius: 5px; color: #334155; }
-.agent-options-body p { font-size: 12px; line-height: 1.7; margin: 10px 0 0; }
-.agent-examples { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 14px; }
-.agent-examples button { text-align: left; padding: 8px 10px; color: #64748b; font-size: 12px; background: #fff; border-radius: 7px; }
+.agent-options-body input { width: 60px; min-width: 0; border: 1px solid #cbd5e1; border-radius: 5px; padding: 7px; color: #334155; }
+.agent-options-body p { margin-top: 9px; font-size: 12px; line-height: 1.7; }
+.agent-examples { display: flex; gap: 8px; margin-bottom: 10px; padding-bottom: 3px; overflow-x: auto; scrollbar-width: thin; }
+.agent-examples button { flex: none; padding: 7px 9px; border-radius: 6px; color: #64748b; background: #fff; font-size: 12px; white-space: nowrap; }
 .agent-panel .help { color: #64748b; font-size: 13px; line-height: 1.7; }
-.agent-compose > .help { font-size: 12px; margin: 8px 0 0; }
+.agent-compose > .help { margin-top: 8px; font-size: 12px; }
 .agent-panel :deep(.text-recovery) { color: #475569; background: #f8fafc; border-color: #cbd5e1; }
-@media (max-width: 600px) {
-  .agent-panel > .agent-toolbar { padding: 8px 14px; align-items: center; }
-  .agent-toolbar h2 { font-size: 15px; }
-  .agent-intro { display: none; }
-  .agent-toolbar-actions { gap: 6px; }
-  .agent-toolbar-actions button { font-size: 11px; padding: 7px 8px; }
-  .agent-toolbar-actions button span { display: none; }
-  .agent-turns, .agent-welcome { padding: 18px 16px; }
-  .agent-question p, .agent-answer-text { font-size: 14px; }
-  .agent-compose { padding: 8px 12px 12px; }
-  .agent-character-count { display: none; }
-  .agent-options summary > span { display: none; }
-  .agent-compose-actions { gap: 8px; }
-  .agent-input-box { padding: 9px 10px; }
-  .agent-sessions { right: 12px; top: 50px; }
-}
-@container agent (max-width:900px) {
-  .agent-layout { display: flex; flex-direction: column; overflow-y: auto; }
-  .agent-reference { flex: 0 1 auto; max-height: max(44px, min(240px, calc(100% - 220px))); border-right: 0; border-bottom: 1px solid #e2e8f0; }
-  .agent-reference-heading { padding: 6px 16px; min-height: 43px; }
-  .agent-reference-toggle { display: inline-flex; align-items: center; }
-  .agent-reference-body { display: block; overflow-y: auto; padding: 12px 16px; }
-  .agent-reference-body > video { max-height: 180px; }
-  .agent-reference-citation { display: block; flex: none; margin-top: 10px; }
-  .agent-reference-citation > p { max-height: 140px; }
-  .agent-conversation { flex: 1 0 220px; min-height: 220px; }
-  .agent-compose { padding: 8px 16px 12px; max-height: 100%; overflow-y: auto; }
+@container agent (max-width:960px) {
+  .agent-layout { display: flex; flex-direction: column; gap: 10px; overflow-y: auto; }
+  .agent-reference { flex: 0 1 auto; max-height: max(46px, min(300px, calc(100% - 240px))); }
+  .agent-reference-heading { min-height: 44px; padding: 6px 12px; }
+  .agent-reference-toggle { display: inline-flex; }
+  .agent-reference-body { display: block; overflow-y: auto; padding: 10px 12px; }
+  .agent-reference-video { max-height: 200px; }
+  .agent-current-citation, .agent-evidence-heading { margin-top: 10px; }
+  .agent-reference-evidence { overflow: visible; margin-top: 8px; scrollbar-gutter: auto; }
+  .agent-conversation { flex: 1 0 240px; min-height: 240px; }
+  .agent-toolbar { padding: 8px 12px; }
+  .agent-turns, .agent-welcome { padding: 16px; }
+  .agent-compose { max-height: calc(100% - 52px); overflow-y: auto; padding: 10px 12px 12px; }
   .agent-options[open] { flex-basis: 100%; margin-right: 0; }
   .agent-options-body { position: static; width: 100%; max-width: none; margin-top: 8px; padding: 12px; box-shadow: none; }
   .agent-compose textarea { height: 50px; max-height: 80px; }
-  .agent-examples { flex-wrap: nowrap; overflow-x: auto; margin-bottom: 10px; padding-bottom: 3px; }
-  .agent-examples > button { flex: none; white-space: nowrap; }
 }
-@media (max-height: 650px) {
-  .agent-intro { display: none; }
-  .agent-panel > .agent-toolbar { padding-block: 8px; }
-  .agent-compose { padding-bottom: 12px; }
-  .agent-compose textarea { height: 50px; }
+@container agent (max-width:600px) {
+  .agent-reference { max-height: max(46px, min(250px, calc(100% - 240px))); }
+}
+@container agent (max-width:520px) {
+  .agent-toolbar-actions { gap: 6px; }
+  .agent-toolbar-actions button { padding: 7px 8px; }
+  .agent-toolbar-actions button > span, .agent-character-count, .agent-options summary > span { display: none; }
+  .agent-question p, .agent-answer-text { font-size: 14px; }
+  .agent-input-box { padding: 9px 10px; }
+  .agent-compose-actions { gap: 8px; }
+  .agent-sessions { top: 60px; right: 12px; }
+}
+@media (max-height:650px) {
+  .agent-compose { padding-bottom: 10px; }
+  .agent-compose textarea { height: 50px; max-height: 80px; }
 }
 </style>
