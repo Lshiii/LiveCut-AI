@@ -5,6 +5,8 @@ import FailureDiagnostic from './FailureDiagnostic.vue'
 import { downloadJson } from './download'
 import { SnapshotError, SnapshotStream, isExportTerminal, newestSnapshot, parseExportSnapshot, streamLabels, type StreamMode } from './snapshotStream'
 import { parseTopicReview, TopicResponseError } from './topics'
+import CaptionPanel from './CaptionPanel.vue'
+import { CaptionBatchError, prepareCaptionBatch } from './captions'
 interface ApprovedReview {
   revision: number; status: string
   products?: { id: string; name: string }[]
@@ -18,6 +20,11 @@ const selectedIds = ref<string[]>([]), batches = ref<ExportJob[]>([]), selectedB
 const pending = ref(''), error = ref(''), refreshError = ref(''), notice = ref(''), loadingRevision = ref(false)
 const streamMode = ref<StreamMode>('idle')
 const previewPlayer = ref<HTMLVideoElement | null>(null)
+const captionTarget = ref<{ exportId: string; clipId: string; contentUrl: string } | null>(null)
+const captionEditor = ref<{ dirty: boolean; pending: boolean } | null>(null)
+const packageBusy = ref(false), packageUrl = ref('')
+let packageVersion = 0
+defineExpose({ dirty: computed(() => !!captionEditor.value?.dirty), pending: computed(() => !!pending.value || !!captionEditor.value?.pending) })
 let timer: number | undefined, stopped = false, refreshing = false, revisionVersion = 0, listVersion = 0, resourceEpoch = 0
 const batchStream = new SnapshotStream<ExportJob>({
   kind: 'export', parse: (raw, id) => parseExportSnapshot(raw, id, props.jobId), terminal: isExportTerminal,
@@ -65,6 +72,29 @@ function errorMessage(value: unknown) {
   return messages[code] ?? `导出操作未完成：${code}`
 }
 function fail(value: unknown) { error.value = errorMessage(value) }
+function openCaptions(clip: ExportClip) {
+  if (!currentBatch.value || clip.status !== 'SUCCEEDED' || !clip.content_url || pending.value || captionEditor.value?.pending) return
+  if (captionEditor.value?.dirty) { error.value = '字幕有未保存修改，请先保存或放弃字幕修改。'; return }
+  previewPlayer.value?.pause(); previewId.value = ''
+  captionTarget.value = { exportId: currentBatch.value.id, clipId: clip.id, contentUrl: clip.content_url }
+}
+async function downloadBatchPackage() {
+  const batch = currentBatch.value
+  if (!batch || packageBusy.value) return
+  const op = ++packageVersion, epoch = resourceEpoch
+  packageBusy.value = true; packageUrl.value = ''; error.value = ''
+  try {
+    const prepared = await prepareCaptionBatch(batch, url => api<unknown>(url))
+    if (stopped || op !== packageVersion || epoch !== resourceEpoch || currentBatch.value?.id !== batch.id) return
+    packageUrl.value = prepared.url
+    notice.value = `已核对 ${prepared.items.length} 个成片的确认字幕版本，素材包已准备好。请点击“下载本批素材包”开始下载。`
+  } catch (value) {
+    if (!stopped && op === packageVersion && epoch === resourceEpoch) {
+      if (value instanceof CaptionBatchError) error.value = value.code === 'BATCH_INCOMPLETE' ? `本批有 ${value.clips.length} 个片段尚未完成，不能整批打包。请先处理失败或未完成项。` : `有 ${value.clips.length} 个成片${value.code === 'CAPTIONS_MISSING' ? '尚未校对字幕' : '字幕尚未确认'}：${value.clips.slice(0, 3).join('、')}。请逐片校对并确认后再打包。`
+      else fail(value)
+    }
+  } finally { if (op === packageVersion) packageBusy.value = false }
+}
 async function loadRevision() {
   const version = ++revisionVersion, jobId = props.jobId
   approved.value = null; exportProduct.value = ''; selectedIds.value = []; loadingRevision.value = true; error.value = ''
@@ -144,13 +174,13 @@ watch(() => props.confirmedRevisions.join(','), () => {
 }, { immediate: true })
 watch(revision, () => { void loadRevision() }, { immediate: true })
 watch(exportProduct, () => { selectedIds.value = visibleCandidates.value.map(segment => segment.id) })
-watch(selectedBatchId, id => { batchStream.select(id || null, currentBatch.value) }, { flush: 'sync' })
+watch(selectedBatchId, id => { packageVersion++; packageUrl.value = ''; packageBusy.value = false; batchStream.select(id || null, currentBatch.value) }, { flush: 'sync' })
 watch(() => props.jobId, () => {
   resourceEpoch++; revisionVersion++; listVersion++; batchStream.select(null); batches.value = []; selectedBatchId.value = ''; previewId.value = ''; pending.value = ''; error.value = ''; refreshError.value = ''; notice.value = ''
   void loadRevision(); void refresh()
 })
 onMounted(() => { void refresh(); timer = window.setInterval(() => { if (!document.hidden && !pending.value) void refresh() }, 15000) })
-function guardPlayback(event: Event) { if (props.active === false || stopped) (event.currentTarget as HTMLVideoElement).pause() }
+function guardPlayback(event: Event) { if (props.active === false || stopped || captionTarget.value) (event.currentTarget as HTMLVideoElement).pause() }
 watch(() => props.active, value => { if (value === false) previewPlayer.value?.pause() })
 onBeforeUnmount(() => { stopped = true; previewPlayer.value?.pause(); resourceEpoch++; revisionVersion++; listVersion++; window.clearInterval(timer); batchStream.dispose() })
 </script>
@@ -172,10 +202,11 @@ onBeforeUnmount(() => { stopped = true; previewPlayer.value?.pause(); resourceEp
       </template>
     </div>
     <div class="export-history"><div class="export-history-heading"><h3>导出批次 <span>{{ batches.length }}</span></h3><button class="text-button" :disabled="!!pending" @click="refresh">↻ 刷新</button></div><p v-if="!batches.length" class="help">还没有导出批次。任务创建后会保存到后台，关闭页面不影响执行。</p><div v-else class="batch-tabs"><button v-for="batch in batches" :key="batch.id" :class="{ active: selectedBatchId === batch.id }" :disabled="!!pending" @click="selectedBatchId = batch.id; previewId = ''">r{{ batch.approved_revision }} · {{ batch.id.slice(0, 8) }}<span class="status" :class="batch.status.toLowerCase()">{{ names[batch.status] ?? batch.status }}</span></button></div>
-      <template v-if="currentBatch"><div class="batch-summary"><span>冻结版本 r{{ currentBatch.approved_revision }} · {{ completed }} / {{ currentBatch.clips.length }} 完成</span><span class="snapshot-mode" role="status">{{ streamLabels[streamMode] }}</span><code>{{ currentBatch.id }}</code><button class="text-button" :disabled="!!pending" @click="downloadManifest">{{ pending === 'manifest' ? '正在下载…' : '下载文件清单 JSON ↓' }}</button></div><div v-for="clip in currentBatch.clips" :key="clip.id" class="export-clip"><div><b>{{ clip.title || clip.product_name }}</b><p>{{ time(clip.start_ms) }} → {{ time(clip.end_ms) }} <span v-if="clip.attempt">· 第 {{ clip.attempt }} 次执行</span></p><FailureDiagnostic :diagnostic="clip.diagnostic" :error-code="clip.error_code" :attempt="clip.attempt" /></div><span class="status" :class="clip.status.toLowerCase()">{{ names[clip.status] ?? clip.status }}</span><small v-if="clip.size_bytes != null">{{ (clip.size_bytes / 1024 / 1024).toFixed(2) }} MB</small><div class="clip-actions"><template v-if="clip.status === 'SUCCEEDED' && clip.content_url"><button class="secondary" @click="previewId = clip.id">预览</button><a v-if="clip.download_url" class="secondary" :href="clip.download_url">下载 MP4 ↓</a></template><button v-if="clip.status === 'FAILED'" class="secondary" :disabled="!!pending" @click="retry(clip)">重试此片段</button></div></div>
+      <template v-if="currentBatch"><div class="batch-summary"><span>冻结版本 r{{ currentBatch.approved_revision }} · {{ completed }} / {{ currentBatch.clips.length }} 完成</span><span class="snapshot-mode" role="status">{{ streamLabels[streamMode] }}</span><code>{{ currentBatch.id }}</code><button class="text-button" :disabled="!!pending" @click="downloadManifest">{{ pending === 'manifest' ? '正在下载…' : '下载文件清单 JSON ↓' }}</button><button class="secondary" :disabled="packageBusy || !!pending" @click="downloadBatchPackage">{{ packageBusy ? '正在核对字幕版本…' : '核对并准备素材包' }}</button><a v-if="packageUrl" class="text-button" :href="packageUrl" download target="_blank" rel="noopener">下载本批素材包</a></div><p class="help">整批素材包包含原 MP4 和已确认字幕；所有片段均完成并确认字幕后才可打包。</p><div v-for="clip in currentBatch.clips" :key="clip.id" class="export-clip"><div><b>{{ clip.title || clip.product_name }}</b><p>{{ time(clip.start_ms) }} → {{ time(clip.end_ms) }} <span v-if="clip.attempt">· 第 {{ clip.attempt }} 次执行</span></p><FailureDiagnostic :diagnostic="clip.diagnostic" :error-code="clip.error_code" :attempt="clip.attempt" /></div><span class="status" :class="clip.status.toLowerCase()">{{ names[clip.status] ?? clip.status }}</span><small v-if="clip.size_bytes != null">{{ (clip.size_bytes / 1024 / 1024).toFixed(2) }} MB</small><div class="clip-actions"><template v-if="clip.status === 'SUCCEEDED' && clip.content_url"><button class="secondary" @click="previewId = clip.id">预览</button><button class="secondary" :disabled="!!pending" @click="openCaptions(clip)">校对字幕</button><a v-if="clip.download_url" class="secondary" :href="clip.download_url" target="_blank" rel="noopener">下载 MP4 ↓</a></template><button v-if="clip.status === 'FAILED'" class="secondary" :disabled="!!pending" @click="retry(clip)">重试此片段</button></div></div>
         <div v-if="preview?.content_url" class="export-preview"><div><b>{{ preview.title || preview.product_name }} · 成片预览</b><button class="text-button" @click="previewId = ''">关闭预览</button></div><video ref="previewPlayer" :key="preview.id" :src="preview.content_url" controls preload="metadata" playsinline @play="guardPlayback"></video></div>
       </template>
     </div>
+  <CaptionPanel v-if="captionTarget" :key="`${captionTarget.exportId}:${captionTarget.clipId}`" ref="captionEditor" :export-id="captionTarget.exportId" :clip-id="captionTarget.clipId" :content-url="captionTarget.contentUrl" :active="props.active !== false" @close="captionTarget = null" />
   </section>
 </template>
 

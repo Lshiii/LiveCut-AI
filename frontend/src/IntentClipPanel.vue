@@ -4,6 +4,8 @@ import { api, ApiError, post, type ExportJob } from './api'
 import FailureDiagnostic from './FailureDiagnostic.vue'
 import TextRequestProgress from './TextRequestProgress.vue'
 import { canPrefillClipInstruction } from './videoAgent'
+import CaptionPanel from './CaptionPanel.vue'
+import { CaptionBatchError, prepareCaptionBatch } from './captions'
 import { newestSnapshot, parseExportSnapshot, SnapshotError } from './snapshotStream'
 import { topicTime } from './topics'
 import { editIntentBoundary, intentCanCancel, intentCanConfirm, intentCanExport, intentCanResume, intentOutputValidation, intentPayload, intentResumeReceipt,
@@ -18,6 +20,9 @@ const error = ref(''), refreshError = ref(''), notice = ref(''), loading = ref(t
 const batches = ref<ExportJob[]>([]), previewUrl = ref(''), sourcePlayer = ref<HTMLVideoElement | null>(null)
 const instructionInput = ref<HTMLTextAreaElement | null>(null)
 const exportPlayer = ref<HTMLVideoElement | null>(null)
+const captionTarget = ref<{ exportId: string; clipId: string; contentUrl: string } | null>(null)
+const captionEditor = ref<{ dirty: boolean; pending: boolean } | null>(null)
+const packageBusyId = ref(''), packageUrls = ref<Record<string, string>>({})
 const scope = new IntentReadScope()
 let stopped = false, refreshing = false, timer: number | undefined, selectionVersion = 0, focusVersion = 0
 let pendingCreate: { input: string; key: string } | null = null
@@ -37,9 +42,9 @@ const confirmed = computed(() => !!snapshot.value && snapshot.value.confirmed_re
 const names: Record<string, string> = { QUEUED: '等待执行', RUNNING: '正在查找', PLAN_READY: '候选已生成', FAILED: '执行失败', CANCELLED: '已取消',
   FOUND: '已找到证据', NOT_FOUND: '未找到', NEEDS_REVIEW: '需进一步核对', READY: '等待领取', BLOCKED: '等待前序',
   RETRY_WAIT: '等待重试', SUCCEEDED: '已完成', PARTIAL_FAILED: '部分失败', SKIPPED: '已跳过' }
-defineExpose({ dirty, pending, prefillInstruction })
+defineExpose({ dirty: computed(() => dirty.value || !!captionEditor.value?.dirty), pending: computed(() => pending.value || !!captionEditor.value?.pending), prefillInstruction })
 function prefillInstruction(value: string): boolean {
-  if (!canPrefillClipInstruction(value, dirty.value, pending.value)) return false
+  if (!canPrefillClipInstruction(value, dirty.value || !!captionEditor.value?.dirty, pending.value || !!captionEditor.value?.pending)) return false
   instruction.value = value.trim(); error.value = ''; notice.value = '已填入视频助手的建议。请核对要求，再点击查找片段。'
   const version = ++focusVersion
   void nextTick(() => { if (!stopped && props.active !== false && version === focusVersion) instructionInput.value?.focus() })
@@ -87,6 +92,7 @@ function accept(value: IntentSnapshot, force = false) {
   }
 }
 function canChangeRequest() {
+  if (captionEditor.value?.dirty || captionEditor.value?.pending) { error.value = '请先保存或放弃字幕修改，等待提交完成后再切换剪辑请求。'; return false }
   if (pending.value) { error.value = '当前操作正在提交，请稍后切换请求。'; return false }
   if (dirty.value) { error.value = '本页有尚未提交的输入或方案修改，请先提交、保存或放弃本页修改。'; return false }
   return true
@@ -275,7 +281,27 @@ function duration(output: IntentOutput) { return output.parts.reduce((sum, part)
 function date(value: string) { return new Date(value).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) }
 function unload(event: BeforeUnloadEvent) { if (dirty.value || pending.value) { event.preventDefault(); event.returnValue = '' } }
 function pauseMedia() { sourcePlayer.value?.pause(); exportPlayer.value?.pause() }
-function guardPlayback(event: Event) { if (props.active === false || stopped) (event.currentTarget as HTMLVideoElement).pause() }
+function guardPlayback(event: Event) { if (props.active === false || stopped || captionTarget.value) (event.currentTarget as HTMLVideoElement).pause() }
+function openCaptions(batch: ExportJob, clip: ExportJob['clips'][number]) {
+  if (pending.value || captionEditor.value?.pending || clip.status !== 'SUCCEEDED' || !clip.content_url) return
+  if (captionEditor.value?.dirty) { error.value = '字幕有未保存修改，请先保存或放弃字幕修改。'; return }
+  pauseMedia(); captionTarget.value = { exportId: batch.id, clipId: clip.id, contentUrl: clip.content_url }
+}
+async function downloadBatchPackage(batch: ExportJob) {
+  if (packageBusyId.value) return
+  const id = selectedId.value, version = selectionVersion
+  packageBusyId.value = batch.id; error.value = ''
+  try {
+    const prepared = await prepareCaptionBatch(batch, url => api<unknown>(url))
+    if (!validOperation(id, version)) return
+    packageUrls.value[batch.id] = prepared.url; notice.value = `已核对 ${prepared.items.length} 个成片的确认字幕版本，素材包已准备好。请点击“下载本批素材包”开始下载。`
+  } catch (value) {
+    if (validOperation(id, version)) {
+      if (value instanceof CaptionBatchError) error.value = value.code === 'BATCH_INCOMPLETE' ? `本批有 ${value.clips.length} 个片段尚未完成，不能整批打包。请先处理失败或未完成项。` : `有 ${value.clips.length} 个成片${value.code === 'CAPTIONS_MISSING' ? '尚未校对字幕' : '字幕尚未确认'}：${value.clips.slice(0, 3).join('、')}。请逐片校对并确认后再打包。`
+      else fail(value)
+    }
+  } finally { if (packageBusyId.value === batch.id) packageBusyId.value = '' }
+}
 watch(() => props.active, value => { if (value === false) { focusVersion++; pauseMedia() } })
 onMounted(() => { window.addEventListener('beforeunload', unload); void poll() })
 onBeforeUnmount(() => { stopped = true; selectionVersion++; focusVersion++; pauseMedia(); scope.dispose(); window.clearTimeout(timer); window.removeEventListener('beforeunload', unload) })
@@ -336,7 +362,8 @@ onBeforeUnmount(() => { stopped = true; selectionVersion++; focusVersion++; paus
         </template>
       </div>
     </div>
-    <div v-if="batches.length" class="intent-exports"><h3>按需求剪辑成片</h3><p class="help">每个文件对应一个已确认目标。后续编辑不会改变已有导出批次。</p><article v-for="batch in batches" :key="batch.id" class="intent-batch"><p>确认版本 r{{ batch.approved_revision }} · {{ names[batch.status] ?? batch.status }} · {{ date(batch.created_at) }}</p><div v-for="clip in batch.clips" :key="clip.id" class="intent-export-clip"><strong>{{ clip.title ?? '剪辑视频' }}</strong><span>{{ names[clip.status] ?? clip.status }}</span><FailureDiagnostic :diagnostic="clip.diagnostic" :error-code="clip.error_code" :attempt="clip.attempt" /><div v-if="clip.status === 'SUCCEEDED'" class="actions"><button class="text-button" @click="previewUrl = clip.content_url ?? ''">预览成片</button><a class="text-button" :href="clip.download_url ?? undefined" download>下载 MP4</a></div></div></article><video v-if="previewUrl" ref="exportPlayer" :key="previewUrl" :src="previewUrl" controls preload="metadata" playsinline class="intent-source" @play="guardPlayback"></video></div>
+    <div v-if="batches.length" class="intent-exports"><h3>按需求剪辑成片</h3><p class="help">每个文件对应一个已确认目标。后续编辑不会改变已有导出批次。</p><article v-for="batch in batches" :key="batch.id" class="intent-batch"><p>确认版本 r{{ batch.approved_revision }} · {{ names[batch.status] ?? batch.status }} · {{ date(batch.created_at) }}</p><div class="caption-batch-actions"><button class="secondary" :disabled="!!packageBusyId || pending" @click="downloadBatchPackage(batch)">{{ packageBusyId === batch.id ? '正在核对字幕版本…' : '核对并准备素材包' }}</button><a v-if="packageUrls[batch.id]" class="text-button" :href="packageUrls[batch.id]" download target="_blank" rel="noopener">下载本批素材包</a><small>全部成片完成并确认字幕后，可打包原 MP4 与字幕。</small></div><div v-for="clip in batch.clips" :key="clip.id" class="intent-export-clip"><strong>{{ clip.title ?? '剪辑视频' }}</strong><span>{{ names[clip.status] ?? clip.status }}</span><FailureDiagnostic :diagnostic="clip.diagnostic" :error-code="clip.error_code" :attempt="clip.attempt" /><div v-if="clip.status === 'SUCCEEDED'" class="actions"><button class="text-button" @click="previewUrl = clip.content_url ?? ''">预览成片</button><button class="text-button" :disabled="pending" @click="openCaptions(batch, clip)">校对字幕</button><a class="text-button" :href="clip.download_url ?? undefined" download target="_blank" rel="noopener">下载 MP4</a></div></div></article><video v-if="previewUrl" ref="exportPlayer" :key="previewUrl" :src="previewUrl" controls preload="metadata" playsinline class="intent-source" @play="guardPlayback"></video></div>
+  <CaptionPanel v-if="captionTarget" :key="`${captionTarget.exportId}:${captionTarget.clipId}`" ref="captionEditor" :export-id="captionTarget.exportId" :clip-id="captionTarget.clipId" :content-url="captionTarget.contentUrl" :active="props.active !== false" @close="captionTarget = null" />
   </section>
 </template>
 
@@ -405,4 +432,5 @@ h3 { color: #52634b; font-size: 13px; } h3 > span { font-size: 10px; font-weight
 .workbench-shell .intent-panel :deep(.text-recovery) { color: #475569; background: #f8fafc; border-color: #cbd5e1; }
 @media(max-width: 900px) { .workbench-shell .intent-workspace { grid-template-columns: minmax(0, 1fr); } }
 @media(max-width: 650px) { .workbench-shell .intent-panel { padding: 16px; } .workbench-shell .intent-panel h2 { font-size: 18px; } }
+.caption-batch-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; margin: 10px 0; }.caption-batch-actions small { color: #64748b; font-size: 12px; }
 </style>

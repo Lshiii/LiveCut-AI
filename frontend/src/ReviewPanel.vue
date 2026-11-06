@@ -19,13 +19,14 @@ const baseline = ref(''), pending = ref(false), error = ref(''), notice = ref(''
 const selectedId = ref(''), productFilter = ref(''), player = ref<HTMLVideoElement | null>(null)
 const playhead = ref(0)
 const downloadRevision = ref<number | null>(null)
+const exportEditor = ref<{ dirty: boolean; pending: boolean } | null>(null)
 let loadVersion = 0, stopped = false
 const payload = computed(() => ({
   products: products.value.map(({ id, name }) => ({ id, name })),
   segments: segments.value.map(({ id, start_ms, end_ms, product_id, enabled }) => ({ id, start_ms, end_ms, product_id, enabled })),
 }))
 const dirty = computed(() => !!review.value && JSON.stringify(payload.value) !== baseline.value)
-defineExpose({ dirty, pending })
+defineExpose({ dirty: computed(() => dirty.value || !!exportEditor.value?.dirty), pending: computed(() => pending.value || !!exportEditor.value?.pending) })
 const selected = computed(() => segments.value.find(s => s.id === selectedId.value))
 const visible = computed(() => segments.value.filter(s => !productFilter.value || s.product_id === productFilter.value))
 const evidence = computed(() => review.value?.utterances.filter(u => selected.value && u.end_ms > selected.value.start_ms && u.start_ms < selected.value.end_ms) ?? [])
@@ -154,7 +155,7 @@ onBeforeUnmount(() => { stopped = true; loadVersion++; player.value?.pause(); wi
       </div>
       </fieldset>
       <div class="review-savebar"><div><b>{{ dirty ? '修改尚未保存' : `当前修订 r${review.revision}` }}</b><small>保存新版本；确认后才允许创建正式导出。</small></div><button class="secondary" :disabled="pending || !dirty" @click="save">{{ pending ? '处理中…' : '保存修订' }}</button><button class="primary" :disabled="pending || dirty || unresolved > 0 || review.status === 'CONFIRMED'" @click="confirm">{{ review.status === 'CONFIRMED' ? '本版已确认' : '确认此版本' }}</button></div>
-      <ExportPanel :key="review.job_id" :job-id="review.job_id" :confirmed-revisions="review.confirmed_revisions" :current-revision="review.revision" :dirty="dirty" :active="props.active" />
+      <ExportPanel ref="exportEditor" :key="review.job_id" :job-id="review.job_id" :confirmed-revisions="review.confirmed_revisions" :current-revision="review.revision" :dirty="dirty" :active="props.active" />
     </template>
   </section>
 </template>

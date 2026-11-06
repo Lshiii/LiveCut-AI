@@ -57,6 +57,8 @@ uv run pytest worker-python/tests/test_contracts.py worker-python/tests/test_inp
 
 ## 独立定位参考
 
+`caption-review.schema.json` 定义独立成片字幕修订：绑定导出/成片/转写 hash 和冻结 parts，时间为成片相对毫秒；不可变 partial 标记与明确 reviewed 状态推导 requires_review。保存只接收 id/start_ms/end_ms/text/reviewed，确认后才能交付。格式、下载和素材包协议见 [字幕校对与素材包](../docs/47-字幕校对与素材包.md)。该字幕为句级源 EDL 映射，不代表词级或实测接缝 PTS。
+
 `localization-annotation.schema.json` 定义无 SKU 的离线参考标注，要求实际源 SHA256、时长、原场次、明确的标注范围和来源声明。`fixtures/localization-annotation.synthetic.json` 仅用于合成手算验证；旧 `annotation.example.json` 的空模板仍不代表背景。
 
 `livecut evaluate-localization` 对未经人工修改的 DRAFT 预测做来源绑定及一对一定位评测；没有参考时使用 `livecut audit-localization`，不会输出质量分数。完整命令和部分标注口径见 [离线定位评测](../docs/23-离线定位评测与证据审计.md)。

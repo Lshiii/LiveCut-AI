@@ -15,6 +15,7 @@ const keywordInputs = ref<Record<string, string>>({})
 const timeInputs = ref<TopicTimeDrafts>({}), previewRange = ref<TopicPreviewRange | null>(null)
 const preview = new TopicPreview(value => { previewRange.value = value })
 const downloadRevision = ref<number | null>(null)
+const exportEditor = ref<{ dirty: boolean; pending: boolean } | null>(null)
 const reviewView = ref<'edit' | 'exports'>('edit')
 const editViewTab = ref<HTMLButtonElement | null>(null), exportViewTab = ref<HTMLButtonElement | null>(null)
 const evidenceExpanded = ref(!window.matchMedia('(max-width: 800px)').matches)
@@ -26,7 +27,7 @@ const validation = computed(() => review.value ? topicValidation(segments.value,
 const selected = computed(() => segments.value.find(segment => segment.id === selectedId.value))
 const enabledCount = computed(() => segments.value.filter(segment => segment.enabled).length)
 const evidence = computed(() => review.value?.utterances.filter(utterance => selected.value && utterance.end_ms > selected.value.start_ms && utterance.start_ms < selected.value.end_ms) ?? [])
-defineExpose({ dirty, pending })
+defineExpose({ dirty: computed(() => dirty.value || !!exportEditor.value?.dirty), pending: computed(() => pending.value || !!exportEditor.value?.pending) })
 
 function fail(value: unknown) {
   const code = value instanceof ApiError ? value.code : value instanceof TopicResponseError ? 'INVALID_SERVER_RESPONSE' : 'CLIENT_ERROR'
@@ -221,7 +222,7 @@ onBeforeUnmount(() => { stopped = true; version++; preview.cancel(); player.valu
         <p v-if="validation" class="topic-validation" role="alert">{{ validation }}</p>
         <footer class="topic-savebar"><div><b>{{ dirty ? '修改尚未保存' : `当前修订 r${review.revision}` }}</b><small>{{ enabledCount ? `已选 ${enabledCount} 段；确认后可创建切分任务。` : '请勾选需要切分的话题。' }}</small></div><button class="secondary" :disabled="pending || !dirty || !!validation" @click="save">保存修订</button><button class="primary" :disabled="pending || dirty || !!validation || !enabledCount || review.status === 'CONFIRMED'" @click="confirm">{{ review.status === 'CONFIRMED' ? '本版已确认' : '确认所选片段' }}</button></footer>
       </div>
-      <div v-show="reviewView === 'exports'" :id="`topic-export-view-${jobId}`" class="topic-exports-page" role="tabpanel" :aria-labelledby="`topic-export-tab-${jobId}`"><div v-if="review.confirmed_revisions.length" class="topic-download"><label>留档版本 <select v-model.number="downloadRevision" aria-label="下载话题确认版本" :disabled="pending"><option v-for="revision in review.confirmed_revisions" :key="revision" :value="revision">r{{ revision }}</option></select></label><button class="text-button" :disabled="pending || downloadRevision === null" @click="downloadConfirmed">下载话题 JSON ↓</button></div><p v-if="dirty" class="topic-export-hint">审核页的未保存修改仍保留。这里查看的是已确认版本与已有成片。</p><ExportPanel :key="review.job_id" :job-id="review.job_id" :confirmed-revisions="review.confirmed_revisions" :current-revision="review.revision" :dirty="dirty" :active="props.active && reviewView === 'exports'" analysis-mode="topics" /></div>
+      <div v-show="reviewView === 'exports'" :id="`topic-export-view-${jobId}`" class="topic-exports-page" role="tabpanel" :aria-labelledby="`topic-export-tab-${jobId}`"><div v-if="review.confirmed_revisions.length" class="topic-download"><label>留档版本 <select v-model.number="downloadRevision" aria-label="下载话题确认版本" :disabled="pending"><option v-for="revision in review.confirmed_revisions" :key="revision" :value="revision">r{{ revision }}</option></select></label><button class="text-button" :disabled="pending || downloadRevision === null" @click="downloadConfirmed">下载话题 JSON ↓</button></div><p v-if="dirty" class="topic-export-hint">审核页的未保存修改仍保留。这里查看的是已确认版本与已有成片。</p><ExportPanel ref="exportEditor" :key="review.job_id" :job-id="review.job_id" :confirmed-revisions="review.confirmed_revisions" :current-revision="review.revision" :dirty="dirty" :active="props.active && reviewView === 'exports'" analysis-mode="topics" /></div>
     </template>
   </section>
 </template>
