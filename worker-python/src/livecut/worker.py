@@ -61,7 +61,9 @@ def _native_path(path: Path) -> Path:
     return Path("\\\\?\\" + absolute)
 
 
-def _write(path: Path, value: object) -> None:
+def _write(path: Path, value: object, *, guard: Callable[[], None] | None = None) -> None:
+    if guard is not None:
+        guard()
     target = _native_path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
     temporary: Path | None = None
@@ -71,6 +73,8 @@ def _write(path: Path, value: object) -> None:
             handle.write(_json_bytes(value))
             handle.flush()
             os.fsync(handle.fileno())
+        if guard is not None:
+            guard()
         os.replace(temporary, target)
     finally:
         if temporary is not None:
@@ -245,7 +249,7 @@ class StageContext:
         if not resolved.is_relative_to(self.directory.resolve()) or not _native_path(resolved).is_file():
             raise WorkerError("UNSAFE_OUTPUT_ARTIFACT")
         return {"kind": kind, "key": resolved.relative_to(self.storage_root.resolve()).as_posix(),
-                "sha256": sha256(resolved)}
+                "sha256": sha256(resolved, guard=self.guard.check)}
 
     def predecessor(self, stage_type: str, kind: str) -> Path:
         matches = [item for item in self.lease.artifacts if item.get("stage_type") == stage_type]
@@ -253,7 +257,7 @@ class StageContext:
             raise WorkerError("MISSING_PREDECESSOR")
         reference = matches[0]
         manifest_path = shared_path(self.storage_root, reference["manifest_key"], must_exist=True)
-        if sha256(manifest_path) != reference["manifest_hash"]:
+        if sha256(manifest_path, guard=self.guard.check) != reference["manifest_hash"]:
             raise WorkerError("ARTIFACT_HASH_MISMATCH")
         manifest = _read(manifest_path)
         if (manifest.get("job_id") != self.lease.job_id
@@ -273,7 +277,7 @@ class StageContext:
         path = shared_path(self.storage_root, artifact["key"], must_exist=True)
         if not path.is_relative_to(manifest_path.parent.resolve()):
             raise WorkerError("UNSAFE_STORAGE_KEY")
-        if sha256(path) != artifact["sha256"]:
+        if sha256(path, guard=self.guard.check) != artifact["sha256"]:
             raise WorkerError("ARTIFACT_HASH_MISMATCH")
         return path
 
@@ -695,7 +699,7 @@ class StageWorker:
                     raise WorkerError("INVALID_RESULT_MANIFEST")
             manifest_path = directory / "manifest.json"
             guard.check()
-            _write(manifest_path, manifest)
+            _write(manifest_path, manifest, guard=guard.check)
             payload = {**lease.credentials, "manifest_key": lease.attempt_key + "/manifest.json",
                        "manifest_hash": sha256(manifest_path, guard=guard.check)}
             callback = {"action": "complete", "stage_id": lease.stage_id, "payload": payload}
@@ -789,7 +793,8 @@ class AnalysisStageExecutor:
             raise WorkerError("INVALID_INTENT_INPUT")
         transcript_path = context.predecessor("ASR", "transcript")
         expected_path = shared_path(context.storage_root, config["source_transcript_key"], must_exist=True)
-        if transcript_path != expected_path or sha256(transcript_path) != config["source_transcript_hash"]:
+        if (transcript_path != expected_path
+                or sha256(transcript_path, guard=context.guard.check) != config["source_transcript_hash"]):
             raise WorkerError("SOURCE_HASH_MISMATCH")
         media = _read(context.predecessor("MEDIA", "media_info"))
         if media.get("duration_ms") != config["duration_ms"]:
@@ -863,18 +868,21 @@ class AnalysisStageExecutor:
             artifacts = reuse_preparation(context, config["preparation_reuse"])
         elif lease.stage_type == "MEDIA":
             info = probe_media(_native_path(source), ffprobe_path=self.ffprobe_path,
-                               timeout_seconds=min(30, context.guard.remaining_seconds()))
+                               timeout_seconds=min(30, context.guard.remaining_seconds()),
+                               guard=context.guard.check)
             context.guard.check()
             audio = directory / "audio.wav"
             extract_audio(_native_path(source), _native_path(audio), ffmpeg_path=self.ffmpeg_path,
                           ffprobe_path=self.ffprobe_path,
-                          timeout_seconds=min(300, context.guard.remaining_seconds()))
+                          timeout_seconds=min(300, context.guard.remaining_seconds()),
+                          guard=context.guard.check)
             media_path = directory / "media-info.json"
-            _write(media_path, {key: value for key, value in asdict(info).items() if key != "path"})
+            _write(media_path, {key: value for key, value in asdict(info).items() if key != "path"},
+                   guard=context.guard.check)
             artifacts = [context.artifact("media_info", media_path), context.artifact("audio", audio)]
         elif lease.stage_type == "ASR":
             audio = context.predecessor("MEDIA", "audio")
-            context.provider_input_hash = sha256(audio)
+            context.provider_input_hash = sha256(audio, guard=context.guard.check)
             if self.asr_reuse_source is not None:
                 from .asr_reuse import reuse_asr
 

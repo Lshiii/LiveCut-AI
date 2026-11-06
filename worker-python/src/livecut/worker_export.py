@@ -111,7 +111,8 @@ class ExportStageExecutor:
                        source_info: MediaInfo) -> MediaInfo:
         context.guard.check()
         info = probe_media(_native_path(clip), ffprobe_path=self.ffprobe_path,
-                           timeout_seconds=min(30, context.guard.remaining_seconds()))
+                           timeout_seconds=min(30, context.guard.remaining_seconds()),
+                           guard=context.guard.check)
         if info.video_codec != "h264" or info.audio_codec != (
             "aac" if source_info.audio_codec is not None else None
         ):
@@ -125,7 +126,7 @@ class ExportStageExecutor:
             "-err_detect", "explode", "-i", str(_native_path(clip)),
             "-map", "0:v:0", "-map", "0:a:0?", "-f", "null", "-",
         ], timeout_seconds=min(300, context.guard.remaining_seconds()),
-            failure_code="EXPORT_DECODE_FAILED")
+            failure_code="EXPORT_DECODE_FAILED", guard=context.guard.check)
         context.guard.check()
         return info
 
@@ -134,10 +135,11 @@ class ExportStageExecutor:
         lease = context.lease
         spec = ExportSpec.from_lease(lease)
         source = shared_path(context.storage_root, lease.source_key, must_exist=True)
-        if sha256(source) != lease.source_hash:
+        if sha256(source, guard=context.guard.check) != lease.source_hash:
             raise WorkerError("SOURCE_HASH_MISMATCH")
         source_info = probe_media(_native_path(source), ffprobe_path=self.ffprobe_path,
-                                  timeout_seconds=min(30, context.guard.remaining_seconds()))
+                                  timeout_seconds=min(30, context.guard.remaining_seconds()),
+                                  guard=context.guard.check)
         if spec.end_ms > source_info.duration_ms:
             raise WorkerError("INVALID_EXPORT_INTERVAL")
         directory = context.directory
@@ -161,13 +163,13 @@ class ExportStageExecutor:
         else:
             if any(_native_path(path).exists() for path in (checkpoint_path, clip, media_info)):
                 raise WorkerError("UNCLAIMED_EXPORT_OUTPUT")
-            _write(binding_path, binding)
+            _write(binding_path, binding, guard=context.guard.check)
         existing = _read(checkpoint_path) if _native_path(checkpoint_path).exists() else None
         if existing is not None:
-            if (existing.get("binding_sha256") != sha256(binding_path)
+            if (existing.get("binding_sha256") != sha256(binding_path, guard=context.guard.check)
                     or not _native_path(clip).is_file() or not _native_path(media_info).is_file()
-                    or existing.get("clip_sha256") != sha256(clip)
-                    or existing.get("media_info_sha256") != sha256(media_info)):
+                    or existing.get("clip_sha256") != sha256(clip, guard=context.guard.check)
+                    or existing.get("media_info_sha256") != sha256(media_info, guard=context.guard.check)):
                 raise WorkerError("EXPORT_ARTIFACT_CHANGED")
         elif not _native_path(clip).exists():
             if _native_path(media_info).exists():
@@ -176,17 +178,21 @@ class ExportStageExecutor:
             if spec.parts:
                 export_composed_clip(_native_path(source), _native_path(clip), spec.parts,
                                      ffmpeg_path=self.ffmpeg_path, ffprobe_path=self.ffprobe_path,
-                                     timeout_seconds=min(300, context.guard.remaining_seconds()))
+                                     timeout_seconds=min(300, context.guard.remaining_seconds()),
+                                     guard=context.guard.check)
             else:
                 export_clip(_native_path(source), _native_path(clip), spec.start_ms, spec.end_ms,
                             ffmpeg_path=self.ffmpeg_path, ffprobe_path=self.ffprobe_path,
-                            timeout_seconds=min(300, context.guard.remaining_seconds()))
+                            timeout_seconds=min(300, context.guard.remaining_seconds()),
+                            guard=context.guard.check)
         info = self._verify_output(context, clip, spec, source_info)
         if existing is None:
-            _write(media_info, {key: value for key, value in asdict(info).items() if key != "path"})
-            _write(checkpoint_path, {"binding_sha256": sha256(binding_path),
-                                     "clip_sha256": sha256(clip),
-                                     "media_info_sha256": sha256(media_info)})
+            _write(media_info, {key: value for key, value in asdict(info).items() if key != "path"},
+                   guard=context.guard.check)
+            checkpoint = {"binding_sha256": sha256(binding_path, guard=context.guard.check),
+                          "clip_sha256": sha256(clip, guard=context.guard.check),
+                          "media_info_sha256": sha256(media_info, guard=context.guard.check)}
+            _write(checkpoint_path, checkpoint, guard=context.guard.check)
         context.guard.check()
         return {
             "schema_version": 1, "job_id": lease.job_id, "video_id": lease.video_id,

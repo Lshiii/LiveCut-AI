@@ -13,12 +13,14 @@ import math
 import os
 import subprocess
 import tempfile
+import time
 import wave
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from decimal import ROUND_CEILING, Decimal, InvalidOperation
 from fractions import Fraction
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 
 class MediaError(Exception):
@@ -69,14 +71,31 @@ def _input_file(path: str | Path) -> Path:
 
 
 def _run_process(
-    command: list[str], *, timeout_seconds: float, failure_code: str
+    command: list[str], *, timeout_seconds: float, failure_code: str,
+    guard: Callable[[], None] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     if isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, (int, float)):
         raise MediaError("INVALID_ARGUMENT", "timeout_seconds must be a positive finite number")
     if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
         raise MediaError("INVALID_ARGUMENT", "timeout_seconds must be a positive finite number")
+    if guard is not None:
+        result = _run_guarded_process(command, timeout_seconds=timeout_seconds,
+                                      failure_code=failure_code, guard=guard)
+    else:
+        result = _run_unchecked_process(command, timeout_seconds=timeout_seconds,
+                                        failure_code=failure_code)
+    if result.returncode != 0:
+        detail = (result.stderr or "No diagnostic output").strip()[-2000:]
+        raise MediaError(failure_code, f"Media command failed (exit {result.returncode}): {detail}")
+    return result
+
+
+def _run_unchecked_process(
+    command: list[str], *, timeout_seconds: float, failure_code: str,
+) -> subprocess.CompletedProcess[str]:
+    # Keep the CLI's synchronous path and its subprocess.run error semantics.
     try:
-        result = subprocess.run(
+        return subprocess.run(
             command,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
@@ -94,10 +113,92 @@ def _run_process(
         raise MediaError("PROCESS_TIMEOUT", f"Media command exceeded {timeout_seconds} seconds") from exc
     except OSError as exc:
         raise MediaError(failure_code, f"Unable to execute media command: {exc}") from exc
-    if result.returncode != 0:
-        detail = (result.stderr or "No diagnostic output").strip()[-2000:]
-        raise MediaError(failure_code, f"Media command failed (exit {result.returncode}): {detail}")
-    return result
+
+
+def _reap_process(process: subprocess.Popen[str]) -> None:
+    """Stop only our child, with a bounded grace period and bounded kill wait."""
+    failures = []
+    for stop in (process.terminate, process.kill):
+        if process.poll() is not None:
+            return
+        try:
+            stop()
+        except OSError as exc:
+            failures.append(type(exc).__name__)
+        try:
+            process.wait(timeout=0.2)
+            return
+        except BaseException as exc:
+            failures.append(type(exc).__name__)
+    if process.poll() is None:
+        raise MediaError(
+            "PROCESS_CLEANUP_FAILED",
+            f"Direct child {process.pid} was not confirmed reaped after bounded "
+            f"terminate/kill waits ({', '.join(failures)})",
+        )
+
+
+def _read_process_capture(capture: BinaryIO) -> str:
+    # A wrapper's descendant could keep an inherited handle open and append.
+    # Read only the size observed when our child exits, never chase later writes.
+    size = os.fstat(capture.fileno()).st_size
+    capture.seek(0)
+    return capture.read(size).decode("utf-8", errors="replace")
+
+
+def _run_guarded_process(
+    command: list[str], *, timeout_seconds: float, failure_code: str,
+    guard: Callable[[], None],
+) -> subprocess.CompletedProcess[str]:
+    # Regular-file capture avoids pipe backpressure and Windows communicate
+    # reader threads. Inherited handles cannot make cancellation drain or close
+    # wait for a wrapper's descendants; we only stop and reap our direct child.
+    deadline = time.monotonic() + timeout_seconds
+
+    def check_remaining() -> float:
+        guard()
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise MediaError("PROCESS_TIMEOUT", f"Media command exceeded {timeout_seconds} seconds")
+        return remaining
+
+    check_remaining()
+    with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
+        check_remaining()
+        try:
+            process = subprocess.Popen(
+                command,
+                stdin=subprocess.DEVNULL,
+                stdout=stdout,
+                stderr=stderr,
+                shell=False,
+            )
+        except FileNotFoundError as exc:
+            raise MediaError("TOOL_NOT_FOUND", f"Executable not found: {command[0]}") from exc
+        except OSError as exc:
+            raise MediaError(failure_code, f"Unable to execute media command: {exc}") from exc
+        try:
+            while True:
+                remaining = check_remaining()
+                try:
+                    process.wait(timeout=min(0.2, remaining))
+                except subprocess.TimeoutExpired:
+                    continue
+                check_remaining()
+                captured_stdout = _read_process_capture(stdout)
+                captured_stderr = _read_process_capture(stderr)
+                check_remaining()
+                return subprocess.CompletedProcess(
+                    command, process.returncode, captured_stdout, captured_stderr,
+                )
+        except BaseException as exc:
+            # Keep the original guard failure, lease loss or KeyboardInterrupt.
+            # A failure to confirm cleanup stays visible in its traceback notes.
+            try:
+                _reap_process(process)
+            except BaseException as cleanup_error:
+                exc.add_note(f"Media subprocess cleanup incomplete: {cleanup_error}")
+            raise
 
 
 def _number(value: Any) -> float | None:
@@ -156,6 +257,7 @@ def probe_media(
     *,
     ffprobe_path: str | Path = "ffprobe",
     timeout_seconds: float = 30,
+    guard: Callable[[], None] | None = None,
 ) -> MediaInfo:
     """Validate the initial MP4 profile and retain original stream timestamps.
 
@@ -170,6 +272,7 @@ def probe_media(
         [str(ffprobe_path), "-v", "error", "-show_format", "-show_streams", "-of", "json", str(source)],
         timeout_seconds=timeout_seconds,
         failure_code="PROBE_FAILED",
+        guard=guard,
     )
     try:
         data = json.loads(result.stdout)
@@ -261,7 +364,11 @@ def _check_duration(actual_ms: int, expected_ms: int, frame_rate: float | None =
         )
 
 
-def _publish(temporary: Path, target: Path) -> None:
+def _publish(
+    temporary: Path, target: Path, *, guard: Callable[[], None] | None = None,
+) -> None:
+    if guard is not None:
+        guard()
     try:
         os.replace(temporary, target)
     except OSError as exc:
@@ -275,9 +382,11 @@ def extract_audio(
     ffmpeg_path: str | Path = "ffmpeg",
     ffprobe_path: str | Path = "ffprobe",
     timeout_seconds: float = 300,
+    guard: Callable[[], None] | None = None,
 ) -> Path:
     """Atomically write verified 16kHz mono PCM16 WAV for ASR; return its path."""
-    info = probe_media(source, ffprobe_path=ffprobe_path, timeout_seconds=timeout_seconds)
+    info = probe_media(source, ffprobe_path=ffprobe_path, timeout_seconds=timeout_seconds,
+                       guard=guard)
     target = _output_file(info.path, output, ".wav")
     _require_aligned_timeline(info)
     if info.audio_codec is None:
@@ -289,6 +398,7 @@ def extract_audio(
              "-map", "0:a:0", "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", str(temporary)],
             timeout_seconds=timeout_seconds,
             failure_code="TRANSCODE_FAILED",
+            guard=guard,
         )
         try:
             with wave.open(str(temporary), "rb") as audio:
@@ -298,7 +408,7 @@ def extract_audio(
                 _check_duration(actual_ms, info.duration_ms)
         except (wave.Error, EOFError, OSError) as exc:
             raise MediaError("OUTPUT_VALIDATION_FAILED", "Extracted audio is missing or invalid WAV") from exc
-        _publish(temporary, target)
+        _publish(temporary, target, guard=guard)
         return target
     finally:
         temporary.unlink(missing_ok=True)
@@ -313,6 +423,7 @@ def export_clip(
     ffmpeg_path: str | Path = "ffmpeg",
     ffprobe_path: str | Path = "ffprobe",
     timeout_seconds: float = 300,
+    guard: Callable[[], None] | None = None,
 ) -> MediaInfo:
     """Transcode [start_ms, end_ms) to H.264/AAC MP4 with accurate input seek.
 
@@ -322,7 +433,8 @@ def export_clip(
     """
     if type(start_ms) is not int or type(end_ms) is not int or not 0 <= start_ms < end_ms:
         raise MediaError("INVALID_INTERVAL", "Expected integer milliseconds satisfying 0 <= start_ms < end_ms")
-    info = probe_media(source, ffprobe_path=ffprobe_path, timeout_seconds=timeout_seconds)
+    info = probe_media(source, ffprobe_path=ffprobe_path, timeout_seconds=timeout_seconds,
+                       guard=guard)
     target = _output_file(info.path, output, ".mp4")
     _require_aligned_timeline(info)
     if end_ms > info.duration_ms:
@@ -337,12 +449,14 @@ def export_clip(
              "-c:a", "aac", "-movflags", "+faststart", str(temporary)],
             timeout_seconds=timeout_seconds,
             failure_code="TRANSCODE_FAILED",
+            guard=guard,
         )
-        result = probe_media(temporary, ffprobe_path=ffprobe_path, timeout_seconds=timeout_seconds)
+        result = probe_media(temporary, ffprobe_path=ffprobe_path, timeout_seconds=timeout_seconds,
+                             guard=guard)
         _check_duration(result.duration_ms, end_ms - start_ms, result.frame_rate)
         if (result.audio_codec is None) != (info.audio_codec is None):
             raise MediaError("OUTPUT_VALIDATION_FAILED", "Export unexpectedly changed audio stream presence")
-        _publish(temporary, target)
+        _publish(temporary, target, guard=guard)
         return replace(result, path=target)
     finally:
         temporary.unlink(missing_ok=True)
@@ -352,6 +466,7 @@ def export_composed_clip(
     source: str | Path, output: str | Path, parts: list[dict], *,
     ffmpeg_path: str | Path = "ffmpeg", ffprobe_path: str | Path = "ffprobe",
     timeout_seconds: float = 300,
+    guard: Callable[[], None] | None = None,
 ) -> MediaInfo:
     """Accurately seek each ordered source interval and encode one continuous MP4.
 
@@ -368,7 +483,8 @@ def export_composed_clip(
                 or (index and part["start_ms"] < previous)):
             raise MediaError("INVALID_INTERVAL", "Source intervals must be ordered and non-overlapping")
         previous = part["end_ms"]
-    info = probe_media(source, ffprobe_path=ffprobe_path, timeout_seconds=timeout_seconds)
+    info = probe_media(source, ffprobe_path=ffprobe_path, timeout_seconds=timeout_seconds,
+                       guard=guard)
     _require_aligned_timeline(info)
     if parts[-1]["end_ms"] > info.duration_ms:
         raise MediaError("INVALID_INTERVAL", "Interval exceeds the original video duration")
@@ -393,14 +509,16 @@ def export_composed_clip(
     command += ["-c:v", "libx264", "-threads", "2", "-preset", "veryfast", "-crf", "23",
                 "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(temporary)]
     try:
-        _run_process(command, timeout_seconds=timeout_seconds, failure_code="TRANSCODE_FAILED")
-        result = probe_media(temporary, ffprobe_path=ffprobe_path, timeout_seconds=timeout_seconds)
+        _run_process(command, timeout_seconds=timeout_seconds, failure_code="TRANSCODE_FAILED",
+                     guard=guard)
+        result = probe_media(temporary, ffprobe_path=ffprobe_path, timeout_seconds=timeout_seconds,
+                             guard=guard)
         expected = sum(part["end_ms"] - part["start_ms"] for part in parts)
         # Reuse the single-part bound while accounting for each edit's rounding.
         _check_duration(result.duration_ms, expected, result.frame_rate, interval_count=len(parts))
         if (result.audio_codec is None) != (info.audio_codec is None):
             raise MediaError("OUTPUT_VALIDATION_FAILED", "Composed export changed audio stream presence")
-        _publish(temporary, target)
+        _publish(temporary, target, guard=guard)
         return replace(result, path=target)
     finally:
         temporary.unlink(missing_ok=True)

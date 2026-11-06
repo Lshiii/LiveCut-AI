@@ -13,15 +13,16 @@ import json
 import math
 import os
 import re
-import subprocess
 import tempfile
 from contextlib import contextmanager
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 from urllib.parse import urlsplit
 
 import httpx
+
+from .media import MediaError, _run_process
 
 _PROMPT = """你是直播画面观察员，只能根据每张图片判断该时刻画面中的展示证据。
 每个 FRAME 标签紧邻的下一张图片属于该 frame_id，逐帧独立观察，不能沿用其他帧的商品身份。
@@ -44,7 +45,8 @@ class VisionError(Exception):
         self.code = code
 
 
-def _write_json(path: Path, value: Any, *, secret: str | None = None) -> None:
+def _write_json(path: Path, value: Any, *, secret: str | None = None,
+                guard: Callable[[], None] | None = None) -> None:
     text = json.dumps(value, ensure_ascii=False, indent=2, allow_nan=False) + "\n"
     if secret:
         text = text.replace(secret, "[REDACTED]")
@@ -55,6 +57,8 @@ def _write_json(path: Path, value: Any, *, secret: str | None = None) -> None:
             handle.write(text)
             handle.flush()
             os.fsync(handle.fileno())
+        if guard is not None:
+            guard()
         os.replace(temporary, path)
     except OSError:
         raise VisionError("STORAGE_ERROR", "Cannot persist visual evidence or checkpoint") from None
@@ -70,12 +74,16 @@ def _read_json(path: Path) -> Any:
         raise VisionError("INVALID_CHECKPOINT", "Visual checkpoint or response is unreadable; do not automatically regenerate") from None
 
 
-def _hash_file(path: Path) -> str:
+def _hash_file(path: Path, *, guard: Callable[[], None] | None = None) -> str:
     try:
         digest = hashlib.sha256()
         with path.open("rb") as handle:
             for block in iter(lambda: handle.read(1024 * 1024), b""):
+                if guard is not None:
+                    guard()
                 digest.update(block)
+        if guard is not None:
+            guard()
         return digest.hexdigest()
     except OSError:
         raise VisionError("INVALID_SOURCE", "Source media or cached frame is unavailable") from None
@@ -125,7 +133,8 @@ def _endpoint(value: str | None) -> str:
     return endpoint + "/api/v1" if not parsed.path else endpoint
 
 
-def _extract_frame(source: Path, output: Path, requested_ms: int, *, ffmpeg_path: str | Path) -> dict:
+def _extract_frame(source: Path, output: Path, requested_ms: int, *, ffmpeg_path: str | Path,
+                   guard: Callable[[], None] | None = None) -> dict:
     """Write a JPEG and report its first actual source PTS, not requested seek."""
     temporary = None
     try:
@@ -136,16 +145,14 @@ def _extract_frame(source: Path, output: Path, requested_ms: int, *, ffmpeg_path
                    r"showinfo,scale=w=min(iw\,360):h=min(ih\,640):force_original_aspect_ratio=decrease",
                    "-frames:v", "1", "-q:v", "3", "-fps_mode", "passthrough", "-update", "1", str(temporary)]
         try:
-            result = subprocess.run(command, stdin=subprocess.DEVNULL, capture_output=True, text=True,
-                                    encoding="utf-8", errors="replace", shell=False, timeout=60, check=False)
-        except FileNotFoundError:
-            raise VisionError("TOOL_NOT_FOUND", "FFmpeg executable not found") from None
-        except subprocess.TimeoutExpired:
-            raise VisionError("FRAME_TIMEOUT", "FFmpeg frame extraction exceeded 60 seconds") from None
-        except OSError:
-            raise VisionError("FRAME_EXTRACTION_FAILED", "Cannot run FFmpeg frame extraction") from None
-        if result.returncode != 0:
-            raise VisionError("FRAME_EXTRACTION_FAILED", f"FFmpeg frame extraction failed (exit {result.returncode})")
+            result = _run_process(command, timeout_seconds=60, failure_code="FRAME_EXTRACTION_FAILED",
+                                  guard=guard)
+        except MediaError as exc:
+            messages = {"TOOL_NOT_FOUND": "FFmpeg executable not found",
+                        "FRAME_TIMEOUT": "FFmpeg frame extraction exceeded 60 seconds",
+                        "FRAME_EXTRACTION_FAILED": "Cannot run FFmpeg frame extraction"}
+            code = "FRAME_TIMEOUT" if exc.code == "PROCESS_TIMEOUT" else exc.code
+            raise VisionError(code, messages.get(code, "FFmpeg frame extraction failed")) from exc
         frame = re.search(r"\bn:\s*0\s+pts:\s*(-?\d+)\s+pts_time:([-+0-9.eE]+)", result.stderr)
         time_base = re.search(r"config in time_base:\s*(\d+/\d+)", result.stderr)
         # Global playable time starts at zero in this first media profile.
@@ -161,6 +168,8 @@ def _extract_frame(source: Path, output: Path, requested_ms: int, *, ffmpeg_path
         image = temporary.read_bytes()
         if not image.startswith(b"\xff\xd8") or not image.endswith(b"\xff\xd9"):
             raise VisionError("INVALID_FRAME", "FFmpeg output is not a complete JPEG")
+        if guard is not None:
+            guard()
         os.replace(temporary, output)
         return {"timestamp_ms": timestamp_ms, "source_pts": int(frame.group(1)), "source_time_base": time_base.group(1)}
     except OSError:
