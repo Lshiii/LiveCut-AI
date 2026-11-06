@@ -87,7 +87,12 @@ public class ArtifactVerifier {
 
     public VerifiedManifest verifyClipPlanManifest(String key,String hash,ManifestIdentity expected) {
         if(expected==null||!"SEGMENT".equals(expected.stageType()))throw invalidReference();
-        return verifyManifest(key,hash,expected,null,true);
+        return verifyManifest(key,hash,expected,null,"clip_plan");
+    }
+
+    public VerifiedManifest verifyAgentAnswerManifest(String key,String hash,ManifestIdentity expected) {
+        if(expected==null||!"SEGMENT".equals(expected.stageType()))throw invalidReference();
+        return verifyManifest(key,hash,expected,null,"agent_answer");
     }
 
     public JsonNode readJsonArtifact(VerifiedArtifact artifact,ManifestIdentity expected) {
@@ -124,11 +129,11 @@ public class ArtifactVerifier {
 
     private VerifiedManifest verifyManifest(String key, String expectedHash, ManifestIdentity expected,
                                              ExportIdentity export) {
-        return verifyManifest(key,expectedHash,expected,export,false);
+        return verifyManifest(key,expectedHash,expected,export,null);
     }
 
     private VerifiedManifest verifyManifest(String key,String expectedHash,ManifestIdentity expected,
-                                             ExportIdentity export,boolean clipPlan) {
+                                             ExportIdentity export,String specialKind) {
         if (expected == null || !expected.attemptPrefix().concat("manifest.json").equals(key)) { throw invalidReference(); }
         byte[] bytes = verifiedBytes(key, expectedHash, expected.attemptPrefix(), MAX_MANIFEST_BYTES);
         JsonNode manifest;
@@ -186,7 +191,7 @@ public class ArtifactVerifier {
             long size = verifyFile(artifactKey, artifactHash, expected.attemptPrefix(), Long.MAX_VALUE);
             verified.add(new VerifiedArtifact(kind, artifactKey, artifactHash, size));
         }
-        if (!kinds.containsAll(clipPlan?Set.of("clip_plan"):REQUIRED_KINDS.get(expected.stageType()))) { throw invalidManifest(); }
+        if (!kinds.containsAll(specialKind==null?REQUIRED_KINDS.get(expected.stageType()):Set.of(specialKind))) { throw invalidManifest(); }
         return new VerifiedManifest(verified);
     }
 

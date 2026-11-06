@@ -779,6 +779,80 @@ class AnalysisStageExecutor:
         self.ffmpeg_path, self.ffprobe_path = ffmpeg_path, ffprobe_path
         self.asr_reuse_source = deepcopy(asr_reuse_source)
 
+    def _execute_agent(self, context: StageContext) -> dict:
+        from .video_agent import build_video_answer
+
+        lease, directory = context.lease, context.directory
+        config = lease.config.get("agent_turn")
+        required = {"turn_id", "session_id", "question", "source_job_id", "source_transcript_key",
+                    "source_transcript_hash", "source_analysis_key", "source_analysis_hash",
+                    "duration_ms", "history", "max_tool_steps"}
+        if (not isinstance(config, dict) or not required.issubset(config)
+                or config["source_job_id"] != lease.job_id
+                or type(config["duration_ms"]) is not int or config["duration_ms"] <= 0
+                or type(config["max_tool_steps"]) is not int or not 1 <= config["max_tool_steps"] <= 4
+                or type(lease.config.get("max_text_calls")) is not int
+                or not 1 <= lease.config["max_text_calls"] <= 24
+                or type(lease.config.get("max_asr_submissions")) is not int
+                or lease.config["max_asr_submissions"] != 0):
+            raise WorkerError("INVALID_AGENT_INPUT")
+        sources = {}
+        for name, stage, kind in (("transcript", "ASR", "transcript"),
+                                   ("analysis", "TIMELINE", "analysis_result")):
+            path = context.predecessor(stage, kind)
+            expected = shared_path(context.storage_root, config[f"source_{name}_key"], must_exist=True)
+            if path != expected or sha256(path, guard=context.guard.check) != config[f"source_{name}_hash"]:
+                raise WorkerError("SOURCE_HASH_MISMATCH")
+            sources[name] = _read(path) if name == "analysis" else json.loads(
+                _native_path(path).read_text(encoding="utf-8"))
+        analysis, transcript = sources["analysis"], sources["transcript"]
+        validate_topic_result(analysis)
+        if (analysis.get("job_id") != lease.job_id or analysis.get("video_id") != lease.video_id
+                or analysis.get("analysis_generation") != lease.generation
+                or analysis.get("duration_ms") != config["duration_ms"]
+                or analysis.get("utterances") != transcript):
+            raise WorkerError("INVALID_AGENT_INPUT")
+        if self.transport_factory is None:
+            raise WorkerError("DURABLE_BUDGET_REQUIRED")
+        embedder = None
+        if os.environ.get("LIVECUT_INTENT_EMBEDDING_DIR"):
+            from .intent_embedding import LocalIntentEmbedder
+
+            context.guard.check()
+            embedder = LocalIntentEmbedder(os.environ["LIVECUT_INTENT_EMBEDDING_DIR"])
+
+        def bound_timeout(request: httpx.Request) -> None:
+            context.guard.check()
+            remaining = context.guard.remaining_seconds()
+            request.extensions["timeout"] = {"connect": min(30, remaining), "read": min(300, remaining),
+                                              "write": min(30, remaining), "pool": min(30, remaining)}
+
+        text_transport = self.transport_factory(context, "text")
+        with httpx.Client(transport=text_transport, timeout=min(300, context.guard.remaining_seconds()),
+                          event_hooks={"request": [bound_timeout]}, follow_redirects=False) as client:
+            from .text_resilience import ResilientTextTransport
+
+            client.livecut_resumable_text = isinstance(text_transport, ResilientTextTransport)
+            build_video_answer(transcript, analysis["segments"], config["duration_ms"], config["question"],
+                _native_path(directory), session_id=config["session_id"], turn_id=config["turn_id"],
+                job_id=lease.job_id, video_id=lease.video_id, source_hash=lease.source_hash,
+                transcript_hash=config["source_transcript_hash"], history=config["history"],
+                model=lease.config["text_model"], max_calls=lease.config["max_text_calls"],
+                max_tool_steps=config["max_tool_steps"], client=client,
+                base_url=os.environ.get("LIVECUT_TEXT_BASE_URL"), dense_embedder=embedder,
+                embedding_model_id=embedder.model_id if embedder else None,
+                index_cache_dir=_native_path(context.storage_root / "cache" / "intent-index-v1"),
+                guard=context.guard.check)
+        context.guard.check()
+        artifacts = [context.artifact("agent_answer", directory / "agent-answer.json")]
+        if _native_path(directory / "text-execution-trace.json").is_file():
+            artifacts.append(context.artifact("text_execution_trace", directory / "text-execution-trace.json"))
+        return {"schema_version": 1, "job_id": lease.job_id, "video_id": lease.video_id,
+                "analysis_generation": lease.generation, "stage_id": lease.stage_id,
+                "stage_type": lease.stage_type, "attempt": lease.attempt, "run_token": lease.run_token,
+                "input_sha256": lease.source_hash, "data_kind": "model_result", "review_status": "DRAFT",
+                "artifacts": artifacts}
+
     def _execute_intent(self, context: StageContext) -> dict:
         from .intent import build_clip_plan
 
@@ -859,8 +933,12 @@ class AnalysisStageExecutor:
             source = shared_path(context.storage_root, lease.source_key, must_exist=True)
             if sha256(source, guard=context.guard.check) != lease.source_hash:
                 raise WorkerError("SOURCE_HASH_MISMATCH")
+        if "agent_turn" in config and "clip_request" in config:
+            raise WorkerError("INVALID_AGENT_INPUT")
         if lease.stage_type == "SEGMENT" and "clip_request" in config:
             return self._execute_intent(context)
+        if lease.stage_type == "SEGMENT" and "agent_turn" in config:
+            return self._execute_agent(context)
         artifacts: list[dict] = []
         if preparation_copy:
             from .preparation_reuse import reuse_preparation

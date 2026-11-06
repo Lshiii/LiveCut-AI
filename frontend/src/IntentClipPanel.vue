@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { api, ApiError, post, type ExportJob } from './api'
 import FailureDiagnostic from './FailureDiagnostic.vue'
 import TextRequestProgress from './TextRequestProgress.vue'
+import { canPrefillClipInstruction } from './videoAgent'
 import { newestSnapshot, parseExportSnapshot, SnapshotError } from './snapshotStream'
 import { topicTime } from './topics'
 import { editIntentBoundary, intentCanCancel, intentCanConfirm, intentCanExport, intentCanResume, intentOutputValidation, intentPayload, intentResumeReceipt,
@@ -15,6 +16,7 @@ const selectedId = ref(''), snapshot = ref<IntentSnapshot | null>(null), outputs
 const baseline = ref(''), draftRevision = ref<number | null>(null), action = ref('')
 const error = ref(''), refreshError = ref(''), notice = ref(''), loading = ref(true)
 const batches = ref<ExportJob[]>([]), previewUrl = ref(''), sourcePlayer = ref<HTMLVideoElement | null>(null)
+const instructionInput = ref<HTMLTextAreaElement | null>(null)
 const scope = new IntentReadScope()
 let stopped = false, refreshing = false, timer: number | undefined, selectionVersion = 0
 let pendingCreate: { input: string; key: string } | null = null
@@ -34,7 +36,13 @@ const confirmed = computed(() => !!snapshot.value && snapshot.value.confirmed_re
 const names: Record<string, string> = { QUEUED: '等待执行', RUNNING: '正在查找', PLAN_READY: '候选已生成', FAILED: '执行失败', CANCELLED: '已取消',
   FOUND: '已找到证据', NOT_FOUND: '未找到', NEEDS_REVIEW: '需进一步核对', READY: '等待领取', BLOCKED: '等待前序',
   RETRY_WAIT: '等待重试', SUCCEEDED: '已完成', PARTIAL_FAILED: '部分失败', SKIPPED: '已跳过' }
-defineExpose({ dirty, pending })
+defineExpose({ dirty, pending, prefillInstruction })
+function prefillInstruction(value: string): boolean {
+  if (!canPrefillClipInstruction(value, dirty.value, pending.value)) return false
+  instruction.value = value.trim(); error.value = ''; notice.value = '已填入视频助手的建议。请核对要求，再点击查找片段。'
+  instructionInput.value?.focus()
+  return true
+}
 
 function message(value: unknown) {
   const code = value instanceof ApiError ? value.code : value instanceof IntentResponseError || value instanceof SnapshotError ? 'INVALID_CLIP_RESPONSE' : 'CLIENT_ERROR'
@@ -276,7 +284,7 @@ onBeforeUnmount(() => { stopped = true; selectionVersion++; scope.dispose(); win
     <p v-if="refreshError" class="intent-warning" role="status">{{ refreshError }} 后台状态会继续刷新，当前修改不受影响。</p>
     <p v-if="notice" class="intent-notice" role="status">{{ notice }}</p>
     <div class="intent-compose">
-      <label for="intent-instruction">剪辑要求<textarea id="intent-instruction" v-model="instruction" :disabled="pending" maxlength="2000" rows="3" placeholder="例如：把缓存失效原因和解决方法分别剪出来，保留完整解释，跳过关注引导。"></textarea></label>
+      <label for="intent-instruction">剪辑要求<textarea id="intent-instruction" ref="instructionInput" v-model="instruction" :disabled="pending" maxlength="2000" rows="3" placeholder="例如：把缓存失效原因和解决方法分别剪出来，保留完整解释，跳过关注引导。"></textarea></label>
       <div class="intent-create-row"><label>模型请求上限<input v-model.number="maxCalls" type="number" min="1" max="24" :disabled="pending" aria-label="剪辑模型请求上限"></label><span>复用已完成的语音转写，本次不重新提交 ASR。</span><button class="primary" :disabled="pending || !instruction.trim() || planDirty" @click="create">{{ action === 'create' ? '正在创建…' : '查找片段' }}</button></div>
     </div>
     <div class="intent-workspace">

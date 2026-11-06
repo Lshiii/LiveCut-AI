@@ -18,6 +18,7 @@ import java.util.UUID;
 import io.livecut.jobs.JobModels.*;
 import io.livecut.exports.ExportService;
 import io.livecut.clips.ClipRequestService;
+import io.livecut.agent.AgentService;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.http.HttpStatus;
@@ -54,6 +55,7 @@ public class JobService {
     private final ExportService exports;
     private final WorkerCapacityService workers;
     private final ClipRequestService clips;
+    private final AgentService agents;
     private final int leaseSeconds;
     private final int hardDeadlineSeconds;
     private final int maxAttempts;
@@ -70,7 +72,7 @@ public class JobService {
                       @Value("${livecut.jobs.max-attempts:3}") int maxAttempts,
                       @Value("${livecut.jobs.retry-delay-seconds:2}") int retryDelaySeconds,
                       @Value("${livecut.jobs.scan-enabled:true}") boolean scanEnabled,
-                      ArtifactVerifier artifactVerifier, ExportService exports, WorkerCapacityService workers, ClipRequestService clips) {
+                      ArtifactVerifier artifactVerifier, ExportService exports, WorkerCapacityService workers, ClipRequestService clips, AgentService agents) {
         if (leaseSeconds < 1 || leaseSeconds > 3600 || hardDeadlineSeconds < 1 || hardDeadlineSeconds > 86400
                 || maxAttempts < 1 || maxAttempts > 10 || retryDelaySeconds < 0 || retryDelaySeconds > 3600) {
             throw new IllegalArgumentException("Invalid scheduler lease, deadline, attempt or retry settings");
@@ -80,6 +82,7 @@ public class JobService {
         this.exports = exports;
         this.workers = workers;
         this.clips = clips;
+        this.agents = agents;
         this.transaction = new TransactionTemplate(manager);
         this.transaction.setIsolationLevel(TransactionDefinition.ISOLATION_READ_COMMITTED);
         this.leaseSeconds = leaseSeconds;
@@ -264,7 +267,7 @@ public class JobService {
         if (stageType != null) { parameters.add(stageType); }
         if (targetJob != null) { predicate += " AND s.job_id=?"; parameters.add(targetJob); }
         parameters.add(limit);
-        return jdbc.query("SELECT s.* FROM job_stage s JOIN analysis_job j ON j.id=s.job_id LEFT JOIN export_job e ON s.owner_type='EXPORT' AND e.id=s.owner_id AND e.job_id=s.job_id LEFT JOIN clip_request c ON s.owner_type='CLIP_REQUEST' AND c.id=s.owner_id AND c.job_id=s.job_id WHERE s.status='READY' AND s.next_run_at<=CURRENT_TIMESTAMP(6) AND ((s.owner_type='ANALYSIS' AND j.status IN ('QUEUED','RUNNING')) OR (s.owner_type='EXPORT' AND j.status='REVIEW_READY' AND e.status IN ('QUEUED','RUNNING')) OR (s.owner_type='CLIP_REQUEST' AND j.status='REVIEW_READY' AND c.status IN ('QUEUED','RUNNING')))" + predicate + " ORDER BY s.next_run_at,s.id LIMIT ?",
+        return jdbc.query("SELECT s.* FROM job_stage s JOIN analysis_job j ON j.id=s.job_id LEFT JOIN export_job e ON s.owner_type='EXPORT' AND e.id=s.owner_id AND e.job_id=s.job_id LEFT JOIN clip_request c ON s.owner_type='CLIP_REQUEST' AND c.id=s.owner_id AND c.job_id=s.job_id LEFT JOIN agent_turn a ON s.owner_type='AGENT_TURN' AND a.id=s.owner_id AND a.job_id=s.job_id WHERE s.status='READY' AND s.next_run_at<=CURRENT_TIMESTAMP(6) AND ((s.owner_type='ANALYSIS' AND j.status IN ('QUEUED','RUNNING')) OR (s.owner_type='EXPORT' AND j.status='REVIEW_READY' AND e.status IN ('QUEUED','RUNNING')) OR (s.owner_type='CLIP_REQUEST' AND j.status='REVIEW_READY' AND c.status IN ('QUEUED','RUNNING')) OR (s.owner_type='AGENT_TURN' AND j.status='REVIEW_READY' AND a.status IN ('QUEUED','RUNNING')))" + predicate + " ORDER BY s.next_run_at,s.id LIMIT ?",
                 (row, index) -> new ReadyStage(row.getString("id"), row.getString("job_id"), row.getString("stage_type"), row.getString("shard_key"), instant(row, "next_run_at")), parameters.toArray());
     }
 
@@ -403,6 +406,7 @@ public class JobService {
             jdbc.update("UPDATE job_stage SET status='SUCCEEDED',lease_until=NULL,manifest_key=?,manifest_hash=?,error_code=NULL,diagnostic_json=NULL,updated_at=CURRENT_TIMESTAMP(6) WHERE id=?", request.manifestKey(), request.manifestHash(), id);
             if (isExport(stage)) { exports.recordSuccess(stage, manifest); }
             else if (isClipRequest(stage)) { clips.recordSuccess(stage,job,manifest); }
+            else if (isAgentTurn(stage)) { agents.recordSuccess(stage,job,manifest); }
             else { advance(jobId, stage.stageType()); }
             touchParent(stage, null);
             return action("ACCEPTED", id);
@@ -479,10 +483,11 @@ public class JobService {
     }
 
     private void terminalFailure(StageRow stage, String code, Map<String, Object> diagnostic) {
-        List<StageRow> siblings = isExport(stage)||isClipRequest(stage) ? List.of() : stages(stage.jobId(), true);
+        List<StageRow> siblings = isExport(stage)||isClipRequest(stage)||isAgentTurn(stage) ? List.of() : stages(stage.jobId(), true);
         jdbc.update("UPDATE job_stage SET status='FAILED',run_token=NULL,worker_id=NULL,worker_session_id=NULL,lease_until=NULL,hard_deadline_at=NULL,error_code=?,diagnostic_json=?,last_retryable=FALSE,updated_at=CURRENT_TIMESTAMP(6) WHERE id=?", code, StageDiagnostics.json(diagnostic), stage.id());
         if (isExport(stage)) { exports.refreshLocked(stage.ownerId()); return; }
         if (isClipRequest(stage)) { clips.refreshLocked(stage.ownerId()); return; }
+        if (isAgentTurn(stage)) { agents.refreshLocked(stage.ownerId()); return; }
         // Fence sibling work when the parent is terminal; manual retry only
         // revives explicit FAILED rows, never a still-live previous token.
         for (StageRow sibling : siblings) {
@@ -608,7 +613,7 @@ public class JobService {
         return new ClaimResult(outcome, stage.id(), stage.attempt(), stage.runToken(), stage.leaseUntil(), stage.hardDeadlineAt(),
                 stage.jobId(), stage.stageType(), stage.shardKey(), String.valueOf(video.get("source_key")),
                 isExport(stage) ? exports.manifestIdentity(stage, job).sourceHash() : String.valueOf(video.get("content_hash")),
-                isExport(stage) ? exports.claimConfig(stage) : isClipRequest(stage) ? clips.claimConfig(stage) : analysisClaimConfig(job), artifacts,
+                isExport(stage) ? exports.claimConfig(stage) : isClipRequest(stage) ? clips.claimConfig(stage) : isAgentTurn(stage) ? agents.claimConfig(stage) : analysisClaimConfig(job), artifacts,
                 stage.checkpointKey(), stage.checkpointHash(), stage.inputHash(),
                 String.valueOf(job.get("video_id")), ((Number) job.get("generation")).intValue());
     }
@@ -635,11 +640,12 @@ public class JobService {
     private StageParent lockParent(String id) {
         StageRow hint = stage(id, false);
         Map<String, Object> analysis = job(hint.jobId(), true);
-        Map<String, Object> owner = isExport(hint) ? exports.lockOwner(hint.ownerId(), hint.jobId()) : isClipRequest(hint) ? clips.lockOwner(hint.ownerId(),hint.jobId()) : analysis;
+        Map<String, Object> owner = isExport(hint) ? exports.lockOwner(hint.ownerId(), hint.jobId()) : isClipRequest(hint) ? clips.lockOwner(hint.ownerId(),hint.jobId()) : isAgentTurn(hint) ? agents.lockOwner(hint.ownerId(),hint.jobId()) : analysis;
         return new StageParent(analysis, owner, stage(id, true));
     }
     private boolean activeParent(StageParent parent) {
         if(isClipRequest(parent.stage()))return "REVIEW_READY".equals(parent.analysis().get("status"))&&clips.active(parent.owner());
+        if(isAgentTurn(parent.stage()))return "REVIEW_READY".equals(parent.analysis().get("status"))&&agents.active(parent.owner());
         return isExport(parent.stage()) ? "REVIEW_READY".equals(parent.analysis().get("status")) && exports.active(parent.owner()) : activeJob(parent.analysis());
     }
     private void requireActive(StageParent parent, Credential credential) {
@@ -647,14 +653,17 @@ public class JobService {
     }
     private static boolean isExport(StageRow stage) { return "EXPORT".equals(stage.ownerType()); }
     private static boolean isClipRequest(StageRow stage) { return "CLIP_REQUEST".equals(stage.ownerType()); }
+    private static boolean isAgentTurn(StageRow stage) { return "AGENT_TURN".equals(stage.ownerType()); }
     private void touchParent(StageRow stage, String analysisStatus) {
         if (isExport(stage)) { exports.refreshLocked(stage.ownerId()); }
         else if(isClipRequest(stage)) { clips.refreshLocked(stage.ownerId()); }
+        else if(isAgentTurn(stage)) { agents.refreshLocked(stage.ownerId()); }
         else { touch(stage.jobId(), analysisStatus); }
     }
     private ArtifactVerifier.VerifiedManifest verifyResult(StageRow stage, Map<String, Object> job, CompleteRequest request) {
         return isExport(stage) ? exports.verifyResult(stage, job, request.manifestKey(), request.manifestHash())
                 : isClipRequest(stage) ? clips.verifyResult(stage,job,request.manifestKey(),request.manifestHash())
+                : isAgentTurn(stage) ? agents.verifyResult(stage,job,request.manifestKey(),request.manifestHash())
                 : artifactVerifier.verifyManifest(request.manifestKey(), request.manifestHash(), artifactIdentity(stage, job));
     }
     private static void credential(Credential value) { if (value == null || value.attempt() < 1 || value.runToken() == null || !value.runToken().matches("[A-Za-z0-9_-]{16,64}")) { throw stale(); } }

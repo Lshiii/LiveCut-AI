@@ -4,6 +4,7 @@ import { api, ApiError, post, type AnalysisJob, type Page, type VideoAsset } fro
 import ReviewPanel from './ReviewPanel.vue'
 import TopicReviewPanel from './TopicReviewPanel.vue'
 import IntentClipPanel from './IntentClipPanel.vue'
+import VideoAgentPanel from './VideoAgentPanel.vue'
 import UploadPanel from './UploadPanel.vue'
 import FailureDiagnostic from './FailureDiagnostic.vue'
 import TextRequestProgress from './TextRequestProgress.vue'
@@ -24,9 +25,10 @@ const recoveryBudget = ref(12)
 const pendingResumes = new Map<string, AnalysisResumeReceipt>()
 const uploadPanel = ref<{ chooseFile: () => void } | null>(null)
 const reviewEditor = ref<{ dirty: boolean; pending: boolean } | null>(null)
-const intentEditor = ref<{ dirty: boolean; pending: boolean } | null>(null)
-const editorsDirty = computed(() => !!reviewEditor.value?.dirty || !!intentEditor.value?.dirty)
-const editorsPending = computed(() => !!reviewEditor.value?.pending || !!intentEditor.value?.pending)
+const intentEditor = ref<{ dirty: boolean; pending: boolean; prefillInstruction(value: string): boolean } | null>(null)
+const agentEditor = ref<{ dirty: boolean; pending: boolean } | null>(null)
+const editorsDirty = computed(() => !!reviewEditor.value?.dirty || !!intentEditor.value?.dirty || !!agentEditor.value?.dirty)
+const editorsPending = computed(() => !!reviewEditor.value?.pending || !!intentEditor.value?.pending || !!agentEditor.value?.pending)
 const canResumeFromAsr = computed(() => analysisCanResume(selectedJob.value, editorsDirty.value, !!pending.value || editorsPending.value))
 const streamMode = ref<StreamMode>('idle')
 let timer: number | undefined, refreshing = false, stopped = false, selectionVersion = 0
@@ -112,6 +114,10 @@ function formatError(error: unknown) {
 function showError(error: unknown) { errorMessage.value = formatError(error) }
 function connectionFailure(error: unknown) { return error instanceof ApiError && isConnectionErrorCode(error.code) }
 function dismissErrors() { errorMessage.value = ''; listConnectionError.value = ''; detailConnectionError.value = '' }
+function useAgentClipInstruction(value: string) {
+  if (!intentEditor.value?.prefillInstruction(value)) { errorMessage.value = '剪辑区域有未提交内容或正在提交，请先处理后再填入助手建议。'; return }
+  notice.value = '剪辑要求已填入。请在按需求找片段区域核对并提交。'
+}
 async function loadDetail(id: string, background = false, allowPending = false) {
   if (stopped || !canSelect(id, allowPending)) return
   const version = background ? selectionVersion : ++selectionVersion
@@ -145,8 +151,8 @@ async function loadDetail(id: string, background = false, allowPending = false) 
 function canSelect(id: string, allowPending = false) {
   if (pending.value && !allowPending) { errorMessage.value = '请等待当前操作完成，再切换任务。'; return false }
   if (selectedJob.value?.id === id) return true
-  if (editorsPending.value) { errorMessage.value = '审核或剪辑方案正在提交，请稍后再切换任务。'; return false }
-  if (editorsDirty.value) { errorMessage.value = '审核或剪辑方案有未保存修改，请先保存或在相应区域放弃修改。'; return false }
+  if (editorsPending.value) { errorMessage.value = '审核、剪辑方案或对话正在提交，请稍后再切换任务。'; return false }
+  if (editorsDirty.value) { errorMessage.value = '审核、剪辑方案或对话有未提交内容，请先保存或在相应区域放弃修改。'; return false }
   return true
 }
 async function refresh() {
@@ -181,11 +187,11 @@ function selectVideo() {
   }
   if (editorsPending.value) {
     selectedVideoId.value = selectedJob.value?.video_id ?? selectedVideoId.value
-    errorMessage.value = '审核或剪辑方案正在提交，请稍后再切换任务。'; return
+    errorMessage.value = '审核、剪辑方案或对话正在提交，请稍后再切换任务。'; return
   }
   if (editorsDirty.value) {
     selectedVideoId.value = selectedJob.value?.video_id ?? selectedVideoId.value
-    errorMessage.value = '审核或剪辑方案有未保存修改，请先保存或在相应区域放弃修改。'; return
+    errorMessage.value = '审核、剪辑方案或对话有未提交内容，请先保存或在相应区域放弃修改。'; return
   }
   detailRecovery.cancel(); detailConnectionError.value = ''
   selectedJob.value = null; selectionVersion++; taskStream.select(null)
@@ -193,8 +199,8 @@ function selectVideo() {
 }
 function canStartUpload() {
   if (pending.value && pending.value !== 'upload') { errorMessage.value = '请等待当前操作完成，再上传视频。'; return false }
-  if (editorsPending.value) { errorMessage.value = '请等待审核或剪辑方案提交完成，再上传新视频。'; return false }
-  if (editorsDirty.value) { errorMessage.value = '请先保存或放弃审核、剪辑方案修改，再上传新视频。'; return false }
+  if (editorsPending.value) { errorMessage.value = '请等待审核、剪辑方案或对话提交完成，再上传新视频。'; return false }
+  if (editorsDirty.value) { errorMessage.value = '请先保存或放弃审核、剪辑方案修改或对话输入，再上传新视频。'; return false }
   return true
 }
 function uploadBusy(value: boolean) {
@@ -244,8 +250,8 @@ async function createJob() {
 async function resumeFromAsr() {
   const source = selectedJob.value
   if (!source || pending.value) return
-  if (editorsPending.value) { errorMessage.value = '审核或剪辑方案正在提交，请稍后再重新分析。'; return }
-  if (editorsDirty.value) { errorMessage.value = '审核或剪辑方案有未保存修改，请先保存或在相应区域放弃修改。'; return }
+  if (editorsPending.value) { errorMessage.value = '审核、剪辑方案或对话正在提交，请稍后再重新分析。'; return }
+  if (editorsDirty.value) { errorMessage.value = '审核、剪辑方案或对话有未提交内容，请先保存或在相应区域放弃修改。'; return }
   if (!canResumeFromAsr.value) { errorMessage.value = '当前任务无法复用转写，请刷新任务状态。'; return }
   const budget = recoveryBudget.value
   if (!Number.isInteger(budget) || budget < 1 || budget > 100) { errorMessage.value = '新文本请求上限须为 1～100 的整数。'; return }
@@ -381,6 +387,7 @@ onUnmounted(() => { stopped = true; detailRecovery.cancel(); selectionVersion++;
             </div>
           </section>
         </div>
+        <VideoAgentPanel v-if="selectedJob?.status === 'REVIEW_READY' && currentVideo && topicMode" :key="`agent-${selectedJob.id}`" ref="agentEditor" :job-id="selectedJob.id" :video-id="currentVideo.id" :video-hash="currentVideo.content_hash" :video-url="currentVideo.content_url" :clip-target-busy="!!intentEditor?.dirty || !!intentEditor?.pending" @clip-instruction="useAgentClipInstruction" />
         <TopicReviewPanel v-if="selectedJob?.status === 'REVIEW_READY' && currentVideo && topicMode" :key="selectedJob.id" ref="reviewEditor" :job-id="selectedJob.id" :video-url="currentVideo.content_url" />
         <ReviewPanel v-else-if="selectedJob?.status === 'REVIEW_READY' && currentVideo" :key="selectedJob.id" ref="reviewEditor" :job-id="selectedJob.id" :video-url="currentVideo.content_url" />
         <section v-else-if="currentVideo" class="panel source-panel"><div class="panel-heading"><div><h2>原视频预览</h2><p>{{ currentVideo.original_filename }}</p></div><span class="subtle-number">{{ (currentVideo.size_bytes / 1024 / 1024).toFixed(1) }} MB</span></div><div class="source-layout"><video :key="currentVideo.id" :src="currentVideo.content_url" controls preload="metadata" playsinline></video><div class="source-description"><span class="eyebrow">SOURCE VIDEO</span><h3>所有片段，共用一条时间轴。</h3><p>播放器支持按需读取原视频。ASR 时间戳映射到原视频毫秒，后续审核和切片都以此为准。</p><dl><dt>来源状态</dt><dd>{{ currentVideo.media_validation_status }}</dd><dt>文件 SHA256</dt><dd class="hash">{{ currentVideo.content_hash }}</dd></dl><small>上传时仅检查基本文件头，完整媒体探测由 Worker 执行。</small></div></div></section>

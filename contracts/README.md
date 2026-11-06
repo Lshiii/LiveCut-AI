@@ -1,5 +1,9 @@
 # 视频分析结果契约
 
+## 视频对话 Agent v1.0
+
+[agent-answer.schema.json](./agent-answer.schema.json) 定义独立会话轮次的回答、原句引用、工具轨迹与来源身份。JSON Schema 检查固定结构；Java/Python 另行核验本轮实际观察、唯一源顺序、原文与毫秒时间、工具连续步骤、允许的来源及主模型。VIDEO 必须有原句引用，GENERAL/INSUFFICIENT 可无引用；只有实际调用 search_transcript 才记录检索模式。剪辑建议为纯文本，不能自动改审核或导出。接口、限制与恢复见[视频对话 Agent](../docs/45-视频对话Agent.md)。
+
 ## 普通分析的准备产物复用
 
 `POST /api/jobs/{id}/resume-from-asr` 为已完成 MEDIA/ASR 的 topics 任务建立独立新轮次。公开快照的可选 `resumed_from_job_id` 表示来源；私有 `preparation_reuse` 只随认证 claim 下发，结构见 [preparation-reuse.schema.json](./preparation-reuse.schema.json)。Worker 另行核验源与目标身份、manifest、路径和字节哈希，失败不回退付费 ASR。完整状态、预算与并发约束见[执行说明](../docs/40-普通分析复用转写重新执行.md)。
