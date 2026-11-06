@@ -23,7 +23,7 @@ public class CaptionSourceResolver {
     private final ArtifactVerifier artifacts;
     public record Resolved(String exportId,String clipId,String jobId,String title,String contentUrl,
                            CaptionModels.Source source,List<CaptionModels.Cue> originals,JsonNode basis,String basisHash,
-                           ExportModels.Content verifiedContent) {
+                           ExportModels.Content verifiedContent,String verifiedContentKey,JsonNode verifiedMediaInfo) {
         public Resolved { originals=List.copyOf(originals); }
     }
     public CaptionSourceResolver(JdbcTemplate jdbc,ExportService exports,ArtifactVerifier artifacts){this.jdbc=jdbc;this.exports=exports;this.artifacts=artifacts;}
@@ -35,6 +35,7 @@ public class CaptionSourceResolver {
         var clip=batch.clips().stream().filter(c->c.id().equals(target)).findFirst().orElseThrow(CaptionSourceResolver::invalid);
         var content=exports.content(exportId,clipId);
         var owner=jdbc.queryForMap("SELECT * FROM export_job WHERE id=?",exportId);
+        if(!"CLEAN".equals(owner.get("render_mode")))throw invalid();
         var job=jdbc.queryForMap("SELECT * FROM analysis_job WHERE id=?",batch.jobId());
         JsonNode frozen=JSON.readTree(String.valueOf(owner.get("frozen_json")));
         if(!ClipRequestService.sha(ClipRequestService.canonicalJson(frozen)).equals(batch.snapshotHash())
@@ -45,8 +46,8 @@ public class CaptionSourceResolver {
         var clipIdentity=identity(stage,job,String.valueOf(owner.get("source_hash")));
         // content() already verified the full export manifest and video; reread its small hashed metadata only.
         JsonNode manifest=artifacts.readJsonArtifact(new ArtifactVerifier.VerifiedArtifact("manifest",String.valueOf(stage.get("manifest_key")),String.valueOf(stage.get("manifest_hash")),0),clipIdentity);
-        JsonNode mediaRef=null;for(JsonNode file:manifest.path("artifacts"))if("media_info".equals(file.path("kind").asText()))mediaRef=file;
-        if(mediaRef==null)throw invalid();
+        JsonNode mediaRef=null,clipRef=null;for(JsonNode file:manifest.path("artifacts")){if("media_info".equals(file.path("kind").asText()))mediaRef=file;if("clip".equals(file.path("kind").asText()))clipRef=file;}
+        if(mediaRef==null||clipRef==null||!content.hash().equals(clipRef.path("sha256").asText()))throw invalid();
         JsonNode media=artifacts.readJsonArtifact(new ArtifactVerifier.VerifiedArtifact("media_info",mediaRef.path("key").asText(),mediaRef.path("sha256").asText(),0),clipIdentity);
         long mediaDuration=positive(media,"duration_ms");
         var asr=completed(batch.jobId(),"ASR");var asrIdentity=identity(asr,job,String.valueOf(owner.get("source_hash")));
@@ -84,7 +85,7 @@ public class CaptionSourceResolver {
         basis.put("original_content_hash",ClipRequestService.sha(ClipRequestService.canonicalJson(JSON.valueToTree(new CaptionModels.Content(originals)))));
         JsonNode basisNode=JSON.valueToTree(basis);String canonical=ClipRequestService.canonicalJson(basisNode);
         String title=clip.title()!=null?clip.title():clip.productName()!=null?clip.productName():"视频片段";
-        return new Resolved(exportId,clipId,batch.jobId(),title,clip.contentUrl(),source,originals,basisNode,ClipRequestService.sha(canonical),content);
+        return new Resolved(exportId,clipId,batch.jobId(),title,clip.contentUrl(),source,originals,basisNode,ClipRequestService.sha(canonical),content,clipRef.path("key").asText(),media);
     }
     private Map<String,Object> completed(String job,String type){var rows=jdbc.queryForList("SELECT * FROM job_stage WHERE job_id=? AND owner_type='ANALYSIS' AND stage_type=? AND status='SUCCEEDED' FOR UPDATE",job,type);if(rows.size()!=1)throw invalid();return rows.getFirst();}
     private static ManifestIdentity identity(Map<String,Object> stage,Map<String,Object> job,String hash){

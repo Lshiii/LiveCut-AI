@@ -19,6 +19,7 @@ jobs:
       UV_PYTHON_DOWNLOADS: never
       LIVECUT_FFMPEG_PATH: /usr/bin/ffmpeg
       LIVECUT_FFPROBE_PATH: /usr/bin/ffprobe
+      LIVECUT_CAPTION_FONT_PATH: ${{ github.workspace }}/data/fonts/noto-sans-cjk-sc-2.004/NotoSansCJKsc-Regular.otf
     steps:
       - uses: actions/checkout@v7.0.1
       - uses: actions/setup-python@v7.1.0
@@ -33,8 +34,11 @@ jobs:
         run: bash .github/scripts/install-ffmpeg.sh
       - name: Install locked dependencies
         run: uv sync --locked --dev --python 3.11
+      - name: Install pinned caption font
+        timeout-minutes: 3
+        run: python scripts/install-caption-font.py
       - name: Lint
-        run: uv run --frozen --no-sync ruff check worker-python
+        run: uv run --frozen --no-sync ruff check worker-python scripts/install-caption-font.py
       - name: Test, including real media integration
         run: |
           uv run --frozen --no-sync pytest -q -ra --junitxml="$RUNNER_TEMP/pytest-results.xml"

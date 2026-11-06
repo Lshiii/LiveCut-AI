@@ -243,7 +243,7 @@ class WorkerClient:
         }, "UNREGISTERED")
 
     def callback(self, action: str, stage_id: str, payload: dict) -> dict:
-        if action not in {"heartbeat", "checkpoint", "complete", "fail", "text-progress"}:
+        if action not in {"heartbeat", "checkpoint", "complete", "fail", "text-progress", "render-progress"}:
             raise WorkerClientError("INVALID_CALLBACK")
         if not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", stage_id):
             raise WorkerClientError("INVALID_STAGE_ID")

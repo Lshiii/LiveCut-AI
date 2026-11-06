@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { api, ApiError, post } from './api'
+import CaptionRenderPanel from './CaptionRenderPanel.vue'
 import { captionBase, captionDraftInvalid, captionFileUrl, captionPayload, captionTime, captionValidation, copyCaptionCue, copyCaptionCues,
   editCaptionTime, parseCaptionSnapshot, sameCaptionSource, CaptionResponseError,
   type CaptionCue, type CaptionSnapshot, type CaptionTimeDrafts } from './captions'
@@ -11,10 +12,12 @@ const dialog = ref<HTMLDialogElement | null>(null), player = ref<HTMLVideoElemen
 const snapshot = ref<CaptionSnapshot | null>(null), cues = ref<CaptionCue[]>([]), baseline = ref('')
 const timeDrafts = ref<CaptionTimeDrafts>({}), action = ref(''), error = ref(''), notice = ref('')
 const onlyReview = ref(false), page = ref(0), acknowledged = ref(false), downloadRevision = ref<number | null>(null)
+const view = ref<'edit' | 'renders'>('edit'), renderEditor = ref<{ pending: boolean } | null>(null)
+const editTab = ref<HTMLButtonElement | null>(null), renderTab = ref<HTMLButtonElement | null>(null)
 const selectedId = ref(''), playhead = ref(0), deleted = ref<{ cue: CaptionCue; index: number }[]>([])
 let stopped = false, version = 0, previewEnd: number | null = null, initialSeek: number | null = null
 const pageSize = 50
-const pending = computed(() => !!action.value)
+const pending = computed(() => !!action.value || !!renderEditor.value?.pending)
 const dirty = computed(() => !!snapshot.value && (JSON.stringify(captionPayload(cues.value)) !== baseline.value || captionDraftInvalid(timeDrafts.value)))
 const validation = computed(() => snapshot.value ? captionValidation(cues.value, snapshot.value.source.duration_ms, timeDrafts.value) : '')
 const requiresReview = computed(() => cues.value.filter(cue => cue.boundary_partial && !cue.reviewed).length)
@@ -98,7 +101,7 @@ async function confirm() {
 }
 function discard() { if (!pending.value && snapshot.value) { apply(snapshot.value); error.value = ''; notice.value = '未保存修改已放弃。' } }
 function requestClose() {
-  if (pending.value) { error.value = '正在提交字幕，请完成后再关闭。'; return }
+  if (pending.value) { error.value = '正在提交操作，请完成后再关闭。'; return }
   if (dirty.value) { error.value = '字幕有未保存修改，请先保存或放弃修改，再关闭。'; return }
   player.value?.pause(); dialog.value?.close(); emit('close')
 }
@@ -111,7 +114,7 @@ function undoDelete() { if (!pending.value) { const item = deleted.value.pop(); 
 function editTime(cue: CaptionCue, field: 'start_ms' | 'end_ms', event: Event) { editCaptionTime(cue, timeDrafts.value, field, (event.target as HTMLInputElement).value); acknowledged.value = false }
 function normalizeTime(cue: CaptionCue, field: 'start_ms' | 'end_ms') { if (!captionDraftInvalid({ [cue.id]: { [field]: timeDrafts.value[cue.id]?.[field] } })) { delete timeDrafts.value[cue.id]?.[field] } }
 function timeValue(cue: CaptionCue, field: 'start_ms' | 'end_ms') { return timeDrafts.value[cue.id]?.[field] ?? captionTime(cue[field]) }
-function mediaActive() { return props.active && !!dialog.value?.open && !stopped }
+function mediaActive() { return props.active && view.value === 'edit' && !!dialog.value?.open && !stopped }
 function guardPlayback(event: Event) { if (!mediaActive()) (event.currentTarget as HTMLVideoElement).pause() }
 function updateTime() {
   if (!player.value) return
@@ -126,9 +129,17 @@ function previewCue(cue: CaptionCue) {
   void video.play().then(() => { if (!mediaActive()) video.pause() }).catch(() => { if (!stopped) notice.value = '点击播放器播放按钮，可继续回看当前字幕。' })
 }
 function showDialog() { if (!stopped && props.active && dialog.value && !dialog.value.open) dialog.value.showModal() }
+function switchView(value: 'edit' | 'renders') { if (!pending.value) view.value = value }
+function viewKey(event: KeyboardEvent) {
+  if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key) || pending.value) return
+  event.preventDefault()
+  view.value = event.key === 'Home' ? 'edit' : event.key === 'End' ? 'renders' : view.value === 'edit' ? 'renders' : 'edit'
+  void nextTick(() => { if (!stopped && props.active) (view.value === 'edit' ? editTab.value : renderTab.value)?.focus() })
+}
 function unload(event: BeforeUnloadEvent) { if (dirty.value || pending.value) { event.preventDefault(); event.returnValue = '' } }
 watch(onlyReview, () => { page.value = 0 })
 watch(pages, count => { page.value = Math.min(page.value, count - 1) })
+watch(view, () => { player.value?.pause() }, { flush: 'sync' })
 watch(() => props.active, active => { if (!active) { player.value?.pause(); dialog.value?.close() } else void nextTick(showDialog) }, { flush: 'post' })
 onMounted(() => { showDialog(); window.addEventListener('beforeunload', unload); void initialize() })
 onBeforeUnmount(() => { stopped = true; version++; player.value?.pause(); dialog.value?.close(); window.removeEventListener('beforeunload', unload) })
@@ -140,10 +151,14 @@ onBeforeUnmount(() => { stopped = true; version++; player.value?.pause(); dialog
     <p v-if="error" class="caption-message error" role="alert">{{ error }}</p><p v-if="notice" class="caption-message" role="status">{{ notice }}</p>
     <p v-if="!snapshot" class="caption-empty">{{ pending ? '正在从已有转写准备字幕，不会重新识别语音。' : '字幕暂不可用。' }}<button v-if="!pending" class="caption-button" @click="initialize">重新读取</button></p>
     <template v-if="snapshot">
+      <div class="caption-view-tabs" role="tablist" aria-label="字幕与带字幕视频" @keydown="viewKey"><button :id="`caption-tab-edit-${exportId}-${clipId}`" ref="editTab" role="tab" :aria-controls="`caption-page-edit-${exportId}-${clipId}`" :aria-selected="view === 'edit'" :tabindex="view === 'edit' ? 0 : -1" :disabled="pending" @click="switchView('edit')">校对字幕<span v-if="dirty" class="caption-draft-dot" aria-label="有未保存修改"></span></button><button :id="`caption-tab-renders-${exportId}-${clipId}`" ref="renderTab" role="tab" :aria-controls="`caption-page-renders-${exportId}-${clipId}`" :aria-selected="view === 'renders'" :tabindex="view === 'renders' ? 0 : -1" :disabled="pending" @click="switchView('renders')">带字幕视频</button></div>
+      <div :id="`caption-page-edit-${exportId}-${clipId}`" v-show="view === 'edit'" class="caption-edit-page" role="tabpanel" :aria-labelledby="`caption-tab-edit-${exportId}-${clipId}`">
       <div class="caption-main"><section class="caption-watch"><div class="caption-video"><video ref="player" :src="contentUrl" controls preload="metadata" playsinline @play="guardPlayback" @timeupdate="updateTime" @seeking="seeking" @seeked="initialSeek = null"></video><p v-if="currentCue" class="caption-overlay" aria-live="off">{{ currentCue.text }}</p></div><label class="caption-seek">成片播放位置 {{ captionTime(playhead) }} / {{ captionTime(snapshot.source.duration_ms) }}<input type="range" min="0" :max="snapshot.source.duration_ms" :value="playhead" step="1" aria-label="字幕成片时间轴" @input="seek(Number(($event.target as HTMLInputElement).value))"></label><details class="caption-guide"><summary>字幕时间与预览说明</summary><p class="caption-help">字幕以成片开始为 00:00。按原句时间生成，边界截断句需逐条回看核对。</p><p class="caption-help">预览字幕只显示在本页，原 MP4 保持原样；下载包提供独立字幕文件。</p></details><div class="caption-downloads"><h3>下载已确认版本</h3><template v-if="snapshot.confirmed_revisions.length"><label>版本<select v-model.number="downloadRevision" aria-label="字幕下载版本"><option v-for="rev in snapshot.confirmed_revisions" :key="rev" :value="rev">r{{ rev }}</option></select></label><div v-if="downloadRevision !== null" class="caption-download-links"><a v-for="format in (['srt', 'vtt', 'txt', 'json'] as const)" :key="format" :href="captionFileUrl(snapshot, downloadRevision, format)" download target="_blank" rel="noopener">{{ format === 'json' ? '字幕 JSON' : format.toUpperCase() }}</a><a :href="captionFileUrl(snapshot, downloadRevision, 'package')" download target="_blank" rel="noopener">原视频＋字幕 ZIP</a></div><p v-if="dirty" class="caption-help">当前未保存修改不包含在下载内容中。</p></template><p v-else class="caption-help">保存并确认字幕后，可下载 SRT、VTT、TXT 和原视频素材包。</p></div></section>
         <section class="caption-editor"><div class="caption-list-toolbar"><strong>{{ cues.length }} 条字幕</strong><label><input v-model="onlyReview" type="checkbox">只看待核对 {{ requiresReview }}</label><button v-if="deleted.length" class="caption-link" :disabled="pending" @click="undoDelete">撤销删除</button></div><p v-if="requiresReview" class="caption-warning">有 {{ requiresReview }} 条字幕来自被剪断的原句。修改文字不会自动解除标记，请回看后勾选“已核对”。</p><div class="caption-cue-list"><p v-if="!visibleCues.length" class="caption-empty">{{ cues.length ? '没有待核对的字幕。' : '当前版本没有字幕；确认空字幕版本前，请核对这是否符合预期。' }}</p><article v-for="cue in visibleCues" :key="cue.id" class="caption-cue" :class="{ selected: selectedId === cue.id || currentCue?.id === cue.id }"><div class="caption-cue-heading"><button class="caption-link" @click="previewCue(cue)">回看本句 {{ captionTime(cue.start_ms) }}</button><span v-if="cue.boundary_partial" class="caption-partial">{{ cue.reviewed ? '截断句已核对' : '边界截断待核对' }}</span><button class="caption-link danger" :disabled="pending" :aria-label="`删除字幕 ${cue.id}`" @click="removeCue(cue)">删除</button></div><label class="caption-text-label">字幕文字<textarea v-model="cue.text" rows="2" maxlength="2000" :disabled="pending" :aria-label="`字幕文字 ${cue.id}`" @input="acknowledged = false"></textarea></label><div class="caption-times"><label>开始<input :value="timeValue(cue, 'start_ms')" :disabled="pending" :aria-label="`字幕开始 ${cue.id}`" @input="editTime(cue, 'start_ms', $event)" @blur="normalizeTime(cue, 'start_ms')"></label><label>结束<input :value="timeValue(cue, 'end_ms')" :disabled="pending" :aria-label="`字幕结束 ${cue.id}`" @input="editTime(cue, 'end_ms', $event)" @blur="normalizeTime(cue, 'end_ms')"></label></div><label v-if="cue.boundary_partial" class="caption-reviewed"><input v-model="cue.reviewed" type="checkbox" :disabled="pending" @change="acknowledged = false">我已回看并核对这条截断句</label><details class="caption-original"><summary>原始转写参考</summary><p>{{ cue.source_text }}</p></details></article></div><div v-if="pages > 1" class="caption-pagination"><button class="caption-button" :disabled="page === 0" @click="page--">上一页</button><span>{{ page + 1 }} / {{ pages }} · 每页 {{ pageSize }} 条</span><button class="caption-button" :disabled="page + 1 >= pages" @click="page++">下一页</button></div></section>
       </div>
       <footer class="caption-footer"><p v-if="validation" class="caption-validation" role="alert">{{ validation }}</p><div class="caption-footer-main"><div><strong>{{ dirty ? '有未保存字幕修改' : `字幕 r${snapshot.revision} ${snapshot.status === 'CONFIRMED' ? '已确认' : '待确认'}` }}</strong><label class="caption-ack"><input v-model="acknowledged" type="checkbox" :disabled="pending || dirty || !!requiresReview || !!validation || snapshot.status === 'CONFIRMED'">{{ cues.length ? '我已核对字幕文字与时间' : '本版本没有字幕，仍确认空字幕版本' }}</label></div><div class="caption-footer-actions"><div class="caption-secondary-actions"><button class="caption-link" :disabled="pending" @click="reload">核对服务器版本</button><button v-if="dirty" class="caption-link" :disabled="pending" @click="discard">放弃未保存修改</button></div><div class="caption-primary-actions"><button class="caption-button" :disabled="pending || !dirty || !!validation" @click="save">{{ action === 'save' ? '正在保存…' : '保存字幕' }}</button><button class="caption-button primary" :disabled="!canConfirm" @click="confirm">{{ action === 'confirm' ? '正在确认…' : '确认字幕版本' }}</button></div></div></div></footer>
+      </div>
+      <div :id="`caption-page-renders-${exportId}-${clipId}`" v-show="view === 'renders'" class="caption-render-page" role="tabpanel" :aria-labelledby="`caption-tab-renders-${exportId}-${clipId}`"><CaptionRenderPanel ref="renderEditor" :snapshot="snapshot" :caption-dirty="dirty" :caption-pending="!!action" :active="props.active && view === 'renders'" /></div>
     </template>
   </dialog>
 </template>
@@ -151,6 +166,7 @@ onBeforeUnmount(() => { stopped = true; version++; player.value?.pause(); dialog
 <style scoped>
 .caption-dialog { box-sizing: border-box; width: min(1200px, calc(100vw - 32px)); height: min(860px, calc(100dvh - 32px)); max-width: none; max-height: none; margin: auto; padding: 0; border: 1px solid #cbd5e1; border-radius: 12px; background: white; color: #1f2937; font: 14px/1.65 system-ui, sans-serif; overflow: hidden; }
 .caption-dialog[open] { display: flex; flex-direction: column; }.caption-dialog:not([open]) { display: none; }.caption-dialog::backdrop { background: #0f172a66; }
+.caption-view-tabs { display: flex; flex: none; gap: 22px; padding: 0 18px; border-bottom: 1px solid #e2e8f0; background: white; }.caption-view-tabs > button { position: relative; min-height: 42px; padding: 10px 1px 8px; border: 0; border-bottom: 2px solid transparent; background: none; color: #64748b; font: inherit; font-size: 14px; cursor: pointer; }.caption-view-tabs > button[aria-selected=true] { border-color: #e47650; color: #bd5735; font-weight: 600; }.caption-draft-dot { display: inline-block; width: 6px; height: 6px; margin-left: 6px; border-radius: 50%; background: #d99a45; vertical-align: middle; }.caption-edit-page, .caption-render-page { display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0; overflow: hidden; }
 .caption-header { display: flex; flex: none; align-items: center; justify-content: space-between; gap: 12px; padding: 14px 18px; border-bottom: 1px solid #e2e8f0; }.caption-header > div { min-width: 0; }.caption-header > button { flex: none; }.caption-header h2 { margin: 0; font-size: 18px; }.caption-header p { margin: 4px 0 0; color: #64748b; font-size: 13px; overflow-wrap: anywhere; }.caption-header p span { white-space: nowrap; }
 .caption-message { flex: none; max-height: 70px; overflow: auto; margin: 8px 20px; padding: 9px 12px; background: #f1f5f9; border-radius: 6px; color: #475569; }.caption-message.error { background: #fff1eb; color: #9a4f32; }
 .caption-main { flex: 1; display: grid; grid-template-columns: minmax(240px, .85fr) minmax(0, 1.35fr); min-height: 0; min-width: 0; gap: 16px; padding: 14px 18px; }.caption-watch { min-height: 0; min-width: 0; overflow-y: auto; overflow-x: hidden; padding-right: 3px; }.caption-video { position: relative; min-width: 0; max-width: 100%; background: #0f172a; border-radius: 7px; overflow: hidden; }.caption-video video { display: block; box-sizing: border-box; width: 100%; min-width: 0; max-width: 100%; max-height: 250px; aspect-ratio: 16/9; object-fit: contain; }.caption-overlay { pointer-events: none; position: absolute; left: 6%; right: 6%; bottom: 40px; margin: 0; padding: 4px 7px; background: #0008; color: white; font-size: 16px; text-align: center; white-space: pre-wrap; line-height: 1.5; text-shadow: 0 1px 2px black; overflow-wrap: anywhere; }.caption-seek { display: block; min-width: 0; color: #475569; font-size: 13px; margin-top: 10px; overflow-wrap: anywhere; }.caption-seek input { display: block; box-sizing: border-box; width: 100%; min-width: 0; max-width: 100%; margin: 7px 0 0; padding: 0; accent-color: #e47650; }.caption-help { font-size: 13px; color: #64748b; line-height: 1.7; margin: 8px 0; overflow-wrap: anywhere; }.caption-guide { margin-top: 10px; color: #64748b; font-size: 13px; }.caption-guide summary { cursor: pointer; padding: 4px 0; }

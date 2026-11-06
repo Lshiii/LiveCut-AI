@@ -5,10 +5,14 @@ on:
     paths:
       - 'backend-java/**'
       - '.github/workflows/java.yml'
+      - 'scripts/install-caption-font.py'
+      - 'contracts/caption-render-spec.schema.json'
   pull_request:
     paths:
       - 'backend-java/**'
       - '.github/workflows/java.yml'
+      - 'scripts/install-caption-font.py'
+      - 'contracts/caption-render-spec.schema.json'
 
 permissions:
   contents: read
@@ -28,6 +32,7 @@ jobs:
       LIVECUT_DB_URL: jdbc:mysql://127.0.0.1:3306/livecut_test?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC
       LIVECUT_DB_USER: livecut
       LIVECUT_DB_PASSWORD: dummy
+      LIVECUT_CAPTION_FONT_PATH: ${{ github.workspace }}/data/fonts/noto-sans-cjk-sc-2.004/NotoSansCJKsc-Regular.otf
     services:
       mysql:
         image: mysql:8.4.13@sha256:76f0358884cb92d9a086d24e5671c38048d3fef40f2588703d73eb55392d6b69
@@ -54,6 +59,9 @@ jobs:
           cache-dependency-path: backend-java/pom.xml
       - name: Make Maven wrapper executable
         run: chmod +x mvnw
+      - name: Install pinned caption font
+        timeout-minutes: 3
+        run: python3 ../scripts/install-caption-font.py
       - name: Verify against real MySQL
         run: ./mvnw --batch-mode --no-transfer-progress verify
       - name: Require executed tests without skips
@@ -65,7 +73,7 @@ jobs:
           reports = list(Path('target').glob('**/TEST-*.xml'))
           if not reports:
               raise SystemExit('No Maven test reports were generated')
-          for suite in ('VideoApiIntegrationTests', 'JobProtocolIntegrationTests', 'ModelCallIntegrationTests', 'ArtifactVerifierTests', 'ReviewIntegrationTests', 'ExportIntegrationTests', 'UploadApiIntegrationTests', 'UploadStorageLockTests', 'TaskEventsIntegrationTests', 'TaskEventsServiceTests'):
+          for suite in ('VideoApiIntegrationTests', 'JobProtocolIntegrationTests', 'ModelCallIntegrationTests', 'ArtifactVerifierTests', 'ReviewIntegrationTests', 'ExportIntegrationTests', 'UploadApiIntegrationTests', 'UploadStorageLockTests', 'TaskEventsIntegrationTests', 'TaskEventsServiceTests', 'CaptionRenderIntegrationTests', 'CaptionRenderSpecTests'):
               if not any(path.name.endswith(f'{suite}.xml') for path in reports):
                   raise SystemExit(f'The real MySQL integration suite did not execute: {suite}')
           test_count = 0

@@ -62,3 +62,9 @@ uv run pytest worker-python/tests/test_contracts.py worker-python/tests/test_inp
 `localization-annotation.schema.json` 定义无 SKU 的离线参考标注，要求实际源 SHA256、时长、原场次、明确的标注范围和来源声明。`fixtures/localization-annotation.synthetic.json` 仅用于合成手算验证；旧 `annotation.example.json` 的空模板仍不代表背景。
 
 `livecut evaluate-localization` 对未经人工修改的 DRAFT 预测做来源绑定及一对一定位评测；没有参考时使用 `livecut audit-localization`，不会输出质量分数。完整命令和部分标注口径见 [离线定位评测](../docs/23-离线定位评测与证据审计.md)。
+
+## 确认字幕烧录输入 v1
+
+[caption-render-spec.schema.json](./caption-render-spec.schema.json) 定义独立派生 EXPORT_CLIP 的小型冻结输入，包含已验证 clean MP4、确认字幕修订与 cues 文件、固定字体、样式和输出几何。canonical hash 绑定 claim、checkpoint 与新 captioned_export manifest；旧 reviewed_export 分支继续保持。本文 Schema 检查结构，三端另核验来源/相对 key/真实字节哈希、时序、非重叠、允许的固定参数与租约。API、进度及验收见 [带字幕成片](../docs/49-带字幕成片导出.md)。
+
+字幕渲染专用 [cues 文件](./caption-render-cues.schema.json) 与 [公共快照](./caption-render.schema.json) 分别约束纯文本输入和独立状态；示例 fixtures/caption-render.example.json 完全合成。UTF-16/UTF-8字节限制、半开区间非重叠、URL与本记录ID绑定及进度不回退仍需业务校验。

@@ -73,17 +73,19 @@ def _input_file(path: str | Path) -> Path:
 def _run_process(
     command: list[str], *, timeout_seconds: float, failure_code: str,
     guard: Callable[[], None] | None = None,
+    cwd: Path | None = None, progress: Callable[[], None] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     if isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, (int, float)):
         raise MediaError("INVALID_ARGUMENT", "timeout_seconds must be a positive finite number")
     if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
         raise MediaError("INVALID_ARGUMENT", "timeout_seconds must be a positive finite number")
-    if guard is not None:
+    if guard is not None or progress is not None:
         result = _run_guarded_process(command, timeout_seconds=timeout_seconds,
-                                      failure_code=failure_code, guard=guard)
+                                      failure_code=failure_code, guard=guard or (lambda: None),
+                                      cwd=cwd, progress=progress)
     else:
         result = _run_unchecked_process(command, timeout_seconds=timeout_seconds,
-                                        failure_code=failure_code)
+                                        failure_code=failure_code, cwd=cwd)
     if result.returncode != 0:
         detail = (result.stderr or "No diagnostic output").strip()[-2000:]
         raise MediaError(failure_code, f"Media command failed (exit {result.returncode}): {detail}")
@@ -92,6 +94,7 @@ def _run_process(
 
 def _run_unchecked_process(
     command: list[str], *, timeout_seconds: float, failure_code: str,
+    cwd: Path | None = None,
 ) -> subprocess.CompletedProcess[str]:
     # Keep the CLI's synchronous path and its subprocess.run error semantics.
     try:
@@ -106,6 +109,7 @@ def _run_unchecked_process(
             shell=False,
             timeout=timeout_seconds,
             check=False,
+            **({"cwd": cwd} if cwd is not None else {}),
         )
     except FileNotFoundError as exc:
         raise MediaError("TOOL_NOT_FOUND", f"Executable not found: {command[0]}") from exc
@@ -149,6 +153,7 @@ def _read_process_capture(capture: BinaryIO) -> str:
 def _run_guarded_process(
     command: list[str], *, timeout_seconds: float, failure_code: str,
     guard: Callable[[], None],
+    cwd: Path | None = None, progress: Callable[[], None] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     # Regular-file capture avoids pipe backpressure and Windows communicate
     # reader threads. Inherited handles cannot make cancellation drain or close
@@ -172,6 +177,7 @@ def _run_guarded_process(
                 stdout=stdout,
                 stderr=stderr,
                 shell=False,
+                **({"cwd": cwd} if cwd is not None else {}),
             )
         except FileNotFoundError as exc:
             raise MediaError("TOOL_NOT_FOUND", f"Executable not found: {command[0]}") from exc
@@ -180,11 +186,15 @@ def _run_guarded_process(
         try:
             while True:
                 remaining = check_remaining()
+                if progress is not None:
+                    progress()
                 try:
                     process.wait(timeout=min(0.2, remaining))
                 except subprocess.TimeoutExpired:
                     continue
                 check_remaining()
+                if progress is not None:
+                    progress()
                 captured_stdout = _read_process_capture(stdout)
                 captured_stderr = _read_process_capture(stderr)
                 check_remaining()
@@ -518,6 +528,70 @@ def export_composed_clip(
         _check_duration(result.duration_ms, expected, result.frame_rate, interval_count=len(parts))
         if (result.audio_codec is None) != (info.audio_codec is None):
             raise MediaError("OUTPUT_VALIDATION_FAILED", "Composed export changed audio stream presence")
+        _publish(temporary, target, guard=guard)
+        return replace(result, path=target)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def burn_caption_clip(
+    source: str | Path, output: str | Path, working_dir: Path, *,
+    width: int, height: int, expected_duration_ms: int, has_audio: bool,
+    source_frame: bool = False,
+    ffmpeg_path: str | Path = "ffmpeg", ffprobe_path: str | Path = "ffprobe",
+    timeout_seconds: float = 300, guard: Callable[[], None],
+    on_encoding: Callable[[int], None], on_phase: Callable[[str], None],
+) -> MediaInfo:
+    """Burn only program-generated relative ASS; never seek or cut the clean clip."""
+    info = probe_media(source, ffprobe_path=ffprobe_path, timeout_seconds=timeout_seconds, guard=guard)
+    _require_aligned_timeline(info)
+    target = _output_file(info.path, output, ".mp4")
+    progress_path = working_dir / "ffmpeg-progress.txt"
+    if progress_path.is_symlink():
+        raise MediaError("CAPTION_RENDER_ARTIFACT_CHANGED", "Unsafe progress path")
+    progress_path.unlink(missing_ok=True)
+    temporary = _temporary_output(target)
+    previous = -1
+
+    def progress():
+        nonlocal previous
+        guard()
+        try:
+            with progress_path.open("rb") as stream:
+                stream.seek(max(0, progress_path.stat().st_size - 65536))
+                text = stream.read(65536).decode("ascii", errors="ignore")
+            values = [int(line.split("=", 1)[1]) for line in text.splitlines()
+                      if line.startswith("out_time_us=") and line.split("=", 1)[1].lstrip("-").isdigit()]
+            if values and max(values) > previous:
+                previous = max(values)
+                on_encoding(previous)
+        except FileNotFoundError:
+            pass
+
+    filters = (("" if source_frame else
+                f"scale={width}:{height}:force_original_aspect_ratio=decrease:force_divisible_by=2,")
+               + f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,"
+               "ass=filename=captions.ass:fontsdir=fonts")
+    try:
+        _run_process([str(ffmpeg_path), "-hide_banner", "-loglevel", "warning", "-nostdin", "-y",
+            "-i", str(info.path), "-map", "0:v:0", "-map", "0:a:0?", "-vf", filters,
+            "-c:v", "libx264", "-threads", "2", "-preset", "veryfast", "-crf", "23",
+            "-pix_fmt", "yuv420p", "-c:a", "aac", "-movflags", "+faststart", "-nostats",
+            "-stats_period", "0.5", "-progress", "ffmpeg-progress.txt", str(temporary)],
+            timeout_seconds=timeout_seconds, failure_code="CAPTION_RENDER_ENCODE_FAILED",
+            guard=guard, cwd=working_dir, progress=progress)
+        on_phase("VALIDATING")
+        result = probe_media(temporary, ffprobe_path=ffprobe_path,
+                             timeout_seconds=timeout_seconds, guard=guard)
+        _check_duration(result.duration_ms, expected_duration_ms, result.frame_rate)
+        if (result.video_codec != "h264" or result.width != width or result.height != height
+                or result.audio_codec != ("aac" if has_audio else None)):
+            raise MediaError("CAPTION_RENDER_OUTPUT_INVALID", "Rendered streams or geometry do not match")
+        _run_process([str(ffmpeg_path), "-hide_banner", "-loglevel", "error", "-nostdin", "-xerror",
+            "-err_detect", "explode", "-i", str(temporary), "-map", "0:v:0", "-map", "0:a:0?",
+            "-f", "null", "-"], timeout_seconds=timeout_seconds,
+            failure_code="EXPORT_DECODE_FAILED", guard=guard)
+        on_phase("PUBLISHING")
         _publish(temporary, target, guard=guard)
         return replace(result, path=target)
     finally:

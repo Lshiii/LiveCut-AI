@@ -19,6 +19,7 @@ import io.livecut.jobs.JobModels.*;
 import io.livecut.exports.ExportService;
 import io.livecut.clips.ClipRequestService;
 import io.livecut.agent.AgentService;
+import io.livecut.captions.CaptionRenderSpec;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.http.HttpStatus;
@@ -325,7 +326,7 @@ public class JobService {
             String token = UUID.randomUUID().toString();
             Instant deadline = now.plusSeconds(hardDeadlineSeconds);
             Instant lease = minimum(now.plusSeconds(leaseSeconds), deadline);
-            jdbc.update("UPDATE job_stage SET status='RUNNING',attempt=attempt+1,run_token=?,worker_id=?,worker_session_id=?,lease_until=?,hard_deadline_at=?,error_code=NULL,diagnostic_json=NULL,text_progress_json=NULL,updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND status='READY'",
+            jdbc.update("UPDATE job_stage SET status='RUNNING',attempt=attempt+1,run_token=?,worker_id=?,worker_session_id=?,lease_until=?,hard_deadline_at=?,error_code=NULL,diagnostic_json=NULL,text_progress_json=NULL,render_progress_json=NULL,updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND status='READY'",
                     token, worker, session, timestamp(lease), timestamp(deadline), stageId);
             StageRow current = stage(stageId, true);
             jdbc.update("UPDATE stage_claim_request SET outcome='CLAIMED',attempt=?,run_token=? WHERE worker_id=? AND claim_request_id=?", current.attempt(), token, worker, claimId);
@@ -379,6 +380,33 @@ public class JobService {
         });
     }
 
+    public StageActionResult renderProgress(String stageId,tools.jackson.databind.JsonNode request){
+        final List<String> phases=List.of("PREPARING","ENCODING","VALIDATING","PUBLISHING");
+        final Credential execution;final long sequence,processed,total;final String phase;
+        try{
+            CaptionRenderSpec.fields(request,Set.of("attempt","run_token","sequence","phase","processed_ms","total_ms"));
+            execution=new Credential((int)CaptionRenderSpec.number(request,"attempt",1,Integer.MAX_VALUE),CaptionRenderSpec.text(request,"run_token"));
+            sequence=CaptionRenderSpec.number(request,"sequence",1,CaptionRenderSpec.MAX_SAFE);phase=CaptionRenderSpec.text(request,"phase");
+            processed=CaptionRenderSpec.number(request,"processed_ms",0,CaptionRenderSpec.MAX_SAFE);total=CaptionRenderSpec.number(request,"total_ms",1,CaptionRenderSpec.MAX_SAFE);
+            if(!phases.contains(phase)||processed>total)throw new IllegalArgumentException();
+        }catch(RuntimeException invalid){throw bad("INVALID_RENDER_PROGRESS","Invalid render progress payload");}
+        return transaction.execute(status->{
+            LockedStage locked=lockActiveStage(stageId,execution);
+            if(!isExport(locked.stage())||!"EXPORT_CLIP".equals(locked.stage().stageType()))throw conflict("RENDER_PROGRESS_NOT_SUPPORTED","Only captioned exports may publish render progress");
+            Map<String,Object> owner=exports.lockOwner(locked.stage().ownerId(),locked.jobId());
+            if(!"CAPTIONED".equals(owner.get("render_mode")))throw conflict("RENDER_PROGRESS_NOT_SUPPORTED","Only captioned exports may publish render progress");
+            var spec=exports.captionRenderFrozen(owner).path("caption_render");
+            if(total!=spec.path("input_media").path("duration_ms").longValue())throw bad("INVALID_RENDER_PROGRESS","Render duration does not match the frozen input");
+            String previous=jdbc.queryForObject("SELECT render_progress_json FROM job_stage WHERE id=?",String.class,locked.stage().id());
+            if(previous!=null){var old=JSON.readTree(previous);
+                if(sequence<=old.path("sequence").longValue())return action("ALREADY_APPLIED",locked.stage().id());
+                if(phases.indexOf(phase)<phases.indexOf(old.path("phase").asText())||processed<old.path("processed_ms").longValue())throw bad("INVALID_RENDER_PROGRESS","Render progress cannot move backwards");}
+            Map<String,Object> progress=new TreeMap<>();progress.put("sequence",sequence);progress.put("phase",phase);progress.put("processed_ms",processed);progress.put("total_ms",total);progress.put("updated_at",locked.dbNow().toString());
+            jdbc.update("UPDATE job_stage SET render_progress_json=?,updated_at=CURRENT_TIMESTAMP(6) WHERE id=?",JSON.writeValueAsString(progress),locked.stage().id());
+            touchParent(locked.stage(),null);return action("ACCEPTED",locked.stage().id());
+        });
+    }
+
     public StageActionResult complete(String stageId, CompleteRequest request) {
         if (request == null) { throw bad("INVALID_ARGUMENT", "A completion request is required"); }
         String id = uuid(stageId, "INVALID_STAGE_ID");
@@ -420,7 +448,9 @@ public class JobService {
         return transaction.execute(status -> {
             LockedStage locked = lockActiveStage(stageId, request.credential());
             Map<String, Object> diagnostic = StageDiagnostics.create(request.diagnostic(), request.errorCode(), locked.stage().attempt());
-            if (request.retryable() && locked.stage().attempt() < maxAttempts) {
+            boolean fixedCaptionInput=isExport(locked.stage())&&CaptionRenderSpec.requiresNewRender(request.errorCode())
+                    &&"CAPTIONED".equals(jdbc.queryForObject("SELECT render_mode FROM export_job WHERE id=?",String.class,locked.stage().ownerId()));
+            if (request.retryable() && !fixedCaptionInput && locked.stage().attempt() < maxAttempts) {
                 retryWait(locked.stage(), request.errorCode(), locked.dbNow(), diagnostic);
                 touchParent(locked.stage(), null);
             } else { terminalFailure(locked.stage(), request.errorCode(), diagnostic); }

@@ -250,6 +250,7 @@ class StageContext:
     directory: Path
     guard: LeaseGuard
     provider_input_hash: str | None = None
+    render_progress: Callable[[dict], None] | None = None
 
     def artifact(self, kind: str, path: Path) -> dict:
         resolved = path.resolve()
@@ -889,6 +890,25 @@ class StageWorker:
         epoch = self._presence_epoch
         guard = LeaseGuard(lease, self.stop, presence_check=lambda: self._check_presence(epoch))
         context = StageContext(lease, self.storage_root, directory, guard)
+
+        def render_progress(value):
+            guard.check()
+            deadline = self._monotonic() + min(2, guard.remaining_seconds())
+            try:
+                with self._client_scope(deadline=deadline, guard=guard.check):
+                    receipt = self.client.callback("render-progress", lease.stage_id,
+                                                   {**lease.credentials, **value})
+                if receipt.get("outcome") not in {"ACCEPTED", "ALREADY_APPLIED"}:
+                    raise WorkerClientError("INVALID_RENDER_PROGRESS_RESPONSE")
+            except WorkerClientError as error:
+                if (error.retryable and not error.code.startswith("INVALID_")
+                        and error.code not in {"STALE_ATTEMPT", "WORKER_UNAUTHORIZED", "WORKER_FORBIDDEN"}):
+                    return
+                guard.lose()
+                raise
+            guard.check()
+
+        context.render_progress = render_progress
         callback_path = self.journal_dir / "pending-callback.json"
         result_path = directory / "worker-result.json"
         if _native_path(result_path).exists():
@@ -918,8 +938,10 @@ class StageWorker:
             if lease.stage_type == "EXPORT_CLIP":
                 from .worker_export import ExportSpec
 
-                expected.update(asdict(ExportSpec.from_lease(lease)))
-                expected.update(data_kind="reviewed_export", review_status="CONFIRMED",
+                export_spec = ExportSpec.from_lease(lease)
+                expected.update({key: value for key, value in asdict(export_spec).items()
+                                 if key != "caption_render"})
+                expected.update(data_kind="captioned_export" if export_spec.render_mode == "CAPTIONED" else "reviewed_export", review_status="CONFIRMED",
                                 stage_input_hash=lease.input_hash)
             if any(manifest.get(key) != value for key, value in expected.items()):
                 raise WorkerError("INVALID_RESULT_MANIFEST")

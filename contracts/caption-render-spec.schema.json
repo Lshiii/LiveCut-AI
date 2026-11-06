@@ -1,0 +1,193 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://livecut.local/contracts/caption-render-spec.schema.json",
+  "title": "Frozen confirmed-caption MP4 render input v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "profile_version",
+    "source_export_id",
+    "source_clip_id",
+    "source_snapshot_hash",
+    "input_media",
+    "captions",
+    "style_preset",
+    "frame_preset",
+    "output",
+    "font",
+    "timing_basis"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "profile_version": {
+      "const": "caption-burn-v1"
+    },
+    "source_export_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "source_clip_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "source_snapshot_hash": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "input_media": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "key",
+        "sha256",
+        "size_bytes",
+        "duration_ms",
+        "width",
+        "height",
+        "has_audio"
+      ],
+      "properties": {
+        "key": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024,
+          "pattern": "^(?!.*//)(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9][A-Za-z0-9._/-]*$"
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "size_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "duration_ms": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "width": {
+          "type": "integer",
+          "minimum": 2,
+          "maximum": 4096
+        },
+        "height": {
+          "type": "integer",
+          "minimum": 2,
+          "maximum": 4096
+        },
+        "has_audio": {
+          "type": "boolean"
+        }
+      }
+    },
+    "captions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "revision",
+        "content_hash",
+        "cues_key",
+        "cues_sha256",
+        "duration_ms"
+      ],
+      "properties": {
+        "revision": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "content_hash": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "cues_key": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024,
+          "pattern": "^(?!.*//)(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9][A-Za-z0-9._/-]*$"
+        },
+        "cues_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "duration_ms": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        }
+      }
+    },
+    "style_preset": {
+      "enum": [
+        "WHITE_OUTLINE_V1",
+        "DARK_BOX_V1"
+      ]
+    },
+    "frame_preset": {
+      "enum": [
+        "SOURCE",
+        "LANDSCAPE_720",
+        "PORTRAIT_720"
+      ]
+    },
+    "output": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "width",
+        "height"
+      ],
+      "properties": {
+        "width": {
+          "type": "integer",
+          "minimum": 2,
+          "maximum": 4096
+        },
+        "height": {
+          "type": "integer",
+          "minimum": 2,
+          "maximum": 4096
+        }
+      }
+    },
+    "font": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "profile_id",
+        "family",
+        "key",
+        "sha256",
+        "size_bytes"
+      ],
+      "properties": {
+        "profile_id": {
+          "const": "noto-sans-cjk-sc-2.004"
+        },
+        "family": {
+          "const": "Noto Sans CJK SC"
+        },
+        "key": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024,
+          "pattern": "^(?!.*//)(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9][A-Za-z0-9._/-]*$"
+        },
+        "sha256": {
+          "const": "2c76254f6fc379fddfce0a7e84fb5385bb135d3e399294f6eeb6680d0365b74b"
+        },
+        "size_bytes": {
+          "const": 16437364
+        }
+      }
+    },
+    "timing_basis": {
+      "const": "CLIP_RELATIVE_ASS_CS_FLOOR"
+    }
+  }
+}

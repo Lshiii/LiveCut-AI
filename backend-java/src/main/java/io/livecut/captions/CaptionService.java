@@ -25,7 +25,7 @@ public class CaptionService {
     private final TransactionTemplate tx;
     private record Revision(long number,String hash,List<Cue> cues) {}
     /** Internal delivery pairing, never returned by the public caption controller. */
-    public record VerifiedDelivery(Snapshot snapshot,ExportModels.Content content) {}
+    public record VerifiedDelivery(Snapshot snapshot,ExportModels.Content content,String contentKey,JsonNode mediaInfo) {}
     public CaptionService(JdbcTemplate jdbc,CaptionSourceResolver sources,PlatformTransactionManager manager){
         this.jdbc=jdbc;this.sources=sources;tx=new TransactionTemplate(manager);tx.setIsolationLevel(TransactionDefinition.ISOLATION_READ_COMMITTED);
     }
@@ -78,7 +78,7 @@ public class CaptionService {
         if(number<0)throw invalid("Revision must be nonnegative");
         return tx.execute(status->{var source=sources.resolve(exportId,clipId);var document=lockDocument(source);var result=snapshot(source,document,number);
             if(!result.status().equals("CONFIRMED"))throw conflict("CAPTION_CONFIRMATION_REQUIRED","Confirm this caption revision before downloading");
-            return new VerifiedDelivery(result,source.verifiedContent());});
+            return new VerifiedDelivery(result,source.verifiedContent(),source.verifiedContentKey(),source.verifiedMediaInfo());});
     }
     private Map<String,Object> lockDocument(CaptionSourceResolver.Resolved source){
         var rows=jdbc.queryForList("SELECT * FROM caption_document WHERE clip_id=? FOR UPDATE",source.clipId());

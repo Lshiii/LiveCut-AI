@@ -16,6 +16,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import io.livecut.captions.CaptionRenderSpec;
+import io.livecut.clips.ClipRequestService;
 
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
@@ -72,10 +74,15 @@ public class ArtifactVerifier {
 
     public record ExportIdentity(String exportId, String clipId, long approvedRevision, String snapshotHash,
                                  String segmentId, long startMs, long endMs, String encodingProfile,
-                                 String stageInputHash, List<SourcePart> parts, String clipRequestId) {
+                                 String stageInputHash, List<SourcePart> parts, String clipRequestId,
+                                 JsonNode captionRender,String captionRenderHash) {
+        public ExportIdentity(String exportId,String clipId,long approvedRevision,String snapshotHash,String segmentId,
+                long startMs,long endMs,String encodingProfile,String stageInputHash,List<SourcePart> parts,String clipRequestId){
+            this(exportId,clipId,approvedRevision,snapshotHash,segmentId,startMs,endMs,encodingProfile,stageInputHash,parts,clipRequestId,null,null);
+        }
         public ExportIdentity(String exportId,String clipId,long approvedRevision,String snapshotHash,String segmentId,
                 long startMs,long endMs,String encodingProfile,String stageInputHash) {
-            this(exportId,clipId,approvedRevision,snapshotHash,segmentId,startMs,endMs,encodingProfile,stageInputHash,List.of(),null);
+            this(exportId,clipId,approvedRevision,snapshotHash,segmentId,startMs,endMs,encodingProfile,stageInputHash,List.of(),null,null,null);
         }
     }
     public record SourcePart(@com.fasterxml.jackson.annotation.JsonProperty("start_ms") long startMs,
@@ -124,6 +131,16 @@ public class ArtifactVerifier {
         double tolerance = frameRate > 0 ? Math.max(100, Math.ceil(2000 / frameRate)) : 100;
         long expectedDuration=export.parts().isEmpty()?export.endMs()-export.startMs():export.parts().stream().mapToLong(p->p.endMs()-p.startMs()).sum();
         if (Math.abs(metadata.path("duration_ms").longValue() - expectedDuration) > tolerance*Math.max(1,export.parts().size())) { throw invalidManifest(); }
+        if(export.captionRender()!=null){
+            JsonNode render=export.captionRender();try{CaptionRenderSpec.validate(render);}catch(RuntimeException invalid){throw invalidManifest();}
+            if(!longInteger(metadata,"width",render.path("output").path("width").longValue())||!longInteger(metadata,"height",render.path("output").path("height").longValue()))throw invalidManifest();
+            if(render.path("input_media").path("has_audio").booleanValue()){if(!text(metadata,"audio_codec","aac"))throw invalidManifest();}
+            else if(!audio.isNull()&&!audio.isMissingNode())throw invalidManifest();
+            var reference=verified.artifacts().stream().filter(a->a.kind().equals("caption_render_info")).findFirst().orElseThrow(ArtifactVerifier::invalidManifest);
+            JsonNode renderInfo;try{renderInfo=JSON.readTree(verifiedBytes(reference.key(),reference.sha256(),expected.attemptPrefix(),MAX_MANIFEST_BYTES));CaptionRenderSpec.fields(renderInfo,Set.of("schema_version","caption_render_hash","caption_render"));}
+            catch(JobException error){throw error;}catch(RuntimeException error){throw invalidManifest();}
+            if(!integer(renderInfo,"schema_version",1)||!text(renderInfo,"caption_render_hash",export.captionRenderHash())||!ClipRequestService.canonicalJson(renderInfo.path("caption_render")).equals(ClipRequestService.canonicalJson(render)))throw invalidManifest();
+        }
         return verified;
     }
 
@@ -151,7 +168,11 @@ public class ArtifactVerifier {
             throw error(HttpStatus.CONFLICT, "ARTIFACT_IDENTITY_MISMATCH", "Artifact identity does not match this execution");
         }
         if ("EXPORT_CLIP".equals(expected.stageType())) {
-            if (export == null || !text(manifest, "data_kind", "reviewed_export") || !text(manifest, "review_status", "CONFIRMED")) { throw invalidManifest(); }
+            if (export == null || !text(manifest, "data_kind", export.captionRender()==null?"reviewed_export":"captioned_export") || !text(manifest, "review_status", "CONFIRMED")) { throw invalidManifest(); }
+            if(export.captionRender()!=null){
+                if(!CaptionRenderSpec.PROFILE.equals(export.encodingProfile())||!text(manifest,"render_mode","CAPTIONED")||!text(manifest,"caption_render_hash",export.captionRenderHash())
+                    ||!export.captionRenderHash().equals(ClipRequestService.sha(ClipRequestService.canonicalJson(export.captionRender()))))throw invalidManifest();
+            }else if(manifest.has("render_mode")||manifest.has("caption_render_hash"))throw invalidManifest();
             if (!text(manifest, "export_id", export.exportId()) || !text(manifest, "clip_id", export.clipId())
                     || !longInteger(manifest, "approved_revision", export.approvedRevision())
                     || !text(manifest, "snapshot_hash", export.snapshotHash()) || !text(manifest, "segment_id", export.segmentId())
@@ -192,6 +213,7 @@ public class ArtifactVerifier {
             verified.add(new VerifiedArtifact(kind, artifactKey, artifactHash, size));
         }
         if (!kinds.containsAll(specialKind==null?REQUIRED_KINDS.get(expected.stageType()):Set.of(specialKind))) { throw invalidManifest(); }
+        if(export!=null&&export.captionRender()!=null&&!kinds.contains("caption_render_info"))throw invalidManifest();
         return new VerifiedManifest(verified);
     }
 
