@@ -3,6 +3,7 @@
 import json
 import threading
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from uuid import UUID
 
 import httpx
@@ -151,11 +152,21 @@ def test_only_the_exact_session_conflict_can_retry_startup(tmp_path, code, statu
     assert not stop.waits
 
 
-def test_zero_budget_retains_one_immediate_attempt_and_original_error(tmp_path):
+@pytest.mark.parametrize('preparation_seconds', [0, .125])
+def test_zero_budget_retains_one_immediate_attempt_and_original_error(
+        tmp_path, monkeypatch, preparation_seconds):
     clock = Clock()
     server = RegistrationServer(clock, conflicts=10)
     stop = ClockStop(clock)
     runner, client = make_worker(tmp_path, server, stop, wait=0)
+    monkeypatch.setattr('livecut.worker_client.time', SimpleNamespace(monotonic=clock))
+    actual_request = client._request
+
+    def prepare_request(*args, **kwargs):
+        clock.now += preparation_seconds
+        return actual_request(*args, **kwargs)
+
+    monkeypatch.setattr(client, '_request', prepare_request)
     try:
         with pytest.raises(WorkerClientError, match='^WORKER_SESSION_CONFLICT$'):
             runner.run_once(stage_type='ASR')
@@ -163,7 +174,12 @@ def test_zero_budget_retains_one_immediate_attempt_and_original_error(tmp_path):
         client.close()
     assert len(server.requests) == 1
     assert not stop.waits
-    assert all(value == .8 for value in server.requests[0][0].extensions['timeout'].values())
+    assert clock.now == preparation_seconds
+    request = server.requests[0][0]
+    assert request.extensions['livecut_deadline_at'] == .8
+    assert request.extensions['timeout'] == {
+        phase: .8 - preparation_seconds for phase in ('connect', 'read', 'write', 'pool')}
+    assert all(0 < timeout <= .8 for timeout in request.extensions['timeout'].values())
 
 
 def test_exhaustion_never_polls_or_unregisters_and_releases_the_local_journal(tmp_path):

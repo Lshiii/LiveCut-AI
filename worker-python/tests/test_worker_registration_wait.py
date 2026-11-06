@@ -6,6 +6,7 @@ import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from types import SimpleNamespace
 from uuid import uuid4
 
 import httpx
@@ -233,10 +234,13 @@ def test_expired_registration_receipt_never_emits_registered_or_starts_work(tmp_
     assert len(client.unregistrations) == 1
 
 
-@pytest.mark.parametrize(('requested', 'client_limit', 'expected'), [(2.5, 10, 2.5), (45, 3, 3)])
-def test_registration_http_timeout_is_capped_by_budget_and_client_limit(requested, client_limit, expected):
+@pytest.mark.parametrize(('requested', 'client_limit'), [(2.5, 10), (45, 3)])
+@pytest.mark.parametrize('preparation_seconds', [0, .125])
+def test_registration_http_timeout_is_capped_by_budget_and_client_limit(
+        monkeypatch, requested, client_limit, preparation_seconds):
     requests = []
     session = str(uuid4())
+    clock = Clock()
 
     def handle(request):
         requests.append(request)
@@ -246,12 +250,29 @@ def test_registration_http_timeout_is_capped_by_budget_and_client_limit(requeste
 
     client = WorkerClient('http://127.0.0.1:8080', 'private-key', timeout_seconds=client_limit,
                           transport=httpx.MockTransport(handle))
+    # Replace only this module's clock, leaving HTTPX/thread scheduling clocks
+    # untouched. Preparation occurs after register fixed its absolute deadline
+    # and before the real _request calculates all HTTP phase timeouts.
+    monkeypatch.setattr('livecut.worker_client.time', SimpleNamespace(monotonic=clock))
+    actual_request = client._request
+
+    def prepare_request(*args, **kwargs):
+        clock.now += preparation_seconds
+        return actual_request(*args, **kwargs)
+
+    monkeypatch.setattr(client, '_request', prepare_request)
+    started = clock.now
     try:
         client.register_worker('worker-1', session, ['TIMELINE'], timeout_seconds=requested)
     finally:
         client.close()
+    cap = min(requested, client_limit)
+    elapsed = clock.now - started
+    assert elapsed == preparation_seconds
+    assert requests[0].extensions['livecut_deadline_at'] == started + cap
     assert requests[0].extensions['timeout'] == {
-        phase: expected for phase in ('connect', 'read', 'write', 'pool')}
+        phase: cap - elapsed for phase in ('connect', 'read', 'write', 'pool')}
+    assert all(0 < timeout <= cap for timeout in requests[0].extensions['timeout'].values())
 
 
 @pytest.mark.parametrize('invalid', [0, -1, float('nan'), float('inf'), True, '1'])
