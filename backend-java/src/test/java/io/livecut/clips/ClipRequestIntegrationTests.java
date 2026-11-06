@@ -227,6 +227,74 @@ class ClipRequestIntegrationTests {
         var ready=clips.get(r.id());ObjectNode selected=(ObjectNode)ready.plan().deepCopy();((ObjectNode)selected.path("outputs").get(0)).put("enabled",true);var saved=clips.save(r.id(),edit(ready,selected.path("outputs")));clips.confirm(r.id(),confirmation(saved));assertEquals(1,exports.createClipRequest(r.id(),exportInput(saved)).clips().size());
         ((ObjectNode)selected.path("outputs").get(1)).put("enabled",true);assertEquals("INVALID_CLIP_PLAN",failure(()->clips.save(r.id(),edit(saved,selected.path("outputs")))));
     }
+    @Test void httpPlanEditsCannotRelabelUnresolvedOutputsOrReplaceTheirIdentities() throws Exception {
+        for(String state:List.of("NOT_FOUND","NEEDS_REVIEW")){
+            Fixture f=fixture();var ready=readyWithStatus(f,state);var original=jobs.get(f.job());
+            ObjectNode promoted=(ObjectNode)ready.plan().deepCopy();ObjectNode output=(ObjectNode)promoted.path("outputs").get(1);
+            output.put("status","FOUND").put("enabled",true);
+            // NOT_FOUND has no parts: provide legitimate source references so shape checks alone cannot catch the promotion.
+            output.putArray("parts").addObject().put("start_utterance_id","u4").put("end_utterance_id","u4").put("start_ms",3000).put("end_ms",4000);
+            output.putArray("evidence_utterance_ids").add("u4");
+            var relabelled=send("PUT","/api/clip-requests/"+ready.id()+"/plan",edit(ready,promoted.path("outputs")),null,false);
+            assertEquals(400,relabelled.statusCode());assertEquals("INVALID_CLIP_PLAN",JSON.readTree(relabelled.body()).path("error_code").asText());
+            ObjectNode renamed=(ObjectNode)ready.plan().deepCopy();((ObjectNode)renamed.path("outputs").get(1)).put("output_id","forged-output");
+            assertEquals(400,send("PUT","/api/clip-requests/"+ready.id()+"/plan",edit(ready,renamed.path("outputs")),null,false).statusCode());
+            // Swapping two existing IDs is no substitute for retaining each goal/output association.
+            ((ObjectNode)renamed.path("outputs").get(0)).put("output_id","out-method");((ObjectNode)renamed.path("outputs").get(1)).put("output_id","out-cause");
+            assertEquals(400,send("PUT","/api/clip-requests/"+ready.id()+"/plan",edit(ready,renamed.path("outputs")),null,false).statusCode());
+            assertEquals(ready,clips.get(ready.id()));assertEquals(original,jobs.get(f.job()));
+            assertEquals(1,jdbc.queryForObject("SELECT COUNT(*) FROM clip_plan_revision WHERE request_id=?",Integer.class,ready.id()));
+        }
+    }
+    @Test void foundReviewEditsKeepValidPartExclusionAndSelectionChanges() throws Exception {
+        Fixture f=fixture();var ready=ready(f);var original=jobs.get(f.job());ObjectNode edited=(ObjectNode)ready.plan().deepCopy();
+        ObjectNode exchangedGoals=(ObjectNode)ready.plan().deepCopy();((ObjectNode)exchangedGoals.path("outputs").get(0)).put("goal_id","method");((ObjectNode)exchangedGoals.path("outputs").get(1)).put("goal_id","cause");
+        assertEquals(400,send("PUT","/api/clip-requests/"+ready.id()+"/plan",edit(ready,exchangedGoals.path("outputs")),null,false).statusCode());
+        ObjectNode cause=(ObjectNode)edited.path("outputs").get(0);cause.put("title","人工核对后的原因").put("enabled",true);
+        cause.putArray("parts").addObject().put("start_utterance_id","u1").put("end_utterance_id","u1").put("start_ms",0).put("end_ms",1000);
+        cause.putArray("evidence_utterance_ids").add("u1");cause.withArray("excluded").addObject().put("utterance_id","u3").put("reason","人工移除重复解释");
+        var saved=send("PUT","/api/clip-requests/"+ready.id()+"/plan",edit(ready,edited.path("outputs")),null,false);assertEquals(200,saved.statusCode());
+        var selected=clips.get(ready.id());assertEquals(1,selected.revision());assertEquals("FOUND",selected.plan().path("outputs").get(0).path("status").asText());
+        assertEquals(200,send("POST","/api/clip-requests/"+ready.id()+"/confirm",confirmation(selected),null,false).statusCode());
+        var exported=send("POST","/api/clip-requests/"+ready.id()+"/exports",exportInput(selected),null,false);assertEquals(200,exported.statusCode());
+        JsonNode clip=JSON.readTree(exported.body()).path("clips").get(0);assertEquals("人工核对后的原因",clip.path("title").asText());assertEquals(1,clip.path("parts").size());assertEquals(1000,clip.path("duration_ms").asLong());
+        assertEquals(original,jobs.get(f.job()));assertEquals(ready.budget(),clips.get(ready.id()).budget());
+        assertEquals(ready.plan(),JSON.readTree(jdbc.queryForObject("SELECT plan_json FROM clip_plan_revision WHERE request_id=? AND revision=0",String.class,ready.id())));
+    }
+    @Test void legacyRelabelledDraftCannotBeConfirmedOrUsedAsTheNextReviewAuthority() throws Exception {
+        Fixture f=fixture();var ready=readyWithStatus(f,"NEEDS_REVIEW");var original=jobs.get(f.job());
+        ObjectNode promoted=(ObjectNode)ready.plan().deepCopy();((ObjectNode)promoted.path("outputs").get(1)).put("status","FOUND").put("enabled",true);
+        var legacy=persistLegacyRevision(ready,promoted,false);String originalLegacy=jdbc.queryForObject("SELECT plan_json FROM clip_plan_revision WHERE request_id=? AND revision=1",String.class,ready.id());
+        assertEquals(200,send("GET","/api/clip-requests/"+ready.id(),null,null,false).statusCode());
+        var rejected=send("POST","/api/clip-requests/"+ready.id()+"/confirm",confirmation(legacy),null,false);assertEquals(400,rejected.statusCode());assertEquals("INVALID_CLIP_PLAN",JSON.readTree(rejected.body()).path("error_code").asText());
+        assertEquals("INVALID_CLIP_PLAN",failure(()->clips.save(legacy.id(),edit(legacy,legacy.plan().path("outputs")))));
+        assertTrue(clips.get(ready.id()).confirmedRevisions().isEmpty());assertEquals(legacy,clips.get(ready.id()));
+        // Correcting the submitted review back to the automatic status is allowed; the old malformed revision remains untouched.
+        ObjectNode corrected=(ObjectNode)ready.plan().deepCopy();((ObjectNode)corrected.path("outputs").get(0)).put("enabled",true);
+        var repaired=clips.save(ready.id(),edit(legacy,corrected.path("outputs")));clips.confirm(repaired.id(),confirmation(repaired));assertEquals(1,exports.createClipRequest(repaired.id(),exportInput(repaired)).clips().size());
+        assertEquals(originalLegacy,jdbc.queryForObject("SELECT plan_json FROM clip_plan_revision WHERE request_id=? AND revision=1",String.class,ready.id()));
+        assertEquals(original,jobs.get(f.job()));assertEquals(ready.budget(),clips.get(ready.id()).budget());
+    }
+    @Test void alreadyConfirmedLegacyIdentityChangesStayReadableButCannotCreateNewExports() throws Exception {
+        Fixture f=fixture();var selected=select(readyWithStatus(f,"FOUND"));clips.confirm(selected.id(),confirmation(selected));var existing=exports.createClipRequest(selected.id(),exportInput(selected));
+        ObjectNode changed=(ObjectNode)selected.plan().deepCopy();((ObjectNode)changed.path("outputs").get(1)).put("output_id","historical-forged-output");
+        var legacy=persistLegacyRevision(selected,changed,true);var before=clips.get(legacy.id());
+        assertEquals(200,send("GET","/api/clip-requests/"+legacy.id(),null,null,false).statusCode());
+        assertTrue(before.confirmedRevisions().contains(legacy.revision()));
+        assertEquals("INVALID_CLIP_PLAN",failure(()->clips.confirm(legacy.id(),confirmation(legacy))));
+        assertEquals("INVALID_CLIP_PLAN",failure(()->exports.createClipRequest(legacy.id(),exportInput(legacy))));
+        assertEquals(before,clips.get(legacy.id()));assertEquals(existing,exports.get(existing.id()));assertEquals(existing.id(),exports.createClipRequest(selected.id(),exportInput(selected)).id());
+    }
+    @Test void missingOrTamperedAutomaticRevisionCannotBeReplacedByTheCurrentDraft() throws Exception {
+        Fixture f=fixture();var selected=select(ready(f));String original=jdbc.queryForObject("SELECT plan_json FROM clip_plan_revision WHERE request_id=? AND revision=0",String.class,selected.id());
+        jdbc.update("UPDATE clip_plan_revision SET plan_hash=? WHERE request_id=? AND revision=0","0".repeat(64),selected.id());
+        assertEquals("CLIP_PLAN_SOURCE_INVALID",failure(()->clips.confirm(selected.id(),confirmation(selected))));
+        assertEquals("CLIP_PLAN_SOURCE_INVALID",failure(()->clips.save(selected.id(),edit(selected,selected.plan().path("outputs")))));
+        assertEquals(original,jdbc.queryForObject("SELECT plan_json FROM clip_plan_revision WHERE request_id=? AND revision=0",String.class,selected.id()));
+        jdbc.update("DELETE FROM clip_plan_revision WHERE request_id=? AND revision=0",selected.id());
+        assertEquals("CLIP_PLAN_SOURCE_INVALID",failure(()->clips.confirm(selected.id(),confirmation(selected))));
+        assertEquals(selected,clips.get(selected.id()));
+    }
     @Test void reclaimedClipAttemptRejectsOldResultWithoutChangingSourceJob() throws Exception {
         Fixture f=fixture();var before=jobs.get(f.job());var r=create(f,4);var first=claim(r);var result=publishPlan(f,r,first,null);jdbc.update("UPDATE job_stage SET lease_until=DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL 1 SECOND) WHERE id=?",first.stageId());jobs.recoverExpired();var second=claim(clips.get(r.id()));assertEquals(2,second.attempt());assertEquals("STALE_ATTEMPT",failure(()->jobs.complete(first.stageId(),result)));assertEquals(before,jobs.get(f.job()));
     }
@@ -275,6 +343,15 @@ class ClipRequestIntegrationTests {
     private ClaimResult claim(ClipRequestModels.Snapshot request){return jobs.claim(new ClaimRequest(request.stage().id(),"intent-test-worker",UUID.randomUUID().toString()));}
     private String reserveOutcome(ClaimResult l,String letter){try{return calls.reserve(new ReserveRequest(l.stageId(),l.attempt(),l.runToken(),letter.repeat(64),letter.repeat(64),"op-"+letter,"qwen-plus","TEXT")).outcome();}catch(VideoApiException e){return e.getCode();}}
     private ClipRequestModels.Snapshot ready(Fixture f)throws Exception{var r=create(f,6);var l=claim(r);jobs.complete(l.stageId(),publishPlan(f,r,l,null));return clips.get(r.id());}
+    private ClipRequestModels.Snapshot readyWithStatus(Fixture f,String state)throws Exception{var r=create(f,6);var l=claim(r);jobs.complete(l.stageId(),publishPlan(f,r,l,p->{ObjectNode output=(ObjectNode)p.path("outputs").get(1);output.put("status",state);if(state.equals("NOT_FOUND")){output.putArray("parts");output.putArray("evidence_utterance_ids");}}));return clips.get(r.id());}
+    /** Simulates rows written by the older API only within this test's synthetic request. */
+    private ClipRequestModels.Snapshot persistLegacyRevision(ClipRequestModels.Snapshot source,JsonNode plan,boolean confirmed){
+        long revision=source.revision()+1;String serialized=ClipRequestService.canonicalJson(plan),hash=ClipRequestService.sha(serialized);
+        jdbc.update("INSERT INTO clip_plan_revision (request_id,revision,plan_hash,plan_json) VALUES (?,?,?,?)",source.id(),revision,hash,serialized);
+        jdbc.update("UPDATE clip_request SET latest_revision=?,state_version=state_version+1 WHERE id=?",revision,source.id());
+        if(confirmed)jdbc.update("INSERT INTO clip_plan_confirmation (request_id,revision,plan_hash) VALUES (?,?,?)",source.id(),revision,hash);
+        return clips.get(source.id());
+    }
     private ClipRequestModels.Snapshot select(ClipRequestModels.Snapshot request){ObjectNode plan=(ObjectNode)request.plan().deepCopy();for(JsonNode o:plan.path("outputs"))((ObjectNode)o).put("enabled",true);return clips.save(request.id(),edit(request,plan.path("outputs")));}
     private static JsonNode edit(ClipRequestModels.Snapshot r,JsonNode outputs){return JSON.createObjectNode().put("base_revision",r.revision()).set("outputs",outputs);}
     private static JsonNode confirmation(ClipRequestModels.Snapshot r){return JSON.valueToTree(Map.of("revision",r.revision(),"plan_hash",r.planHash()));}

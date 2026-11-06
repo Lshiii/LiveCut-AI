@@ -101,7 +101,7 @@ public class ClipRequestService {
         fields(input,Set.of("base_revision","outputs"));long base=number(input,"base_revision");
         return tx.execute(status->{var owner=lockPublicOwner(uuid(id));requireReady(owner);requireCurrent(owner,base);
             JsonNode old=revision(owner,base);ObjectNode updated=(ObjectNode)old.deepCopy();updated.set("outputs",input.path("outputs").deepCopy());
-            validate(updated,owner,false);long next=Math.addExact(base,1);String serialized=canonicalJson(updated);
+            validateReview(updated,owner,automaticPlan(owner));long next=Math.addExact(base,1);String serialized=canonicalJson(updated);
             jdbc.update("INSERT INTO clip_plan_revision (request_id,revision,plan_hash,plan_json) VALUES (?,?,?,?)",id,next,sha(serialized),serialized);
             jdbc.update("UPDATE clip_request SET latest_revision=?,state_version=state_version+1,updated_at=CURRENT_TIMESTAMP(6) WHERE id=?",next,id);
             return snapshot(lockOwner(id,String.valueOf(owner.get("job_id"))));});
@@ -109,7 +109,7 @@ public class ClipRequestService {
     public Snapshot confirm(String id,JsonNode input){
         fields(input,Set.of("revision","plan_hash"));long rev=number(input,"revision");String expected=hash(text(input,"plan_hash",64));
         return tx.execute(status->{var owner=lockPublicOwner(uuid(id));requireReady(owner);requireCurrent(owner,rev);
-            JsonNode plan=confirmedCandidate(owner,rev,expected,false);validate(plan,owner,false);
+            JsonNode plan=confirmedCandidate(owner,rev,expected,false);
             boolean selected=false;for(JsonNode output:plan.path("outputs"))if(output.path("enabled").asBoolean()){selected=true;if(!output.path("status").asText().equals("FOUND"))throw conflict("CLIP_PLAN_UNVERIFIED","Only found targets can be selected");}
             if(!selected)throw conflict("CLIP_PLAN_EMPTY_SELECTION","Select at least one output before confirming");
             jdbc.update("INSERT INTO clip_plan_confirmation (request_id,revision,plan_hash) VALUES (?,?,?) ON DUPLICATE KEY UPDATE plan_hash=plan_hash",id,rev,expected);
@@ -150,7 +150,17 @@ public class ClipRequestService {
         if(rows.isEmpty())throw missing("CLIP_PLAN_REVISION_NOT_FOUND");
         var row=rows.getFirst();if(!expected.equals(row.get("plan_hash")))throw conflict("CLIP_PLAN_HASH_CONFLICT","Plan hash does not match this revision");
         if(confirmed&&jdbc.queryForObject("SELECT COUNT(*) FROM clip_plan_confirmation WHERE request_id=? AND revision=? AND plan_hash=?",Integer.class,owner.get("id"),rev,expected)==0)throw conflict("EXPORT_REQUIRES_CONFIRMATION","Confirm this clipping plan first");
-        JsonNode plan=JSON.readTree(String.valueOf(row.get("plan_json")));validate(plan,owner,false);return plan;
+        JsonNode plan=JSON.readTree(String.valueOf(row.get("plan_json")));return validateReview(plan,owner,automaticPlan(owner));
+    }
+    /** Revision zero is inserted only when the automatic stage succeeds; public review APIs never replace it. */
+    private JsonNode automaticPlan(Map<String,Object> owner){
+        var rows=jdbc.queryForList("SELECT plan_hash,plan_json FROM clip_plan_revision WHERE request_id=? AND revision=0",owner.get("id"));
+        if(rows.size()!=1)throw conflict("CLIP_PLAN_SOURCE_INVALID","The original automatic plan is unavailable");
+        try{
+            var row=rows.getFirst();JsonNode plan=JSON.readTree(String.valueOf(row.get("plan_json")));
+            if(!sha(canonicalJson(plan)).equals(row.get("plan_hash")))throw new IllegalArgumentException("Automatic plan hash mismatch");
+            validate(plan,owner,true);return plan;
+        }catch(RuntimeException invalid){throw conflict("CLIP_PLAN_SOURCE_INVALID","The original automatic plan failed validation");}
     }
     private JsonNode revision(Map<String,Object> owner,long rev){var rows=jdbc.queryForList("SELECT plan_json FROM clip_plan_revision WHERE request_id=? AND revision=?",String.class,owner.get("id"),rev);if(rows.isEmpty())throw missing("CLIP_PLAN_REVISION_NOT_FOUND");return JSON.readTree(rows.getFirst());}
     private Snapshot snapshot(Map<String,Object> owner){

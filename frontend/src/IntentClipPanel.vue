@@ -46,6 +46,7 @@ function message(value: unknown) {
     CLIP_PLAN_NOT_CONFIRMED: '请先保存并确认当前方案版本，再导出。',
     CLIP_EMPTY_SELECTION: '请至少勾选一个已找到证据的目标。',
     INVALID_CLIP_PLAN: '标题、原句区间或证据不符合要求，请检查后再保存。',
+    CLIP_PLAN_SOURCE_INVALID: '原自动方案校验未通过，请核对来源或重新查找片段。当前修改仍然保留。',
     INVALID_CLIP_RESPONSE: '返回的剪辑方案不完整、来源不匹配或版本过期，已保留本页内容。',
     MODEL_BUDGET_EXHAUSTED: '本次请求的模型次数已用尽，请查看执行原因，调整要求后另建请求。',
     CLIP_REQUEST_NOT_CANCELLABLE: '当前请求已不在等待或执行状态，无法取消。请核对自动更新后的结果。',

@@ -61,6 +61,20 @@ public final class ClipPlanValidator {
         if(!seenGoals.equals(goals))throw bad("Each goal requires an explicit result");
         return plan;
     }
+    /** Ordinary review edits retain the identities and classifications published by the worker. */
+    public static JsonNode validateReview(JsonNode plan,Map<String,Object> request,JsonNode automatic){
+        validate(automatic,request,true);
+        validate(plan,request,false);
+        for(String field:PLAN)if(!field.equals("outputs")&&!plan.path(field).equals(automatic.path(field)))throw bad("Review metadata must match the automatic plan");
+        Map<String,JsonNode> originals=new HashMap<>();
+        for(JsonNode output:automatic.path("outputs"))originals.put(output.path("output_id").stringValue(),output);
+        if(plan.path("outputs").size()!=originals.size())throw bad("Review must retain every automatic output");
+        for(JsonNode output:plan.path("outputs")){
+            JsonNode original=originals.get(output.path("output_id").stringValue());
+            if(original==null||!output.path("goal_id").equals(original.path("goal_id"))||!output.path("status").equals(original.path("status")))throw bad("Output identity and status must match the automatic plan");
+        }
+        return plan;
+    }
     public static void fields(JsonNode value,Set<String> expected){if(value==null||!value.isObject()||!value.propertyNames().equals(expected))throw bad("Unexpected or missing fields");}
     public static JsonNode array(JsonNode value,String field,int minimum,int maximum){JsonNode a=value.path(field);if(!a.isArray()||a.size()<minimum||a.size()>maximum)throw bad("Invalid "+field);return a;}
     public static long number(JsonNode value,String field){JsonNode n=value.path(field);if(!n.isIntegralNumber()||!n.canConvertToLong()||n.longValue()<0)throw bad("Invalid "+field);return n.longValue();}
