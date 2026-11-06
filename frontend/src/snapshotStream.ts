@@ -36,14 +36,21 @@ export function parseAnalysisSnapshot(raw: unknown, id: string): AnalysisJob {
   if (!integer(budget.max_text_calls) || !integer(budget.text_calls_reserved) || budget.text_calls_reserved > budget.max_text_calls
       || !integer(budget.max_asr_submissions) || !integer(budget.asr_calls_reserved) || budget.asr_calls_reserved > budget.max_asr_submissions
       || typeof actions.can_cancel !== 'boolean' || typeof actions.can_retry !== 'boolean' || !integer(actions.max_attempts, 1)
-      || ![null, 'JOB_NOT_RETRYABLE', 'ATTEMPTS_EXHAUSTED'].includes(actions.retry_block_reason as string | null)) invalid()
+      || ![null, 'JOB_NOT_RETRYABLE', 'ATTEMPTS_EXHAUSTED', 'TEXT_RECOVERY_EXHAUSTED'].includes(actions.retry_block_reason as string | null)
+      || !(actions.can_resume_from_asr === undefined || typeof actions.can_resume_from_asr === 'boolean')
+      || !(actions.resume_from_asr_block_reason === undefined || [null, 'RESUME_REQUIRES_TOPICS', 'JOB_NOT_RESUMABLE', 'PREPARATION_NOT_READY', 'PREPARATION_SOURCE_INVALID'].includes(actions.resume_from_asr_block_reason as string | null))
+      || !(raw.resumed_from_job_id === undefined || raw.resumed_from_job_id === null
+        || (uuid(raw.resumed_from_job_id) && raw.resumed_from_job_id !== raw.id))) invalid()
   const stages = raw.stages.map(stage => {
     const { diagnostic: rawDiagnostic, text_progress: rawProgress, ...rest } = stage
     const diagnostic = parseDiagnostic(rawDiagnostic, stage.attempt, stage.error_code)
     const progress = stage.stage_type === 'SEGMENT' ? parseTextProgress(rawProgress) : undefined
     return { ...rest, ...(diagnostic ? { diagnostic } : {}), ...(progress ? { text_progress: progress } : {}) }
   })
-  return { ...raw, stages } as unknown as AnalysisJob
+  const { resumed_from_job_id: resumedFrom, ...value } = raw
+  return { ...value, ...(typeof resumedFrom === 'string' ? { resumed_from_job_id: resumedFrom } : {}), stages,
+    actions: { ...actions, can_resume_from_asr: actions.can_resume_from_asr ?? false,
+      resume_from_asr_block_reason: actions.resume_from_asr_block_reason ?? null } } as unknown as AnalysisJob
 }
 export function parseExportSnapshot(raw: unknown, id: string, jobId?: string): ExportJob {
   base(raw, id, EXPORT_STATUS)

@@ -1,5 +1,9 @@
 # 视频分析结果契约
 
+## 普通分析的准备产物复用
+
+`POST /api/jobs/{id}/resume-from-asr` 为已完成 MEDIA/ASR 的 topics 任务建立独立新轮次。公开快照的可选 `resumed_from_job_id` 表示来源；私有 `preparation_reuse` 只随认证 claim 下发，结构见 [preparation-reuse.schema.json](./preparation-reuse.schema.json)。Worker 另行核验源与目标身份、manifest、路径和字节哈希，失败不回退付费 ASR。完整状态、预算与并发约束见[执行说明](../docs/40-普通分析复用转写重新执行.md)。
+
 ## 按需求剪辑 v1.0
 
 独立请求方案使用 [clip-plan.schema.json](./clip-plan.schema.json)，不覆盖原话题预测与审核修订。每个目标一个输出，包含有序的多个源区间、证据和排除原句。JSON Schema 检查结构；Java 与 Python 另行核验来源哈希、目标完整覆盖、语句存在与顺序、时间映射、区间不重叠和排除证据互斥。自动方案所有输出初始不勾选，只有 FOUND 可人工启用；确认版本才能导出。接口及边界见 [按需求检索与剪辑方案](../docs/37-按需求检索与剪辑方案.md)。

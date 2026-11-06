@@ -9,7 +9,8 @@ import FailureDiagnostic from './FailureDiagnostic.vue'
 import TextRequestProgress from './TextRequestProgress.vue'
 import ExecutorStatus from './ExecutorStatus.vue'
 import { DEFAULT_OCR_MAX_FRAMES, newAnalysisConfig, samplingLabel } from './sampling'
-import { SnapshotError, SnapshotStream, isAnalysisTerminal, newestSnapshot, parseAnalysisSnapshot, streamLabels, type StreamMode } from './snapshotStream'
+import { SnapshotError, SnapshotStream, isAnalysisTerminal, parseAnalysisSnapshot, streamLabels, type StreamMode } from './snapshotStream'
+import { analysisCanResume, analysisResumeReceipt, analysisRetryExplanation, newestAnalysisSnapshot, parseResumedAnalysisSnapshot, type AnalysisResumeReceipt } from './analysisResume'
 import { DetailRecovery, isConnectionErrorCode } from './connectionRecovery'
 import './style.css'
 
@@ -19,17 +20,25 @@ const pending = ref(''), errorMessage = ref(''), listConnectionError = ref(''), 
 const connectionError = computed(() => detailConnectionError.value || listConnectionError.value)
 const online = ref(false), loading = ref(true), query = ref(''), filter = ref('ALL')
 const visualProvider = ref<'ocr' | 'none'>('none'), maxTextCalls = ref(24), maxOcrFrames = ref(DEFAULT_OCR_MAX_FRAMES)
+const recoveryBudget = ref(12)
+const pendingResumes = new Map<string, AnalysisResumeReceipt>()
 const uploadPanel = ref<{ chooseFile: () => void } | null>(null)
 const reviewEditor = ref<{ dirty: boolean; pending: boolean } | null>(null)
 const intentEditor = ref<{ dirty: boolean; pending: boolean } | null>(null)
 const editorsDirty = computed(() => !!reviewEditor.value?.dirty || !!intentEditor.value?.dirty)
 const editorsPending = computed(() => !!reviewEditor.value?.pending || !!intentEditor.value?.pending)
+const canResumeFromAsr = computed(() => analysisCanResume(selectedJob.value, editorsDirty.value, !!pending.value || editorsPending.value))
 const streamMode = ref<StreamMode>('idle')
 let timer: number | undefined, refreshing = false, stopped = false, selectionVersion = 0
 let uploadSelectionVersion = 0
 const detailRecovery = new DetailRecovery()
 const taskStream = new SnapshotStream<AnalysisJob>({
-  kind: 'job', parse: parseAnalysisSnapshot, terminal: isAnalysisTerminal,
+  kind: 'job', parse: (raw, id) => {
+    const snapshot = parseAnalysisSnapshot(raw, id)
+    // Reject changed lineage/accounting before the stream can adopt it internally.
+    latestSnapshot(snapshot)
+    return snapshot
+  }, terminal: isAnalysisTerminal,
   fetchSnapshot: (id, signal) => api<unknown>(`/api/jobs/${id}`, { signal }),
   onMode: mode => { streamMode.value = mode },
   onSnapshot: snapshot => {
@@ -50,18 +59,12 @@ const visibleJobs = computed(() => jobs.value.filter(j => `${videoName(j.video_i
 const currentVideo = computed(() => videos.value.find(v => v.id === (selectedJob.value?.video_id || selectedVideoId.value)))
 const topicMode = computed(() => selectedJob.value?.config?.analysis_mode === 'topics')
 const completeCount = computed(() => selectedJob.value?.stages.filter(s => ['SUCCEEDED', 'SKIPPED'].includes(s.status)).length ?? 0)
-const retryExplanation = computed(() => {
-  const actions = selectedJob.value?.actions
-  if (actions?.retry_block_reason === 'ATTEMPTS_EXHAUSTED') {
-    return `失败阶段已达到 ${actions.max_attempts} 次执行上限。可新建一次分析，新任务使用独立的模型调用预算。`
-  }
-  return '当前没有可重试的失败阶段，请刷新任务状态，或新建一次分析。'
-})
+const retryExplanation = computed(() => analysisRetryExplanation(selectedJob.value))
 function latestSnapshot(incoming: AnalysisJob) {
   const candidates = [selectedJob.value, jobs.value.find(job => job.id === incoming.id)]
   // Equal versions remain refreshable: a Java restart may change the current
   // max_attempts configuration without changing this persisted job version.
-  return candidates.reduce<AnalysisJob>((latest, known) => newestSnapshot(known, latest), incoming)
+  return candidates.reduce<AnalysisJob>((latest, known) => newestAnalysisSnapshot(known, latest), incoming)
 }
 function applySelectedSnapshot(snapshot: AnalysisJob) {
   const latest = latestSnapshot(snapshot)
@@ -82,6 +85,11 @@ function adoptHttpSnapshot(snapshot: AnalysisJob) {
   }
 }
 function videoName(id: string) { return videos.value.find(v => v.id === id)?.original_filename ?? `视频 ${id.slice(0, 8)}` }
+function stageLabel(type: string) {
+  if (selectedJob.value?.resumed_from_job_id && type === 'MEDIA') return '复用音频'
+  if (selectedJob.value?.resumed_from_job_id && type === 'ASR') return '复用语音转写'
+  return type === 'SEGMENT' && topicMode.value ? '话题解析' : stageNames[type] ?? type
+}
 function date(value: string) { return new Date(value).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) }
 function formatError(error: unknown) {
   const code = error instanceof ApiError ? error.code : error instanceof SnapshotError ? 'INVALID_SERVER_RESPONSE' : 'CLIENT_ERROR'
@@ -89,6 +97,11 @@ function formatError(error: unknown) {
     NETWORK_UNAVAILABLE: '无法连接服务，请检查 Java 服务是否正在运行。',
     REQUEST_TIMEOUT: '请求超时。创建任务可再次点击，系统会复用幂等键。',
     ATTEMPTS_EXHAUSTED: '阶段执行次数已耗尽，请创建新的分析任务。新任务使用独立的模型调用预算。',
+    TEXT_RECOVERY_EXHAUSTED: '本次文本请求的恢复次数或等待窗口已耗尽。请使用“复用转写重新分析”，设置新的文本请求预算。',
+    RESUME_REQUIRES_TOPICS: '只有话题分析任务支持复用转写重新分析。',
+    JOB_NOT_RESUMABLE: '仅失败、已取消或已完成话题分析的任务可以复用转写，请刷新状态。',
+    PREPARATION_NOT_READY: '原任务的音频或转写尚未完成，暂时无法复用。',
+    PREPARATION_SOURCE_INVALID: '原任务的音频或转写来源校验未通过，请检查源文件和已保存产物。',
     JOB_NOT_RETRYABLE: '任务当前不可重试，请刷新状态。',
     JOB_NOT_CANCELLABLE: '任务当前不可取消，请刷新状态。',
     INVALID_SERVER_RESPONSE: '任务返回的数据不完整或不匹配，已保留上次有效状态。',
@@ -99,14 +112,14 @@ function formatError(error: unknown) {
 function showError(error: unknown) { errorMessage.value = formatError(error) }
 function connectionFailure(error: unknown) { return error instanceof ApiError && isConnectionErrorCode(error.code) }
 function dismissErrors() { errorMessage.value = ''; listConnectionError.value = ''; detailConnectionError.value = '' }
-async function loadDetail(id: string, background = false) {
-  if (stopped || !canSelect(id)) return
+async function loadDetail(id: string, background = false, allowPending = false) {
+  if (stopped || !canSelect(id, allowPending)) return
   const version = background ? selectionVersion : ++selectionVersion
   if (!background) { detailRecovery.cancel(); detailConnectionError.value = '' }
   if (selectedJob.value?.id !== id) taskStream.select(null)
   try {
     const raw = await api<unknown>(`/api/jobs/${encodeURIComponent(id)}`)
-    if (stopped || version !== selectionVersion || !canSelect(id)) return
+    if (stopped || version !== selectionVersion || !canSelect(id, allowPending)) return
     const result = parseAnalysisSnapshot(raw, id)
     adoptHttpSnapshot(result)
     const url = new URL(location.href); url.searchParams.set('job', id); history.replaceState({}, '', url)
@@ -129,7 +142,8 @@ async function loadDetail(id: string, background = false) {
     if (!stopped && version === selectionVersion && selectedJob.value && taskStream.resourceId === null) taskStream.select(selectedJob.value.id, selectedJob.value)
   }
 }
-function canSelect(id: string) {
+function canSelect(id: string, allowPending = false) {
+  if (pending.value && !allowPending) { errorMessage.value = '请等待当前操作完成，再切换任务。'; return false }
   if (selectedJob.value?.id === id) return true
   if (editorsPending.value) { errorMessage.value = '审核或剪辑方案正在提交，请稍后再切换任务。'; return false }
   if (editorsDirty.value) { errorMessage.value = '审核或剪辑方案有未保存修改，请先保存或在相应区域放弃修改。'; return false }
@@ -161,6 +175,10 @@ async function refresh() {
   finally { refreshing = false; loading.value = false }
 }
 function selectVideo() {
+  if (pending.value) {
+    selectedVideoId.value = selectedJob.value?.video_id ?? selectedVideoId.value
+    errorMessage.value = '请等待当前操作完成，再新建或切换分析。'; return
+  }
   if (editorsPending.value) {
     selectedVideoId.value = selectedJob.value?.video_id ?? selectedVideoId.value
     errorMessage.value = '审核或剪辑方案正在提交，请稍后再切换任务。'; return
@@ -216,17 +234,57 @@ async function createJob() {
     if (job.video_id !== videoId) throw new ApiError('INVALID_SERVER_RESPONSE')
     localStorage.removeItem('livecut-pending-create')
     if (version === selectionVersion && selectedVideoId.value === videoId && !editorsDirty.value && !editorsPending.value) {
-      await loadDetail(job.id)
+      await loadDetail(job.id, false, true)
       notice.value = '任务已创建。计算 Worker 在线后会自动领取。'
     } else notice.value = '任务已创建。当前选择和审核内容保持不变，可在任务列表中打开。'
     await refresh()
   } catch (error) { showError(error) }
   finally { pending.value = '' }
 }
+async function resumeFromAsr() {
+  const source = selectedJob.value
+  if (!source || pending.value) return
+  if (editorsPending.value) { errorMessage.value = '审核或剪辑方案正在提交，请稍后再重新分析。'; return }
+  if (editorsDirty.value) { errorMessage.value = '审核或剪辑方案有未保存修改，请先保存或在相应区域放弃修改。'; return }
+  if (!canResumeFromAsr.value) { errorMessage.value = '当前任务无法复用转写，请刷新任务状态。'; return }
+  const budget = recoveryBudget.value
+  if (!Number.isInteger(budget) || budget < 1 || budget > 100) { errorMessage.value = '新文本请求上限须为 1～100 的整数。'; return }
+  const storageKey = `livecut-analysis-resume-${source.id}-${budget}`
+  let saved: unknown = pendingResumes.get(storageKey)
+  if (!saved) { try { saved = JSON.parse(localStorage.getItem(storageKey) ?? 'null') } catch { /* Only valid receipts are reused. */ } }
+  const receipt = analysisResumeReceipt(saved, source.id, budget, () => crypto.randomUUID())
+  pendingResumes.set(storageKey, receipt)
+  try { localStorage.setItem(storageKey, JSON.stringify(receipt)) } catch { /* Keep the mounted-view receipt when storage is unavailable. */ }
+  detailRecovery.cancel(); detailConnectionError.value = ''
+  const version = ++selectionVersion
+  pending.value = 'resume'; errorMessage.value = ''; notice.value = ''
+  try {
+    const raw = await post<unknown>(`/api/jobs/${source.id}/resume-from-asr`, { max_text_calls: budget }, { 'Idempotency-Key': receipt.key })
+    if (stopped || version !== selectionVersion || selectedJob.value?.id !== source.id) return
+    const job = parseResumedAnalysisSnapshot(raw, source, budget)
+    const existing = jobs.value.findIndex(item => item.id === job.id)
+    const accepted = newestAnalysisSnapshot(existing >= 0 ? jobs.value[existing] : undefined, job)
+    pendingResumes.delete(storageKey)
+    try {
+      const current = JSON.parse(localStorage.getItem(storageKey) ?? 'null')
+      if (current?.key === receipt.key) localStorage.removeItem(storageKey)
+    } catch { /* A valid accepted job remains available even without local storage. */ }
+    if (existing >= 0) jobs.value[existing] = accepted
+    else jobs.value.unshift(accepted)
+    // Editors may have changed while the POST was in flight; never discard their drafts.
+    if (!editorsDirty.value && !editorsPending.value) {
+      adoptHttpSnapshot(accepted)
+      const url = new URL(location.href); url.searchParams.set('job', job.id); history.replaceState({}, '', url)
+      notice.value = `已创建新分析，文本请求上限 ${budget} 次。将复用原音频与转写，不新增 ASR 请求；原任务与调用记录保留。`
+    } else notice.value = '新分析已创建。当前审核或剪辑草稿保持不变，可保存后从任务列表打开新分析。'
+    await refresh()
+  } catch (error) { if (!stopped && version === selectionVersion && selectedJob.value?.id === source.id) showError(error) }
+  finally { if (!stopped && version === selectionVersion) pending.value = '' }
+}
 async function action(kind: 'cancel' | 'retry') {
   if (!selectedJob.value || pending.value) return
   if (kind === 'retry' && !selectedJob.value.actions?.can_retry) {
-    errorMessage.value = selectedJob.value.actions?.retry_block_reason === 'ATTEMPTS_EXHAUSTED'
+    errorMessage.value = ['ATTEMPTS_EXHAUSTED', 'TEXT_RECOVERY_EXHAUSTED'].includes(selectedJob.value.actions?.retry_block_reason ?? '')
       ? retryExplanation.value : '任务当前不可重试，请刷新状态。'
     return
   }
@@ -282,7 +340,7 @@ onUnmounted(() => { stopped = true; detailRecovery.cancel(); selectionVersion++;
             <div v-if="loading" class="empty">正在读取本地任务…</div>
             <div v-else-if="!visibleJobs.length" class="empty"><div>▤</div><h3>{{ jobs.length ? '没有匹配的任务' : '从第一段视频开始' }}</h3><p>{{ jobs.length ? '尝试其他名称或状态。' : '上传 MP4 视频，然后在右侧创建分析任务。' }}</p></div>
             <div v-else class="task-list">
-              <button v-for="job in visibleJobs" :key="job.id" class="task-row" :class="{ active: selectedJob?.id === job.id }" @click="loadDetail(job.id)"><span class="video-tile">▷</span><span class="task-info"><strong>{{ videoName(job.video_id) }}</strong><span>第 {{ job.generation }} 次分析 <i>·</i> {{ date(job.created_at) }}</span><small>{{ job.id.slice(0, 8) }}</small></span><span class="status" :class="job.status.toLowerCase()">{{ names[job.status] ?? job.status }}</span><span class="row-arrow">›</span></button>
+            <button v-for="job in visibleJobs" :key="job.id" class="task-row" :class="{ active: selectedJob?.id === job.id }" :disabled="!!pending" @click="loadDetail(job.id)"><span class="video-tile">▷</span><span class="task-info"><strong>{{ videoName(job.video_id) }}</strong><span>第 {{ job.generation }} 次分析 <i>·</i> {{ date(job.created_at) }}</span><small>{{ job.id.slice(0, 8) }}</small></span><span class="status" :class="job.status.toLowerCase()">{{ names[job.status] ?? job.status }}</span><span class="row-arrow">›</span></button>
             </div>
             <footer class="list-footer">显示最近 {{ jobs.length }} 个任务（最多 100 个）<span>定时刷新任务列表</span></footer>
           </section>
@@ -292,13 +350,22 @@ onUnmounted(() => { stopped = true; detailRecovery.cancel(); selectionVersion++;
               <label class="field-label" for="source-video">视频来源</label><select id="source-video" v-model="selectedVideoId" :disabled="!!pending" @change="selectVideo"><option value="" disabled>请先上传视频</option><option v-for="video in videos" :key="video.id" :value="video.id">{{ video.original_filename }}</option></select>
               <template v-if="selectedJob">
                 <p class="help" aria-label="画面取证策略">{{ samplingLabel(selectedJob.config) }}</p>
+                <p v-if="selectedJob.resumed_from_job_id" class="help">本次分析继续自任务 #{{ selectedJob.resumed_from_job_id.slice(0, 8) }}。将复用已完成的音频与转写，不新增 ASR 请求；文本分析与预算独立。</p>
                 <div class="detail-status"><span class="status" :class="selectedJob.status.toLowerCase()">{{ names[selectedJob.status] ?? selectedJob.status }}</span><span>{{ completeCount }} / {{ selectedJob.stages.length }} 阶段完成</span></div>
-                <ol class="stages"><li v-for="(stage, index) in orderedStages" :key="stage.id" :class="stage.status.toLowerCase()"><span class="step">{{ stage.status === 'SUCCEEDED' ? '✓' : index + 1 }}</span><div><b>{{ stage.stage_type === 'SEGMENT' && topicMode ? '话题解析' : stageNames[stage.stage_type] ?? stage.stage_type }}</b><small>{{ names[stage.status] ?? stage.status }}<template v-if="stage.attempt"> · 第 {{ stage.attempt }} 次执行</template></small><TextRequestProgress v-if="stage.stage_type === 'SEGMENT'" :progress="stage.text_progress" :terminal="['SUCCEEDED', 'FAILED', 'CANCELLED', 'SKIPPED'].includes(stage.status)" /><FailureDiagnostic :diagnostic="stage.diagnostic" :error-code="stage.error_code" :attempt="stage.attempt" /></div></li></ol>
+                <ol class="stages"><li v-for="(stage, index) in orderedStages" :key="stage.id" :class="stage.status.toLowerCase()"><span class="step">{{ stage.status === 'SUCCEEDED' ? '✓' : index + 1 }}</span><div><b>{{ stageLabel(stage.stage_type) }}</b><small>{{ names[stage.status] ?? stage.status }}<template v-if="stage.attempt"> · 第 {{ stage.attempt }} 次执行</template></small><TextRequestProgress v-if="stage.stage_type === 'SEGMENT'" :progress="stage.text_progress" :terminal="['SUCCEEDED', 'FAILED', 'CANCELLED', 'SKIPPED'].includes(stage.status)" /><FailureDiagnostic :diagnostic="stage.diagnostic" :error-code="stage.error_code" :attempt="stage.attempt" /></div></li></ol>
                 <div class="budget"><span>已预留模型请求</span><b>文本 {{ selectedJob.budget.text_calls_reserved }}/{{ selectedJob.budget.max_text_calls }} <i>·</i> ASR {{ selectedJob.budget.asr_calls_reserved }}/{{ selectedJob.budget.max_asr_submissions }}</b><small>次数上限，不代表人民币费用</small></div>
                 <p v-if="selectedJob.status === 'REVIEW_READY'" class="review-note">自动结果已就绪。请在下方核对内容与边界，勾选需要切分的片段，再保存并确认。</p>
                 <p v-if="selectedJob.status === 'FAILED' && !selectedJob.actions?.can_retry" class="help" role="status">{{ retryExplanation }}</p>
                 <p v-else-if="selectedJob.actions?.can_retry" class="help">重试仅恢复失败阶段，每阶段最多执行 {{ selectedJob.actions.max_attempts }} 次；模型请求仍受本任务原预算限制。</p>
-                <div class="actions"><button v-if="selectedJob.actions?.can_cancel" class="secondary" :disabled="!!pending" @click="action('cancel')">取消任务</button><button v-if="selectedJob.actions?.can_retry" class="secondary" :disabled="!!pending" @click="action('retry')">重试失败阶段</button><button class="text-button" :disabled="!!pending" @click="selectVideo">新建一次分析 →</button></div>
+                <div v-if="selectedJob.actions?.can_resume_from_asr" class="analysis-recovery">
+                  <label class="field-label" for="recovery-text-budget">新文本请求上限</label><div class="number-field"><input id="recovery-text-budget" v-model.number="recoveryBudget" type="number" min="1" max="100" step="1" :disabled="!!pending"><span>次 / 新分析</span></div>
+                  <p class="help">将复用已完成的音频与转写，不新增 ASR 请求；使用当前文本模型重新分析，按新上限计数。原任务、审核、导出与调用记录保留。</p>
+                  <button class="primary create-button" :disabled="!canResumeFromAsr || !online" @click="resumeFromAsr">{{ pending === 'resume' ? '正在创建新分析…' : '复用转写重新分析' }}</button>
+                </div>
+                <p v-else-if="selectedJob.actions?.resume_from_asr_block_reason === 'PREPARATION_NOT_READY'" class="help">原任务的音频或转写尚未完成，暂时无法复用转写重新分析。</p>
+                <p v-else-if="selectedJob.actions?.resume_from_asr_block_reason === 'PREPARATION_SOURCE_INVALID'" class="help">原任务的音频或转写来源校验未通过，暂时无法复用，请检查源文件与已保存产物。</p>
+                <div class="actions"><button v-if="selectedJob.actions?.can_cancel" class="secondary" :disabled="!!pending" @click="action('cancel')">取消任务</button><button v-if="selectedJob.actions?.can_retry" class="secondary" :disabled="!!pending" @click="action('retry')">重试失败阶段</button><button class="text-button" :disabled="!!pending || editorsDirty || editorsPending" @click="selectVideo">新建一次分析 →</button></div>
+                <p class="help">“新建一次分析”会从头处理视频，并重新提交 ASR。</p>
               </template>
               <template v-else>
                 <p class="help">AI 从转写中识别连续话题，生成标题、摘要与时间区间。解析后由你勾选并调整。</p>

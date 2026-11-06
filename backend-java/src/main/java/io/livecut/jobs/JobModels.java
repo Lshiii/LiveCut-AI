@@ -13,6 +13,7 @@ public final class JobModels {
     private JobModels() {}
 
     public record CreateJobRequest(@JsonProperty("video_id") String videoId, Map<String, Object> config) {}
+    public record ResumeFromAsrRequest(@JsonProperty("max_text_calls") Integer maxTextCalls) {}
     public record Credential(int attempt, @JsonProperty("run_token") String runToken) {}
     public record ClaimRequest(@JsonProperty("stage_id") String stageId,
                                @JsonProperty("worker_id") String workerId,
@@ -78,13 +79,26 @@ public final class JobModels {
     public record JobActions(@JsonProperty("can_cancel") boolean canCancel,
                              @JsonProperty("can_retry") boolean canRetry,
                              @JsonProperty("retry_block_reason") String retryBlockReason,
-                             @JsonProperty("max_attempts") int maxAttempts) {}
+                             @JsonProperty("max_attempts") int maxAttempts,
+                             @JsonProperty("can_resume_from_asr") boolean canResumeFromAsr,
+                             @JsonProperty("resume_from_asr_block_reason") String resumeFromAsrBlockReason) {
+        public JobActions(boolean canCancel, boolean canRetry, String retryBlockReason, int maxAttempts) {
+            this(canCancel, canRetry, retryBlockReason, maxAttempts, false, "PREPARATION_NOT_READY");
+        }
+    }
     public record JobSnapshot(String id, @JsonProperty("video_id") String videoId, int generation,
                                String status, @JsonProperty("config_hash") String configHash,
                                Map<String, Object> config, @JsonProperty("state_version") long stateVersion,
                                List<StageSnapshot> stages, BudgetSnapshot budget, JobActions actions,
                                @JsonProperty("created_at") Instant createdAt,
-                               @JsonProperty("updated_at") Instant updatedAt) {}
+                               @JsonProperty("updated_at") Instant updatedAt,
+                               @JsonProperty("resumed_from_job_id") @JsonInclude(JsonInclude.Include.NON_NULL) String resumedFromJobId) {
+        public JobSnapshot(String id, String videoId, int generation, String status, String configHash,
+                Map<String, Object> config, long stateVersion, List<StageSnapshot> stages, BudgetSnapshot budget,
+                JobActions actions, Instant createdAt, Instant updatedAt) {
+            this(id, videoId, generation, status, configHash, config, stateVersion, stages, budget, actions, createdAt, updatedAt, null);
+        }
+    }
     public record JobPage(List<JobSnapshot> items, int limit, int offset) {}
     public record ReadyStage(String id, @JsonProperty("job_id") String jobId,
                               @JsonProperty("stage_type") String stageType,

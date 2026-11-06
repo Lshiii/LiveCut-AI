@@ -46,6 +46,10 @@ class StageDiagnosticsTests {
     }
 
     @Test void zeroBudgetUnknownOutcomeAndOcrFailuresDoNotSuggestBlindPaidRetry() {
+        assertSuggestion("PREPARATION_REUSE_MISSING_SOURCE", "CHECK_ARTIFACT_INTEGRITY");
+        assertSuggestion("PREPARATION_REUSE_ARTIFACT_MISMATCH", "CHECK_ARTIFACT_INTEGRITY");
+        assertSuggestion("PREPARATION_REUSE_MODEL_MISMATCH", "CHECK_SOURCE_AND_CONFIGURATION");
+        assertSuggestion("PREPARATION_REUSE_STORAGE_ERROR", "CHECK_WORKER_STORAGE");
         assertSuggestion("BUDGET_EXHAUSTED", "NEW_JOB_WITH_BUDGET");
         assertSuggestion("MODEL_BUDGET_EXHAUSTED", "NEW_JOB_WITH_BUDGET");
         assertSuggestion("UNKNOWN_OUTCOME", "RECONCILE_MODEL_CALL");

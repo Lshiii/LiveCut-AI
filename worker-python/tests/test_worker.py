@@ -10,6 +10,7 @@ from livecut.worker import (
     LeaseGuard,
     StageWorker,
     WorkerError,
+    sha256,
     shared_path,
 )
 from livecut.worker_client import WorkerClientError
@@ -131,6 +132,58 @@ def test_heartbeat_failure_stops_new_work_and_reports_fenced_failure(tmp_path):
     failures = [entry for entry in client.callbacks if entry[0] == "fail"]
     assert failures[0][2]["error_code"] == "LEASE_LOST"
     assert not any(entry[0] == "complete" for entry in client.callbacks)
+
+
+@pytest.mark.parametrize("condition,code", [("stop", "WORKER_STOPPED"), ("lease", "LEASE_LOST")])
+@pytest.mark.parametrize("boundary", ["artifact_hash", "before_manifest"])
+def test_final_artifact_verification_cannot_publish_after_cancellation_or_lease_loss(
+        tmp_path, monkeypatch, condition, code, boundary):
+    client, calls, captured, checks = FakeClient(), [], {}, []
+
+    def execute(context):
+        captured["context"] = context
+        audio = context.directory / "audio.wav"
+        audio.write_bytes(b"a" * (3 * 1024 * 1024))
+        result = fake_executor(calls)(context)
+        result["artifacts"] = [{"kind": "audio", "key": context.lease.attempt_key + "/audio.wav",
+                                "sha256": sha256(audio)}]
+        return result
+
+    def interrupt():
+        context = captured["context"]
+        if condition == "stop":
+            context.guard._stop.set()
+        else:
+            context.guard.lose()
+
+    def final_hash(path, *, guard=None):
+        if path.name != "audio.wav":
+            return sha256(path, guard=guard)
+        # Executor computes its expected digest above with the original function;
+        # this hook runs only in StageWorker's final returned-artifact check.
+        assert guard is not None, "final large-artifact validation must remain interruptible"
+        if boundary == "artifact_hash":
+            def guarded_block():
+                checks.append("block")
+                interrupt()
+                guard()
+
+            return sha256(path, guard=guarded_block)
+        digest = sha256(path, guard=guard)
+        checks.append("hashed")
+        interrupt()  # Catch the boundary after the digest and before manifest publication.
+        return digest
+
+    monkeypatch.setattr("livecut.worker.sha256", final_hash)
+    runner = StageWorker(client, tmp_path / "storage", tmp_path / "journal", "worker-1",
+                         execute, registry_enabled=False)
+    assert runner.run_once() == "failed"
+    assert calls == ["stage-1"]
+    assert checks == (["block"] if boundary == "artifact_hash" else ["hashed"])
+    assert not (captured["context"].directory / "manifest.json").exists()
+    assert not any(action == "complete" for action, _, _ in client.callbacks)
+    assert client.callbacks[-1][0] == "fail"
+    assert client.callbacks[-1][2]["error_code"] == code
 
 
 def test_hard_deadline_prevents_executor(tmp_path):

@@ -5,6 +5,7 @@ import java.net.URI;
 import io.livecut.jobs.JobModels.CreateJobRequest;
 import io.livecut.jobs.JobModels.JobPage;
 import io.livecut.jobs.JobModels.JobSnapshot;
+import io.livecut.jobs.JobModels.ResumeFromAsrRequest;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -44,6 +45,14 @@ public class JobController {
 
     @PostMapping("/{id}/retry")
     public JobSnapshot retry(@PathVariable String id) { return service.retry(id); }
+
+    @PostMapping("/{id}/resume-from-asr")
+    public ResponseEntity<JobSnapshot> resumeFromAsr(@PathVariable String id,
+            @RequestBody(required = false) ResumeFromAsrRequest request,
+            @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey) {
+        JobSnapshot job = service.resumeFromAsr(id, request, idempotencyKey);
+        return ResponseEntity.created(URI.create("/api/jobs/" + job.id())).body(job);
+    }
 
     static int queryNumber(String value, int minimum, int maximum, String name) {
         try {

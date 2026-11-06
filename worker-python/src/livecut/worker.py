@@ -86,11 +86,15 @@ def _read(path: Path) -> dict:
     return value
 
 
-def sha256(path: Path) -> str:
+def sha256(path: Path, *, guard: Callable[[], None] | None = None) -> str:
     digest = hashlib.sha256()
     with _native_path(path).open("rb") as handle:
         for block in iter(lambda: handle.read(1024 * 1024), b""):
+            if guard is not None:
+                guard()
             digest.update(block)
+    if guard is not None:
+        guard()
     return digest.hexdigest()
 
 
@@ -612,12 +616,14 @@ class StageWorker:
                 if not isinstance(artifact, dict) or not isinstance(artifact.get("key"), str):
                     raise WorkerError("INVALID_RESULT_MANIFEST")
                 file = shared_path(self.storage_root, artifact["key"], must_exist=True)
-                if not file.is_relative_to(directory.resolve()) or sha256(file) != artifact.get("sha256"):
+                if (not file.is_relative_to(directory.resolve())
+                        or sha256(file, guard=guard.check) != artifact.get("sha256")):
                     raise WorkerError("INVALID_RESULT_MANIFEST")
             manifest_path = directory / "manifest.json"
+            guard.check()
             _write(manifest_path, manifest)
             payload = {**lease.credentials, "manifest_key": lease.attempt_key + "/manifest.json",
-                       "manifest_hash": sha256(manifest_path)}
+                       "manifest_hash": sha256(manifest_path, guard=guard.check)}
             callback = {"action": "complete", "stage_id": lease.stage_id, "payload": payload}
         except Exception as exc:
             code = getattr(exc, "code", "WORKER_EXECUTION_FAILED")
@@ -762,14 +768,24 @@ class AnalysisStageExecutor:
                                        ffprobe_path=self.ffprobe_path)(context)
         context.guard.check()
         lease, directory = context.lease, context.directory
-        source = shared_path(context.storage_root, lease.source_key, must_exist=True)
-        if sha256(source) != lease.source_hash:
-            raise WorkerError("SOURCE_HASH_MISMATCH")
         config = lease.config
+        if "preparation_reuse" in config and self.asr_reuse_source is not None:
+            raise WorkerError("PREPARATION_REUSE_CONFLICT")
+        preparation_copy = lease.stage_type in {"MEDIA", "ASR"} and "preparation_reuse" in config
+        if not preparation_copy:
+            # Preparation-copy stages perform the same source verification in
+            # their link-rejecting, guard-aware stream; hash a large MP4 once.
+            source = shared_path(context.storage_root, lease.source_key, must_exist=True)
+            if sha256(source, guard=context.guard.check) != lease.source_hash:
+                raise WorkerError("SOURCE_HASH_MISMATCH")
         if lease.stage_type == "SEGMENT" and "clip_request" in config:
             return self._execute_intent(context)
         artifacts: list[dict] = []
-        if lease.stage_type == "MEDIA":
+        if preparation_copy:
+            from .preparation_reuse import reuse_preparation
+
+            artifacts = reuse_preparation(context, config["preparation_reuse"])
+        elif lease.stage_type == "MEDIA":
             info = probe_media(_native_path(source), ffprobe_path=self.ffprobe_path,
                                timeout_seconds=min(30, context.guard.remaining_seconds()))
             context.guard.check()

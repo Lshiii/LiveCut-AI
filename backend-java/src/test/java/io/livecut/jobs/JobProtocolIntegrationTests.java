@@ -124,6 +124,204 @@ class JobProtocolIntegrationTests {
     }
 
     @Test
+    void resumeFromAsrCreatesPrivateFreshTextBudgetAndDoesNotRewriteSource() {
+        JobService service = context.getBean(JobService.class);
+        Object oldDefault = org.springframework.test.util.ReflectionTestUtils.getField(service, "defaultTextModel");
+        Object oldFallbacks = org.springframework.test.util.ReflectionTestUtils.getField(service, "defaultFallbackModels");
+        try {
+            org.springframework.test.util.ReflectionTestUtils.setField(service, "defaultTextModel", "recovery-current-text");
+            org.springframework.test.util.ReflectionTestUtils.setField(service, "defaultFallbackModels", "recovery-backup");
+            JsonNode source = preparedFailure("TEXT_RETRIES_EXHAUSTED", Map.of("asr_model", "source-asr", "text_model", "source-text",
+                    "text_fallback_models", List.of("source-backup"), "max_asr_submissions", 2, "max_text_calls", 7,
+                    "visual_provider", "none", "ocr_sampling", "prefix", "ocr_max_frames", 31));
+            String sourceId = source.path("id").asText();
+            JsonNode before = get(sourceId);
+            List<Map<String, Object>> oldCalls = jdbc().queryForList("SELECT * FROM model_call WHERE job_id=?", sourceId);
+            String key = "resume-test-" + UUID.randomUUID();
+            JsonNode next = resumed(sourceId, Map.of("max_text_calls", 9), key);
+            String nextId = next.path("id").asText();
+            assertNotEquals(sourceId, nextId);
+            assertEquals(sourceId, next.path("resumed_from_job_id").asText());
+            assertTrue(next.path("generation").asInt() > before.path("generation").asInt());
+            assertEquals("QUEUED", next.path("status").asText());
+            assertEquals("READY", stage(next, "MEDIA").path("status").asText());
+            for (String type : List.of("ASR", "SEGMENT", "TIMELINE")) assertEquals("BLOCKED", stage(next, type).path("status").asText());
+            assertEquals(0, next.path("budget").path("max_asr_submissions").asInt());
+            assertEquals(0, next.path("budget").path("asr_calls_reserved").asInt());
+            assertEquals(9, next.path("budget").path("max_text_calls").asInt());
+            assertEquals(0, next.path("budget").path("text_calls_reserved").asInt());
+            assertEquals("source-asr", next.path("config").path("asr_model").asText());
+            assertEquals("recovery-current-text", next.path("config").path("text_model").asText());
+            assertEquals(JSON.valueToTree(List.of("recovery-backup")), next.path("config").path("text_fallback_models"));
+            for (String field : List.of("visual_provider", "ocr_sampling", "ocr_max_frames", "analysis_mode")) assertEquals(before.path("config").path(field), next.path("config").path(field));
+            assertEquals(nextId, resumed(sourceId, Map.of("max_text_calls", 9), key).path("id").asText());
+            String publicJson = get(nextId).toString();
+            assertFalse(publicJson.contains("preparation_reuse"));
+            assertFalse(publicJson.contains("preparation_source_json"));
+            assertFalse(publicJson.contains("jobs/"));
+            assertFalse(jdbc().queryForObject("SELECT config_json FROM analysis_job WHERE id=?", String.class, nextId).contains("preparation_reuse"));
+            JsonNode media = claim(stage(next, "MEDIA").path("id").asText(), "resume-media-worker", UUID.randomUUID().toString());
+            JsonNode preparation = media.path("config").path("preparation_reuse");
+            assertEquals(Set.of("schema_version", "source_job_id", "video_id", "source_generation", "source_hash", "asr_model", "media", "asr"), preparation.propertyNames());
+            assertEquals(sourceId, preparation.path("source_job_id").asText());
+            assertEquals(videoId, preparation.path("video_id").asText());
+            assertEquals(before.path("generation").asInt(), preparation.path("source_generation").asInt());
+            assertEquals("source-asr", preparation.path("asr_model").asText());
+            for (String type : List.of("MEDIA", "ASR")) {
+                Map<String, Object> row = jdbc().queryForMap("SELECT id,attempt,manifest_key,manifest_hash FROM job_stage WHERE job_id=? AND owner_type='ANALYSIS' AND stage_type=?", sourceId, type);
+                assertEquals(JSON.valueToTree(row), preparation.path(type.toLowerCase(java.util.Locale.ROOT)));
+            }
+            assertEquals(200, worker("POST", stagePath(media, "complete"), completion(media)).statusCode());
+            JsonNode asr = claim(stage(get(nextId), "ASR").path("id").asText(), "resume-asr-worker", UUID.randomUUID().toString());
+            error(worker("POST", "/internal/model-calls/reserve", reservation(asr, "ASR", "source-asr")), 409, "MODEL_BUDGET_EXHAUSTED");
+            assertEquals(200, worker("POST", stagePath(asr, "complete"), completion(asr)).statusCode());
+            JsonNode segment = claim(stage(get(nextId), "SEGMENT").path("id").asText(), "resume-text-worker", UUID.randomUUID().toString());
+            for (JsonNode artifact : segment.path("artifacts")) assertFalse(artifact.path("manifest_key").asText().startsWith("jobs/" + sourceId + "/"));
+            assertEquals(200, worker("POST", "/internal/model-calls/reserve", reservation(segment, "TEXT", "recovery-current-text")).statusCode());
+            assertEquals(1, get(nextId).path("budget").path("text_calls_reserved").asInt());
+            assertEquals(0, get(nextId).path("budget").path("asr_calls_reserved").asInt());
+            assertEquals(before, get(sourceId));
+            assertEquals(oldCalls, jdbc().queryForList("SELECT * FROM model_call WHERE job_id=?", sourceId));
+        } finally {
+            org.springframework.test.util.ReflectionTestUtils.setField(service, "defaultTextModel", oldDefault);
+            org.springframework.test.util.ReflectionTestUtils.setField(service, "defaultFallbackModels", oldFallbacks);
+        }
+    }
+
+    @Test
+    void exhaustedTextRetryIsRejectedWhileOtherFailuresKeepCachedStageRecovery() {
+        for (String code : List.of("TEXT_RETRIES_EXHAUSTED", "TEXT_RETRY_DEADLINE_EXCEEDED")) {
+            JsonNode source = preparedFailure(code, Map.of());
+            String sourceId = source.path("id").asText();
+            assertFalse(source.path("actions").path("can_retry").asBoolean());
+            assertEquals("TEXT_RECOVERY_EXHAUSTED", source.path("actions").path("retry_block_reason").asText());
+            assertTrue(source.path("actions").path("can_resume_from_asr").asBoolean());
+            assertTrue(source.path("actions").path("resume_from_asr_block_reason").isNull());
+            error(send("POST", "/api/jobs/" + sourceId + "/retry", null, null, null), 409, "TEXT_RECOVERY_EXHAUSTED");
+            assertEquals(source, get(sourceId));
+        }
+        JsonNode cached = preparedFailure("MODEL_BUDGET_EXHAUSTED", Map.of());
+        assertTrue(cached.path("actions").path("can_retry").asBoolean());
+        var recovered = send("POST", "/api/jobs/" + cached.path("id").asText() + "/retry", null, null, null);
+        assertEquals(200, recovered.statusCode(), text(recovered));
+        assertEquals("READY", stage(json(recovered), "SEGMENT").path("status").asText());
+    }
+
+    @Test
+    void resumeEligibilityIsMetadataOnlyButEveryNewRoundReverifiesPreparationFiles() throws Exception {
+        JsonNode source = preparedFailure("TEXT_RETRIES_EXHAUSTED", Map.of());
+        String sourceId = source.path("id").asText();
+        int initialCount = jdbc().queryForObject("SELECT COUNT(*) FROM analysis_job WHERE video_id=?", Integer.class, videoId);
+        for (String type : List.of("MEDIA", "ASR")) {
+            Map<String, Object> row = jdbc().queryForMap("SELECT manifest_key,manifest_hash FROM job_stage WHERE job_id=? AND stage_type=? AND owner_type='ANALYSIS'", sourceId, type);
+            Path manifestFile = storageRoot.resolve((String) row.get("manifest_key"));
+            byte[] manifestBytes = Files.readAllBytes(manifestFile);
+            JsonNode manifest = JSON.readTree(manifestBytes);
+            for (JsonNode artifact : manifest.path("artifacts")) {
+                Path file = storageRoot.resolve(artifact.path("key").asText());
+                byte[] original = Files.readAllBytes(file);
+                try {
+                    Files.writeString(file, "tampered preparation fixture");
+                    assertTrue(get(sourceId).path("actions").path("can_resume_from_asr").asBoolean());
+                    error(send("POST", "/api/jobs/" + sourceId + "/resume-from-asr", Map.of(), "resume-invalid-" + UUID.randomUUID(), null), 409, "ARTIFACT_HASH_MISMATCH");
+                } finally { Files.write(file, original); }
+            }
+            try {
+                var wrong = (tools.jackson.databind.node.ObjectNode) manifest.deepCopy();
+                wrong.put("job_id", UUID.randomUUID().toString());
+                Files.write(manifestFile, JSON.writeValueAsBytes(wrong));
+                jdbc().update("UPDATE job_stage SET manifest_hash=? WHERE job_id=? AND stage_type=?", fileHash(manifestFile), sourceId, type);
+                error(send("POST", "/api/jobs/" + sourceId + "/resume-from-asr", Map.of(), "resume-identity-" + UUID.randomUUID(), null), 409, "ARTIFACT_IDENTITY_MISMATCH");
+            } finally {
+                Files.write(manifestFile, manifestBytes);
+                jdbc().update("UPDATE job_stage SET manifest_hash=? WHERE job_id=? AND stage_type=?", row.get("manifest_hash"), sourceId, type);
+            }
+        }
+        assertEquals(initialCount, jdbc().queryForObject("SELECT COUNT(*) FROM analysis_job WHERE video_id=?", Integer.class, videoId));
+        assertEquals(1, jdbc().queryForObject("SELECT COUNT(*) FROM model_call WHERE job_id=?", Integer.class, sourceId));
+        resumed(sourceId, Map.of(), "resume-valid-" + UUID.randomUUID());
+    }
+
+    @Test
+    void resumeRequiresTerminalTopicPreparationAndPreservesHistoricalOcrSemantics() {
+        JsonNode incomplete = create();
+        assertEquals("JOB_NOT_RESUMABLE", incomplete.path("actions").path("resume_from_asr_block_reason").asText());
+        String incompleteId = incomplete.path("id").asText();
+        send("POST", "/api/jobs/" + incompleteId + "/cancel", null, null, null);
+        error(send("POST", "/api/jobs/" + incompleteId + "/resume-from-asr", Map.of(), "resume-incomplete-" + UUID.randomUUID(), null), 409, "PREPARATION_NOT_READY");
+        JsonNode commerce = preparedFailure("TEXT_RETRIES_EXHAUSTED", Map.of("analysis_mode", "commerce"));
+        error(send("POST", "/api/jobs/" + commerce.path("id").asText() + "/resume-from-asr", Map.of(), "resume-commerce-" + UUID.randomUUID(), null), 409, "RESUME_REQUIRES_TOPICS");
+        JsonNode source = preparedFailure("TEXT_RETRIES_EXHAUSTED", Map.of());
+        String sourceId = source.path("id").asText();
+        var historical = new java.util.TreeMap<String, Object>(JSON.convertValue(source.path("config"), Map.class));
+        historical.remove("ocr_sampling"); historical.remove("ocr_max_frames");
+        jdbc().update("UPDATE analysis_job SET config_json=? WHERE id=?", JSON.writeValueAsString(historical), sourceId);
+        JsonNode recovery = resumed(sourceId, Map.of(), "resume-historical-" + UUID.randomUUID());
+        assertEquals(12, recovery.path("budget").path("max_text_calls").asInt());
+        assertEquals("prefix", recovery.path("config").path("ocr_sampling").asText());
+        assertEquals(16, recovery.path("config").path("ocr_max_frames").asInt());
+        for (String status : List.of("CANCELLED", "REVIEW_READY")) {
+            jdbc().update("UPDATE analysis_job SET status=? WHERE id=?", status, sourceId);
+            assertTrue(get(sourceId).path("actions").path("can_resume_from_asr").asBoolean());
+            resumed(sourceId, Map.of(), "resume-terminal-" + UUID.randomUUID());
+        }
+        for (int invalid : List.of(-1, 101)) error(send("POST", "/api/jobs/" + sourceId + "/resume-from-asr", Map.of("max_text_calls", invalid), "resume-bounds-" + UUID.randomUUID(), null), 400, "INVALID_ARGUMENT");
+        error(send("POST", "/api/jobs/" + sourceId + "/resume-from-asr", Map.of(), null, null), 400, "INVALID_ARGUMENT");
+    }
+
+    @Test
+    void resumeIdempotencyAndGenerationAllocationSurviveConcurrentNormalCreation() throws Exception {
+        JsonNode source = preparedFailure("TEXT_RETRIES_EXHAUSTED", Map.of());
+        String sourceId = source.path("id").asText(), key = "resume-race-" + UUID.randomUUID(), ordinaryKey = "normal-race-" + UUID.randomUUID();
+        CountDownLatch gate = new CountDownLatch(1);
+        Supplier<HttpResponse<byte[]>> resume = () -> { try { assertTrue(gate.await(5, TimeUnit.SECONDS)); } catch (InterruptedException error) { throw new RuntimeException(error); }
+            return send("POST", "/api/jobs/" + sourceId + "/resume-from-asr", Map.of("max_text_calls", 8), key, null); };
+        var first = CompletableFuture.supplyAsync(resume);
+        var second = CompletableFuture.supplyAsync(resume);
+        var ordinary = CompletableFuture.supplyAsync(() -> { try { assertTrue(gate.await(5, TimeUnit.SECONDS)); } catch (InterruptedException error) { throw new RuntimeException(error); }
+            return send("POST", "/api/jobs", Map.of("video_id", videoId, "config", Map.of()), ordinaryKey, null); });
+        gate.countDown();
+        List<JsonNode> results = new ArrayList<>();
+        for (var future : List.of(first, second, ordinary)) {
+            var response = future.get(15, TimeUnit.SECONDS);
+            assertEquals(201, response.statusCode(), text(response));
+            JsonNode value = json(response); jobs.add(value.path("id").asText()); results.add(value);
+        }
+        assertEquals(results.get(0).path("id"), results.get(1).path("id"));
+        assertNotEquals(results.get(0).path("generation"), results.get(2).path("generation"));
+        error(send("POST", "/api/jobs/" + sourceId + "/resume-from-asr", Map.of("max_text_calls", 9), key, null), 409, "IDEMPOTENCY_CONFLICT");
+        error(send("POST", "/api/jobs/" + sourceId + "/resume-from-asr", Map.of(), ordinaryKey, null), 409, "IDEMPOTENCY_CONFLICT");
+        error(send("POST", "/api/jobs", Map.of("video_id", videoId, "config", Map.of()), key, null), 409, "IDEMPOTENCY_CONFLICT");
+        assertEquals(3, jdbc().queryForObject("SELECT COUNT(*) FROM analysis_job WHERE video_id=?", Integer.class, videoId));
+    }
+
+    private JsonNode preparedFailure(String error, Map<String, Object> config) {
+        JsonNode source = create("prepared-source-" + UUID.randomUUID(), config);
+        String id = source.path("id").asText();
+        for (String type : List.of("MEDIA", "ASR")) {
+            JsonNode claimed = claim(stage(get(id), type).path("id").asText(), "prepared-fixture-worker", UUID.randomUUID().toString());
+            var completed = worker("POST", stagePath(claimed, "complete"), completion(claimed));
+            assertEquals(200, completed.statusCode(), text(completed));
+        }
+        JsonNode segment = claim(stage(get(id), "SEGMENT").path("id").asText(), "prepared-fixture-worker", UUID.randomUUID().toString());
+        assertEquals(200, worker("POST", "/internal/model-calls/reserve", reservation(segment, "TEXT", source.path("config").path("text_model").asText())).statusCode());
+        var failed = worker("POST", stagePath(segment, "fail"), withCredential(segment, "error_code", error, "retryable", false));
+        assertEquals(200, failed.statusCode(), text(failed));
+        return get(id);
+    }
+
+    private static Map<String, Object> reservation(JsonNode claim, String kind, String model) {
+        return Map.of("stage_id", claim.path("stage_id").asText(), "attempt", claim.path("attempt").asInt(), "run_token", claim.path("run_token").asText(),
+                "request_id", UUID.randomUUID().toString(), "input_hash", HASH, "operation_key", "recovery-fixture-" + UUID.randomUUID(), "model_id", model, "kind", kind);
+    }
+
+    private JsonNode resumed(String sourceId, Object input, String key) {
+        var response = send("POST", "/api/jobs/" + sourceId + "/resume-from-asr", input, key, null);
+        assertEquals(201, response.statusCode(), text(response));
+        JsonNode result = json(response); jobs.add(result.path("id").asText()); return result;
+    }
+
+    @Test
     void workerRoutesAreAuthenticatedAndPublicSnapshotsNeverContainExecutionCredentials() {
         String jobId = create().path("id").asText();
         String stageId = stage(get(jobId), "MEDIA").path("id").asText();

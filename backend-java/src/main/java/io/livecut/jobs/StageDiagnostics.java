@@ -146,7 +146,13 @@ public final class StageDiagnostics {
                     new Policy("INTEGRITY", "ARTIFACT_INVALID", "CHECK_ARTIFACT_INTEGRITY");
             case "STORAGE_ERROR", "OUTPUT_WRITE_FAILED", "MODEL_RESPONSE_STORAGE_UNAVAILABLE", "TOOL_NOT_FOUND" ->
                     new Policy("STORAGE", "STORAGE_UNAVAILABLE", "CHECK_WORKER_STORAGE");
-            default -> new Policy("EXECUTION", "UNCLASSIFIED_FAILURE", "CHECK_EXECUTION_ENVIRONMENT");
+            case "PREPARATION_REUSE_MODEL_MISMATCH", "PREPARATION_REUSE_CONFLICT" ->
+                    new Policy("INPUT", "INPUT_INVALID", "CHECK_SOURCE_AND_CONFIGURATION");
+            case "PREPARATION_REUSE_STORAGE_ERROR" ->
+                    new Policy("STORAGE", "PREPARATION_REUSE_STORAGE_ERROR", "CHECK_WORKER_STORAGE");
+            default -> code.startsWith("PREPARATION_REUSE_")
+                    ? new Policy("INTEGRITY", "ARTIFACT_INVALID", "CHECK_ARTIFACT_INTEGRITY")
+                    : new Policy("EXECUTION", "UNCLASSIFIED_FAILURE", "CHECK_EXECUTION_ENVIRONMENT");
         };
     }
 

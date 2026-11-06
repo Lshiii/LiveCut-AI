@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:livecut:preparation-reuse:1",
+  "title": "Authenticated claim preparation source",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "source_job_id", "video_id", "source_generation", "source_hash", "asr_model", "media", "asr"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "source_job_id": {"type": "string", "format": "uuid"},
+    "video_id": {"type": "string", "format": "uuid"},
+    "source_generation": {"type": "integer", "minimum": 1},
+    "source_hash": {"$ref": "#/$defs/hash"},
+    "asr_model": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$"},
+    "media": {"$ref": "#/$defs/stage"},
+    "asr": {"$ref": "#/$defs/stage"}
+  },
+  "$defs": {
+    "hash": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "stage": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "attempt", "manifest_key", "manifest_hash"],
+      "properties": {
+        "id": {"type": "string", "format": "uuid"},
+        "attempt": {"type": "integer", "minimum": 1},
+        "manifest_key": {"type": "string", "pattern": "^jobs/[a-f0-9-]{36}/stages/[a-f0-9-]{36}/attempts/[1-9][0-9]*/[A-Za-z0-9_-]{16,64}/manifest\\.json$"},
+        "manifest_hash": {"$ref": "#/$defs/hash"}
+      }
+    }
+  }
+}

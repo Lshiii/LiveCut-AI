@@ -127,6 +127,84 @@ public class JobService {
         }
     }
 
+    /** A new text budget and generation, backed by immutable completed preparation. */
+    public JobSnapshot resumeFromAsr(String sourceJobId, ResumeFromAsrRequest request, String idempotencyKey) {
+        String sourceId = uuid(sourceJobId, "INVALID_JOB_ID");
+        String key = identifier(idempotencyKey, "idempotency key");
+        int budget = request == null || request.maxTextCalls() == null ? 12 : quota(request.maxTextCalls(), 100);
+        String requestHash = sha256("resume-from-asr\n" + sourceId + "\n" + budget);
+        // Only an unlocked routing hint is read first. Never acquire the source
+        // parent before its video: create serializes generations video -> job.
+        String videoId = String.valueOf(job(sourceId, false).get("video_id"));
+        try {
+            return transaction.execute(status -> {
+                List<Map<String, Object>> videos = jdbc.queryForList("SELECT id,content_hash FROM video_asset WHERE id=? FOR UPDATE", videoId);
+                if (videos.isEmpty()) throw missing("VIDEO_NOT_FOUND", "Video was not found");
+                JobSnapshot replay = existingResume(key, requestHash);
+                if (replay != null) return replay;
+                Map<String, Object> source = job(sourceId, true);
+                if (!videoId.equals(source.get("video_id"))) throw conflict("PREPARATION_SOURCE_INVALID", "Source video identity changed");
+                List<StageRow> sourceStages = stages(sourceId, true);
+                Map<String, Object> sourceConfig = readConfig(source);
+                String blocked = AnalysisRecoveryPolicy.resumeBlockReason(String.valueOf(source.get("status")), sourceConfig, sourceStages);
+                if (blocked != null) throw conflict(blocked, "Completed media and ASR from a terminal topic analysis are required");
+                String sourceHash = String.valueOf(videos.getFirst().get("content_hash"));
+                Map<String, Object> preparation = new TreeMap<>();
+                preparation.put("schema_version", 1);
+                preparation.put("source_job_id", sourceId);
+                preparation.put("video_id", videoId);
+                preparation.put("source_generation", ((Number) source.get("generation")).intValue());
+                preparation.put("source_hash", sourceHash);
+                preparation.put("asr_model", sourceConfig.get("asr_model"));
+                for (String type : List.of("MEDIA", "ASR")) {
+                    StageRow stage = sourceStages.stream().filter(row -> type.equals(row.stageType())).findFirst().orElseThrow();
+                    // Verifies manifest identity and all pinned audio/media-info/
+                    // transcript bytes. The original video is deliberately not
+                    // opened here; the worker verifies it before execution.
+                    artifactVerifier.verifyManifest(stage.manifestKey(), stage.manifestHash(), artifactIdentity(stage, source));
+                    preparation.put(type.toLowerCase(java.util.Locale.ROOT), Map.of("id", stage.id(), "attempt", stage.attempt(),
+                            "manifest_key", stage.manifestKey(), "manifest_hash", stage.manifestHash()));
+                }
+                Map<String, Object> defaults = config(null);
+                Map<String, Object> nextConfig = new TreeMap<>(sourceConfig);
+                nextConfig.put("text_model", defaults.get("text_model"));
+                nextConfig.put("text_fallback_models", defaults.get("text_fallback_models"));
+                nextConfig.put("max_text_calls", budget);
+                nextConfig.put("max_asr_submissions", 0);
+                // Missing historical OCR settings had prefix/16 semantics.
+                nextConfig.putIfAbsent("ocr_sampling", "prefix");
+                nextConfig.putIfAbsent("ocr_max_frames", 16);
+                nextConfig = config(nextConfig);
+                String configJson = JSON.writeValueAsString(nextConfig), configHash = sha256(configJson);
+                String preparationJson = JSON.writeValueAsString(preparation);
+                int generation = jdbc.queryForObject("SELECT COALESCE(MAX(generation),0)+1 FROM analysis_job WHERE video_id=?", Integer.class, videoId);
+                String id = UUID.randomUUID().toString();
+                jdbc.update("INSERT INTO analysis_job (id,video_id,generation,idempotency_key,request_hash,config_hash,config_json,status,max_text_calls,max_asr_submissions,resumed_from_job_id,preparation_source_json) VALUES (?,?,?,?,?,?,?,'QUEUED',?,0,?,?)",
+                        id, videoId, generation, key, requestHash, configHash, configJson, budget, sourceId, preparationJson);
+                for (String type : FLOW) {
+                    jdbc.update("INSERT INTO job_stage (id,job_id,owner_id,stage_type,shard_key,status,input_hash) VALUES (?,?,?,?,'0',?,?)",
+                            UUID.randomUUID().toString(), id, id, type, "MEDIA".equals(type) ? "READY" : "BLOCKED",
+                            sha256(sourceHash + "\n" + configHash + "\n" + sha256(preparationJson) + "\n" + type + "\n0"));
+                }
+                return snapshot(job(id, true));
+            });
+        } catch (DuplicateKeyException collision) {
+            return transaction.execute(status -> {
+                JobSnapshot replay = existingResume(key, requestHash);
+                if (replay == null) throw collision;
+                return replay;
+            });
+        }
+    }
+
+    private JobSnapshot existingResume(String key, String requestHash) {
+        List<Map<String, Object>> receipts = jdbc.queryForList("SELECT id,request_hash FROM analysis_job WHERE idempotency_key=?", key);
+        if (receipts.isEmpty()) return null;
+        // Reject a foreign receipt without locking an unrelated video's job.
+        if (!requestHash.equals(receipts.getFirst().get("request_hash"))) throw conflict("IDEMPOTENCY_CONFLICT", "Idempotency key belongs to different job input");
+        return snapshot(job(String.valueOf(receipts.getFirst().get("id")), true));
+    }
+
     public JobPage list(int limit, int offset) {
         if (limit < 1 || limit > 100 || offset < 0) { throw bad("INVALID_ARGUMENT", "limit must be 1..100 and offset nonnegative"); }
         return transaction.execute(status -> {
@@ -162,6 +240,8 @@ public class JobService {
             if (!actions.canRetry()) {
                 String message = "ATTEMPTS_EXHAUSTED".equals(actions.retryBlockReason())
                         ? "Execution attempts are exhausted; create a new analysis job"
+                        : "TEXT_RECOVERY_EXHAUSTED".equals(actions.retryBlockReason())
+                        ? "This text recovery round is exhausted; continue from completed ASR with a new text budget"
                         : "Only failed jobs with failed stages can be retried";
                 throw conflict(actions.retryBlockReason(), message);
             }
@@ -432,9 +512,11 @@ public class JobService {
 
     private JobSnapshot existingCreate(String id, String videoId, Map<String, Object> normalized,
                                        Set<String> suppliedFields, String requestHash) {
-        Map<String, Object> row = job(id, true);
+        // Validate immutable receipt input before locking its parent. A key
+        // collision may refer to another video's recovery job.
+        Map<String, Object> row = job(id, false);
         if (!requestHash.equals(row.get("request_hash"))) {
-            // Only omitted fields absent from this locked historical receipt may
+            // Only omitted fields absent from this immutable historical receipt may
             // use their old shape. Never backfill stored config or reinterpret an
             // explicit policy/frame budget, including duplicate-key recovery.
             Map<String, Object> historicalShape = new TreeMap<>(normalized);
@@ -447,7 +529,7 @@ public class JobService {
                 throw conflict("IDEMPOTENCY_CONFLICT", "Idempotency key belongs to different job input");
             }
         }
-        return snapshot(row);
+        return snapshot(job(id, true));
     }
 
     private Map<String, Object> job(String id, boolean lock) {
@@ -487,7 +569,7 @@ public class JobService {
                         ((Number) row.get("text_calls_reserved")).intValue(),
                         ((Number) row.get("max_asr_submissions")).intValue(),
                         ((Number) row.get("asr_calls_reserved")).intValue()), actions(row, rows),
-                valueInstant(row.get("created_at")), valueInstant(row.get("updated_at")));
+                valueInstant(row.get("created_at")), valueInstant(row.get("updated_at")), (String) row.get("resumed_from_job_id"));
     }
 
     /** Advisory snapshot and mutation endpoints share the exact same policy.
@@ -497,10 +579,9 @@ public class JobService {
     private JobActions actions(Map<String, Object> job, List<StageRow> rows) {
         String status = String.valueOf(job.get("status"));
         boolean canCancel = !Set.of("CANCELLED", "REVIEW_READY").contains(status);
-        List<StageRow> failed = rows.stream().filter(stage -> stage.status().equals("FAILED")).toList();
-        String blocked = !"FAILED".equals(status) || failed.isEmpty() ? "JOB_NOT_RETRYABLE"
-                : failed.stream().anyMatch(stage -> stage.attempt() >= maxAttempts) ? "ATTEMPTS_EXHAUSTED" : null;
-        return new JobActions(canCancel, blocked == null, blocked, maxAttempts);
+        String blocked = AnalysisRecoveryPolicy.retryBlockReason(status, rows, maxAttempts);
+        String resumeBlocked = AnalysisRecoveryPolicy.resumeBlockReason(status, readConfig(job), rows);
+        return new JobActions(canCancel, blocked == null, blocked, maxAttempts, resumeBlocked == null, resumeBlocked);
     }
 
     private static StageSnapshot stageSnapshot(StageRow row, boolean publicView) {
@@ -527,9 +608,16 @@ public class JobService {
         return new ClaimResult(outcome, stage.id(), stage.attempt(), stage.runToken(), stage.leaseUntil(), stage.hardDeadlineAt(),
                 stage.jobId(), stage.stageType(), stage.shardKey(), String.valueOf(video.get("source_key")),
                 isExport(stage) ? exports.manifestIdentity(stage, job).sourceHash() : String.valueOf(video.get("content_hash")),
-                isExport(stage) ? exports.claimConfig(stage) : isClipRequest(stage) ? clips.claimConfig(stage) : readConfig(job), artifacts,
+                isExport(stage) ? exports.claimConfig(stage) : isClipRequest(stage) ? clips.claimConfig(stage) : analysisClaimConfig(job), artifacts,
                 stage.checkpointKey(), stage.checkpointHash(), stage.inputHash(),
                 String.valueOf(job.get("video_id")), ((Number) job.get("generation")).intValue());
+    }
+
+    private Map<String, Object> analysisClaimConfig(Map<String, Object> job) {
+        Map<String, Object> config = new TreeMap<>(readConfig(job));
+        Object preparation = job.get("preparation_source_json");
+        if (preparation != null) config.put("preparation_reuse", JSON.readValue(String.valueOf(preparation), new TypeReference<Map<String, Object>>() {}));
+        return config;
     }
 
     private static ClaimResult noClaim(String outcome, String stageId) { return new ClaimResult(outcome, stageId, null, null, null, null, null, null, null, null, null, null, List.of(), null, null, null, null, 0); }

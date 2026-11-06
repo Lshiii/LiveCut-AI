@@ -440,16 +440,17 @@ def test_presence_expiring_during_ready_prevents_claiming_or_model_dispatch(tmp_
 
 def test_hung_heartbeat_cannot_extend_local_guard_or_be_revived_by_a_late_receipt(tmp_path):
     client, clock, errors = PresenceClient(), {'now': 0}, []
-    entered, release, check_guard, failed = (threading.Event() for _ in range(4))
+    entered, executing, release, check_guard, failed = (threading.Event() for _ in range(5))
 
     def hung(worker_id, session_id, *, timeout_seconds=None):
         assert timeout_seconds <= 5 / 3
         entered.set()
-        assert release.wait(2)
+        assert release.wait(10)
         return client.receipt(worker_id, session_id, 'ACCEPTED') | {'heartbeat_timeout_seconds': 5}
 
     def execute(context):
-        assert check_guard.wait(2)
+        executing.set()
+        assert check_guard.wait(5)
         context.guard.check()
         pytest.fail('the expired presence must stop the next dispatch even while its HTTP thread hangs')
 
@@ -473,14 +474,18 @@ def test_hung_heartbeat_cannot_extend_local_guard_or_be_revived_by_a_late_receip
     thread = threading.Thread(target=run)
     thread.start()
     try:
-        assert entered.wait(2)
+        assert entered.wait(5)
+        # Registration heartbeats may start before the stage's journal fsync
+        # and claim finish. Expire presence only after execution has entered;
+        # otherwise we test pre-claim rejection rather than a fenced dispatch.
+        assert executing.wait(5)
         clock['now'] = 6
         check_guard.set()
-        assert failed.wait(2)
+        assert failed.wait(5)
         assert runner.stop.is_set()
     finally:
         release.set()
-        thread.join(2)
+        thread.join(5)
     assert not thread.is_alive()
     assert len(errors) == 1 and isinstance(errors[0], WorkerClientError)
     assert errors[0].code == 'WORKER_SESSION_EXPIRED'

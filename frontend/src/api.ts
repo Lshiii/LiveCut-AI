@@ -14,11 +14,14 @@ export interface Stage { id: string; stage_type: string; status: string; attempt
 export interface JobActions {
   can_cancel: boolean
   can_retry: boolean
-  retry_block_reason: 'JOB_NOT_RETRYABLE' | 'ATTEMPTS_EXHAUSTED' | null
+  retry_block_reason: 'JOB_NOT_RETRYABLE' | 'ATTEMPTS_EXHAUSTED' | 'TEXT_RECOVERY_EXHAUSTED' | null
+  can_resume_from_asr?: boolean
+  resume_from_asr_block_reason?: 'RESUME_REQUIRES_TOPICS' | 'JOB_NOT_RESUMABLE' | 'PREPARATION_NOT_READY' | 'PREPARATION_SOURCE_INVALID' | null
   max_attempts: number
 }
 export interface AnalysisJob {
   config?: Record<string, unknown>
+  resumed_from_job_id?: string
   id: string; video_id: string; generation: number; status: string; stages: Stage[]; created_at: string; state_version: number
   budget: { max_text_calls: number; text_calls_reserved: number; max_asr_submissions: number; asr_calls_reserved: number }
   actions: JobActions

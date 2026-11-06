@@ -155,6 +155,9 @@ select { border: 1px solid #e0e7d9; border-radius: 5px; background: #fff; paddin
 .upload-facts { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; color: #718469; font-size: 11px; line-height: 1.8; }
 .upload-description { color: #718469; font-size: 11px; line-height: 1.8; margin-top: 10px; }
 .upload-warning { color: #9b723e; }
+.analysis-recovery { margin-top: 18px; padding: 16px; border: 1px solid #dae8d6; border-radius: 6px; background: #f7faf4; }
+.analysis-recovery .field-label { margin-top: 0; }
+.analysis-recovery .create-button { white-space: normal; }
 .upload-failure { color: #a55e4b; background: #fdf2ec; padding: 10px 12px; border-radius: 5px; margin-top: 12px; font-size: 11px; line-height: 1.8; overflow-wrap: anywhere; }
 .upload-controls { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; margin-top: 16px; }
 .upload-controls .primary { padding: 9px 15px; }
