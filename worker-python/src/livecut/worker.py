@@ -15,7 +15,7 @@ import tempfile
 import threading
 import time
 import traceback
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from copy import deepcopy
 from dataclasses import asdict, dataclass
 from datetime import datetime
@@ -42,6 +42,13 @@ class WorkerError(Exception):
     def __init__(self, code: str, *, retryable: bool = False) -> None:
         super().__init__(code)
         self.code, self.retryable = code, retryable
+
+
+class _FencedCallbackError(WorkerClientError):
+    """A pending callback was durably archived after an explicit fence."""
+
+    def __init__(self) -> None:
+        super().__init__("STALE_ATTEMPT")
 
 
 def _json_bytes(value: object) -> bytes:
@@ -321,6 +328,7 @@ class StageWorker:
         stop: threading.Event | None = None, target_job_id: str | None = None,
         registry_enabled: bool = True, worker_heartbeat_seconds: float = 10,
         registration_wait_seconds: float = 45,
+        reconnect_wait_seconds: float = 180,
         lifecycle_observer: Callable[[dict], None] | None = None,
     ) -> None:
         self.client, self.storage_root = client, storage_root.resolve()
@@ -337,11 +345,29 @@ class StageWorker:
                 or not math.isfinite(registration_wait_seconds)):
             raise WorkerError("INVALID_REGISTRATION_WAIT_CONFIGURATION")
         self.registration_wait_seconds = registration_wait_seconds
+        if (type(reconnect_wait_seconds) not in (int, float)
+                or not 0 <= reconnect_wait_seconds <= 3600
+                or not math.isfinite(reconnect_wait_seconds)):
+            raise WorkerError("INVALID_RECONNECT_WAIT_CONFIGURATION")
+        self.reconnect_wait_seconds = reconnect_wait_seconds
         self._lifecycle_observer = lifecycle_observer
         self.session_id: str | None = None
         self._presence_error: WorkerClientError | None = None
         self._presence_deadline: float | None = None
-        self._presence_lock = threading.Lock()
+        self._presence_lock = threading.RLock()
+        self._presence_epoch = 0
+        self._continuous = False
+        self._reconnect_started: float | None = None
+        self._runtime_deadline: float | None = None
+        self._presence_thread: threading.Thread | None = None
+        self._stage_thread: threading.Thread | None = None
+        self._presence_success_at: float | None = None
+        self._ready_epoch: int | None = None
+        self._presence_renewals = 0
+        self._outage_epoch: int | None = None
+        self._outage_renewals = 0
+        self._reconnect_exhausted_observed = False
+        self._presence_wake = threading.Event()
         self._monotonic = time.monotonic
         self._ready_cursor = 0
         self.stop = stop if stop is not None else threading.Event()
@@ -371,54 +397,179 @@ class StageWorker:
             _write(callback_path, callback)
             _native_path(claim_path).unlink()
 
-    def _check_presence(self) -> None:
+    def _runtime_retryable(self, error: WorkerClientError) -> bool:
+        if error.code.startswith("INVALID_") or error.code in {
+            "WORKER_UNAUTHORIZED", "WORKER_FORBIDDEN", "WORKER_REGISTRATION_CONFLICT",
+            "STALE_ATTEMPT",
+        }:
+            return False
+        if error.code == "WORKER_SESSION_CONFLICT" and self.registration_wait_seconds == 0:
+            return False
+        return error.retryable or error.code in {
+            "WORKER_SESSION_EXPIRED", "WORKER_SESSION_CONFLICT", "WORKER_NOT_REGISTERED",
+        }
+
+    def _note_outage(self, error: WorkerClientError) -> None:
+        if not self._continuous or not self.reconnect_wait_seconds or not self._runtime_retryable(error):
+            return
+        with self._presence_lock:
+            if self._reconnect_started is None:
+                self._reconnect_started = self._monotonic()
+                self._runtime_deadline = self._reconnect_started + self.reconnect_wait_seconds
+                self._outage_epoch = self._presence_epoch
+                self._outage_renewals = self._presence_renewals
+                self._ready_epoch = None
+                self._reconnect_exhausted_observed = False
+                # Probe a genuinely working heartbeat promptly, even when the
+                # recovery window is shorter than the ordinary pulse interval.
+                self._presence_wake.set()
+
+    def _maybe_recovered(self) -> None:
+        recovered = None
+        with self._presence_lock:
+            now = self._monotonic()
+            started, deadline = self._reconnect_started, self._runtime_deadline
+            heartbeat = (not self.registry_enabled or self._presence_renewals > (
+                self._outage_renewals if self._outage_epoch == self._presence_epoch else 0))
+            live = (not self.registry_enabled or (self._presence_deadline is not None
+                    and now < self._presence_deadline))
+            if (started is not None and deadline is not None and not self.stop.is_set()
+                    and self._presence_error is None and self._ready_epoch == self._presence_epoch
+                    and heartbeat and live and now < deadline):
+                recovered = (now - started, deadline - now)
+                self._reconnect_started = None
+                self._runtime_deadline = None
+        if recovered is not None:
+            self._observe_lifecycle("recovered", elapsed_seconds=recovered[0],
+                                    remaining_seconds=recovered[1])
+
+    def _ready_succeeded(self) -> None:
+        with self._presence_lock:
+            self._ready_epoch = self._presence_epoch
+        self._maybe_recovered()
+
+    def _presence_failed(self, error: WorkerClientError, epoch: int) -> None:
+        with self._presence_lock:
+            if epoch != self._presence_epoch:
+                return
+            if self._presence_error is None:
+                self._presence_error = error
+            self._note_outage(error)
+            # The explicit one-shot command remains fail-fast. Continuous mode
+            # never clears or repurposes the user's permanent cancellation event.
+            if not self._continuous:
+                self.stop.set()
+
+    def _check_presence(self, epoch: int | None = None) -> None:
         if not self.registry_enabled:
             return
         with self._presence_lock:
-            if self._presence_deadline is None or self._monotonic() >= self._presence_deadline:
-                self._presence_error = WorkerClientError("WORKER_SESSION_EXPIRED")
-                self.stop.set()
+            if epoch is not None and epoch != self._presence_epoch:
+                raise WorkerError("WORKER_PRESENCE_LOST")
+            if (self._presence_error is not None or self._presence_deadline is None
+                    or self._monotonic() >= self._presence_deadline):
+                self._presence_failed(self._presence_error or WorkerClientError(
+                    "WORKER_SESSION_EXPIRED"), self._presence_epoch)
                 raise WorkerError("WORKER_PRESENCE_LOST")
 
-    def _worker_heartbeat(self, finished: threading.Event, interval: float) -> None:
-        while not finished.wait(interval):
+    def _request_guard(self) -> None:
+        if self.stop.is_set():
+            raise WorkerClientError("WORKER_STOPPED")
+        # Heartbeat recovery can clear both fields concurrently. Read the
+        # clock and compare under the same lock that publishes that recovery.
+        with self._presence_lock:
+            now = self._monotonic()
+            deadline = self._runtime_deadline
+            if deadline is not None and now >= deadline:
+                raise WorkerClientError("WORKER_RECONNECT_EXHAUSTED")
+
+    def _client_scope(self, *, deadline: float | Callable[[], float | None] | None = None, guard=None):
+        scope = getattr(self.client, "request_scope", None)
+        if scope is None:
+            return nullcontext()
+
+        def native_deadline():
+            # HTTP transports use the process monotonic clock. Translate a
+            # remaining duration so injected protocol clocks cannot become an
+            # already-expired absolute HTTP deadline (notably during cleanup).
+            with self._presence_lock:
+                now = self._monotonic()
+                value = deadline() if callable(deadline) else deadline
+                remaining = None if value is None else value - now
+            return None if remaining is None else time.monotonic() + remaining
+
+        return scope(deadline_at=native_deadline, request_guard=guard or self._request_guard)
+
+    def _worker_heartbeat(self, finished: threading.Event, interval: float,
+                          session_id: str, epoch: int) -> None:
+        # Scheduling uses actual elapsed wall time. The injectable presence
+        # clock is also used by protocol simulations and can remain frozen.
+        next_pulse = time.monotonic() + (0 if self._reconnect_started is not None else interval)
+        while not finished.is_set():
+            remaining = next_pulse - time.monotonic()
+            if remaining > 0 and not self._presence_wake.wait(min(.05, remaining)):
+                continue
+            self._presence_wake.clear()
+            if finished.is_set():
+                return
             if self.stop.is_set():
                 return
             try:
-                self._check_presence()
+                self._check_presence(epoch)
+                self._request_guard()
                 started = self._monotonic()
-                receipt = self.client.heartbeat_worker(self.worker_id, self.session_id,
-                                                       timeout_seconds=interval)
+                with self._presence_lock:
+                    if (finished.is_set() or epoch != self._presence_epoch
+                            or self.session_id != session_id or self._presence_deadline is None):
+                        return
+                    deadlines = [started + interval, self._presence_deadline]
+                    if self._runtime_deadline is not None:
+                        deadlines.append(self._runtime_deadline)
+                    deadline = min(deadlines)
+                with self._client_scope(deadline=deadline):
+                    receipt = self.client.heartbeat_worker(self.worker_id, session_id,
+                                                           timeout_seconds=interval)
                 # Request start is deliberately conservative: a delayed receipt
                 # must not resurrect a session whose locally known TTL elapsed.
-                self._check_presence()
+                self._check_presence(epoch)
+                self._request_guard()
                 with self._presence_lock:
+                    if finished.is_set() or epoch != self._presence_epoch or self.session_id != session_id:
+                        return
                     deadline = started + receipt["heartbeat_timeout_seconds"]
                     if self._monotonic() >= deadline:
                         raise WorkerClientError("WORKER_SESSION_EXPIRED")
                     self._presence_deadline = deadline
+                    self._presence_success_at = self._monotonic()
+                    self._presence_renewals += 1
                 interval = min(self.worker_heartbeat_seconds, receipt["heartbeat_timeout_seconds"] / 3)
+                next_pulse = time.monotonic() + interval
+                self._maybe_recovered()
             except (WorkerClientError, WorkerError) as exc:
                 # A task lease and a live executor are separate requirements.
                 # Stop acquiring/external dispatching as soon as presence is uncertain.
-                self._presence_error = (exc if isinstance(exc, WorkerClientError)
-                                        else WorkerClientError("WORKER_SESSION_EXPIRED"))
-                self.stop.set()
+                if self.stop.is_set():
+                    return
+                self._presence_failed(exc if isinstance(exc, WorkerClientError)
+                                      else WorkerClientError("WORKER_SESSION_EXPIRED"), epoch)
                 return
 
-    def _observe_lifecycle(self, status: str, **fields: float) -> None:
+    def _observe_lifecycle(self, status: str, **fields: object) -> None:
         if self._lifecycle_observer is not None:
             self._lifecycle_observer({"status": status, "worker_id": self.worker_id, **fields})
 
     def _registration_guard(self) -> None:
-        if self.stop.is_set():
-            raise WorkerClientError("WORKER_STOPPED")
+        self._request_guard()
 
     def _register_with_wait(self, session_id: str, capabilities: list[str],
                             target: dict) -> tuple[dict, float, float | None] | None:
         """Wait for an old owner to leave, without changing its session or lease."""
         started = self._monotonic()
         deadline = started + self.registration_wait_seconds
+        with self._presence_lock:
+            runtime_deadline = self._runtime_deadline
+        if runtime_deadline is not None:
+            deadline = min(deadline, runtime_deadline)
         conflict: WorkerClientError | None = None
         while not self.stop.is_set():
             request_started = self._monotonic()
@@ -457,7 +608,7 @@ class StageWorker:
         return None
 
     @contextmanager
-    def _registered(self, stage_type: str | None) -> Iterator[bool]:
+    def _registered(self, stage_type: str | None, *, candidate_session: str | None = None) -> Iterator[bool]:
         if not self.registry_enabled:
             yield True
             return
@@ -466,8 +617,17 @@ class StageWorker:
         capabilities = [stage_type] if stage_type is not None else list(STAGES)
         if any(value not in STAGES for value in capabilities):
             raise WorkerError("INVALID_STAGE_TYPE")
-        session_id = str(uuid4())
-        self._presence_error = None
+        if any(thread is not None and thread.is_alive()
+               for thread in (self._presence_thread, self._stage_thread)):
+            raise WorkerError("WORKER_HEARTBEAT_NOT_STOPPED")
+        session_id = candidate_session or str(uuid4())
+        with self._presence_lock:
+            self._presence_epoch += 1
+            epoch = self._presence_epoch
+            self._presence_error = None
+            self._presence_success_at = None
+            self._presence_renewals = 0
+            self._ready_epoch = None
         target = {"target_job_id": self.target_job_id} if self.target_job_id is not None else {}
         registration = self._register_with_wait(session_id, capabilities, target)
         if registration is None:
@@ -479,7 +639,9 @@ class StageWorker:
             self._presence_deadline = started + receipt["heartbeat_timeout_seconds"]
         finished = threading.Event()
         interval = min(self.worker_heartbeat_seconds, receipt["heartbeat_timeout_seconds"] / 3)
-        thread = threading.Thread(target=self._worker_heartbeat, args=(finished, interval), daemon=True)
+        thread = threading.Thread(target=self._worker_heartbeat,
+                                  args=(finished, interval, session_id, epoch), daemon=True)
+        self._presence_thread = thread
         thread.start()
         try:
             # A custom transport can return a valid receipt after its timeout.
@@ -487,6 +649,7 @@ class StageWorker:
             if (registration_deadline is not None
                     and self._monotonic() >= registration_deadline):
                 raise WorkerClientError("JAVA_UNAVAILABLE", retryable=True)
+            self._request_guard()
             self._check_presence()
             if self.stop.is_set():
                 yield False
@@ -499,24 +662,63 @@ class StageWorker:
             if exc.code == "WORKER_PRESENCE_LOST":
                 # The main thread and heartbeat may observe the same deadline
                 # in either order. Expose one lifecycle error in both cases.
-                raise WorkerClientError("WORKER_SESSION_EXPIRED") from None
+                raise self._presence_error or WorkerClientError("WORKER_SESSION_EXPIRED") from None
             raise
         finally:
             finished.set()
             thread.join(timeout=12)
+            if thread.is_alive():
+                # A custom transport must not let an old heartbeat overlap a
+                # new registration, even when it ignores our request deadline.
+                with self._presence_lock:
+                    self._presence_epoch += 1
+                    self._presence_deadline = None
+                    self.session_id = None
+                raise WorkerError("WORKER_HEARTBEAT_NOT_STOPPED")
             # A failed unregister leaves presence to expire; it cannot replace
             # the original computation/protocol exception or release its lease.
             try:
-                self.client.unregister_worker(self.worker_id, self.session_id)
+                deadline = self._monotonic() + 2
+                with self._presence_lock:
+                    runtime_deadline = self._runtime_deadline
+                if runtime_deadline is not None:
+                    deadline = min(deadline, runtime_deadline)
+
+                def cleanup_guard():
+                    if self._monotonic() >= deadline:
+                        raise WorkerClientError("JAVA_UNAVAILABLE", retryable=True)
+
+                with self._client_scope(deadline=deadline, guard=cleanup_guard):
+                    self.client.unregister_worker(self.worker_id, session_id)
             except WorkerClientError:
                 pass
             self.session_id = None
             with self._presence_lock:
+                self._presence_epoch += 1
                 self._presence_deadline = None
 
     def _check_target_record(self, value: dict) -> None:
         if self.target_job_id is not None and value.get("job_id") != self.target_job_id:
             raise WorkerError("WORKER_JOB_TARGET_MISMATCH")
+
+    def _archive_abandoned_claim(self) -> None:
+        """A new session must never turn an old unknown request into a new claim."""
+        path = self.journal_dir / "pending-claim.json"
+        if not self.registry_enabled or not _native_path(path).exists():
+            return
+        value = _read(path)
+        self._check_target_record(value)
+        if value.get("worker_id") != self.worker_id:
+            raise WorkerError("WORKER_ID_MISMATCH")
+        # Hashes, not untrusted stage/request identifiers, form filesystem names.
+        digest = hashlib.sha256(_json_bytes(value)).hexdigest()
+        archive = self.journal_dir / "session-abandoned" / (digest + ".json")
+        if _native_path(archive).exists():
+            if _read(archive) != value:
+                raise WorkerError("INVALID_WORKER_JOURNAL")
+        else:
+            _write(archive, value)
+        _native_path(path).unlink()
 
     def _pending_callback(self) -> bool:
         pending = self.journal_dir / "pending-callback.json"
@@ -525,15 +727,21 @@ class StageWorker:
         value = _read(pending)
         self._check_target_record(value)
         try:
-            response = self.client.callback(value["action"], value["stage_id"], value["payload"])
+            # Settlement uses the exact old credentials even when old executor
+            # presence is lost. Only user cancellation and API deadlines gate it.
+            with self._client_scope(deadline=lambda: self._runtime_deadline):
+                response = self.client.callback(value["action"], value["stage_id"], value["payload"])
             if response.get("outcome") not in {"ACCEPTED", "ALREADY_APPLIED"}:
                 raise WorkerClientError("INVALID_JAVA_RESPONSE", retryable=True)
         except WorkerClientError as exc:
-            if not exc.retryable:
+            if exc.code == "STALE_ATTEMPT":
                 # A stale result stays auditable locally but can never overwrite
                 # the current business attempt.
                 _write(self.journal_dir / "rejected-callback.json", value)
+                digest = hashlib.sha256(_json_bytes(value)).hexdigest()
+                _write(self.journal_dir / "fenced-callbacks" / (digest + ".json"), value)
                 _native_path(pending).unlink()
+                raise _FencedCallbackError() from None
             raise
         _native_path(pending).unlink()
         return True
@@ -542,8 +750,18 @@ class StageWorker:
         while not finished.wait(self.heartbeat_seconds):
             try:
                 context.guard.check()
-                response = self.client.callback("heartbeat", context.lease.stage_id,
-                                                context.lease.credentials)
+                deadline = self._monotonic() + self.heartbeat_seconds
+                with self._presence_lock:
+                    runtime_deadline = self._runtime_deadline
+                if runtime_deadline is not None:
+                    deadline = min(deadline, runtime_deadline)
+                def heartbeat_guard():
+                    context.guard.check()
+                    self._request_guard()
+
+                with self._client_scope(deadline=deadline, guard=heartbeat_guard):
+                    response = self.client.callback("heartbeat", context.lease.stage_id,
+                                                    context.lease.credentials)
                 context.guard.renew(response)
             except (WorkerClientError, WorkerError):
                 context.guard.lose()
@@ -552,10 +770,13 @@ class StageWorker:
     def run_once(self, *, stage_type: str | None = None) -> str:
         with _single_worker(self.journal_dir):
             self._recover_local_result()
+            if self.stop.is_set():
+                return "stopped"
             if self._pending_callback():
                 return "callback_replayed"
             if self.stop.is_set():
                 return "stopped"
+            self._archive_abandoned_claim()
             with self._registered(stage_type) as registered:
                 if not registered:
                     return "stopped"
@@ -594,6 +815,15 @@ class StageWorker:
                     candidates = ready.get("items")
                     if not isinstance(candidates, list) or len(candidates) > page_size:
                         raise WorkerError("INVALID_JAVA_RESPONSE")
+                    for row in candidates:
+                        if not isinstance(row, dict):
+                            raise WorkerError("INVALID_JAVA_RESPONSE")
+                        _identifier(row.get("id"))
+                        if self.target_job_id is not None and row.get("job_id") != self.target_job_id:
+                            raise WorkerError("CLAIM_TARGET_CHANGED")
+                        if self.registry_enabled and query_stage is not None and row.get("stage_type") != query_stage:
+                            raise WorkerError("CLAIM_STAGE_TYPE_CHANGED")
+                    self._ready_succeeded()
                     candidates = [item for item in candidates if not isinstance(item, dict)
                                   or not isinstance(item.get("id"), str) or item["id"] not in attempted]
                 item = candidates.pop(0)
@@ -614,8 +844,8 @@ class StageWorker:
                 if pending.get("session_id") is None:
                     pending["session_id"] = self.session_id
                     _write(claim_path, pending)
-                # A restarted process must not adopt an old attempt. Java binds
-                # receipts to their old session and returns EXPIRED on replay.
+                # Persist the identity before dispatch; only this same live
+                # session may retry an uncertain request with its original ID.
             if self.stop.is_set():
                 return "stopped"
             self._check_presence()
@@ -651,9 +881,13 @@ class StageWorker:
                 raise WorkerError("WORKER_SESSION_CHANGED")
             pending["attempt_key"] = lease.attempt_key
             _write(claim_path, pending)
+        # A replayed uncertain claim skips ready. Its validated frozen lease is
+        # also a healthy control-plane cycle, before potentially long compute.
+        self._ready_succeeded()
         directory = shared_path(self.storage_root, lease.attempt_key)
         _native_path(directory).mkdir(parents=True, exist_ok=True)
-        guard = LeaseGuard(lease, self.stop, presence_check=self._check_presence)
+        epoch = self._presence_epoch
+        guard = LeaseGuard(lease, self.stop, presence_check=lambda: self._check_presence(epoch))
         context = StageContext(lease, self.storage_root, directory, guard)
         callback_path = self.journal_dir / "pending-callback.json"
         result_path = directory / "worker-result.json"
@@ -667,6 +901,7 @@ class StageWorker:
             return "callback_replayed"
         finished = threading.Event()
         thread = threading.Thread(target=self._heartbeat, args=(context, finished), daemon=True)
+        self._stage_thread = thread
         thread.start()
         try:
             guard.check()
@@ -726,6 +961,9 @@ class StageWorker:
         finally:
             finished.set()
             thread.join(timeout=12)
+            if thread.is_alive():
+                guard.lose()
+                raise WorkerError("STAGE_HEARTBEAT_NOT_STOPPED")
         # Write the exact callback before any network mutation. Never regenerate
         # its hash or recompute a stage merely because the response was lost.
         if self.target_job_id is not None:
@@ -736,30 +974,112 @@ class StageWorker:
         self._pending_callback()
         return "completed" if callback["action"] == "complete" else "failed"
 
+    def _wait_runtime_recovery(self, error: WorkerClientError, backoff: float) -> float | None:
+        with self._presence_lock:
+            self._note_outage(error)
+            if (error.code != "WORKER_RECONNECT_EXHAUSTED"
+                    and (not self.reconnect_wait_seconds or not self._runtime_retryable(error))):
+                raise error
+            now = self._monotonic()
+            started, deadline = self._reconnect_started, self._runtime_deadline
+            if started is None or deadline is None:
+                raise error
+            remaining = deadline - now
+            elapsed = now - started
+            observe_exhausted = remaining <= 0 and not self._reconnect_exhausted_observed
+            if observe_exhausted:
+                self._reconnect_exhausted_observed = True
+        if remaining <= 0:
+            if observe_exhausted:
+                self._observe_lifecycle("reconnect-exhausted", error_code=error.code,
+                                        elapsed_seconds=elapsed, remaining_seconds=0.0)
+            raise WorkerClientError("WORKER_RECONNECT_EXHAUSTED") from None
+        self._observe_lifecycle("reconnecting", error_code=error.code,
+                                elapsed_seconds=elapsed, remaining_seconds=remaining)
+        if self.stop.wait(min(backoff, remaining)):
+            return None
+        return min(10.0, backoff * 2)
+
+    def _idle_wait(self, seconds: float) -> None:
+        """An operator stop or executor failure must interrupt even a long poll."""
+        deadline = self._monotonic() + seconds
+        while not self.stop.is_set():
+            if self._presence_error is not None:
+                raise self._presence_error
+            self._request_guard()
+            remaining = deadline - self._monotonic()
+            if remaining <= 0:
+                return
+            with self._presence_lock:
+                now = self._monotonic()
+                runtime_deadline = self._runtime_deadline
+            if runtime_deadline is not None:
+                remaining = min(remaining, runtime_deadline - now)
+            self.stop.wait(max(0, min(.05, remaining)))
+
     def run(self, *, poll_seconds: float = 3, stage_type: str | None = None) -> None:
-        if poll_seconds <= 0:
+        if type(poll_seconds) not in (int, float) or not math.isfinite(poll_seconds) or poll_seconds <= 0:
             raise WorkerError("INVALID_POLL_INTERVAL")
         # The same process owns its journal for the entire advertised lifetime.
         # Registering outside this lock could let two processes share an identity.
         with _single_worker(self.journal_dir):
-            self._recover_local_result()
-            self._pending_callback()
-            if self.stop.is_set():
-                return
-            with self._registered(stage_type) as registered:
-                if not registered:
-                    return
+            self._continuous = True
+            candidate_session = str(uuid4())
+            backoff = min(1.0, self.reconnect_wait_seconds / 4) if self.reconnect_wait_seconds else 1.0
+            try:
                 while not self.stop.is_set():
                     try:
-                        status = self._run_once(stage_type=stage_type)
+                        with self._client_scope(deadline=lambda: self._runtime_deadline):
+                            self._request_guard()
+                            self._recover_local_result()
+                            self._pending_callback()
+                            self._archive_abandoned_claim()
+                            with self._registered(stage_type, candidate_session=candidate_session) as registered:
+                                if not registered:
+                                    return
+                                # This UUID is now an acknowledged old session.
+                                # A later failure must never adopt its attempts.
+                                candidate_session = str(uuid4())
+                                while not self.stop.is_set():
+                                    try:
+                                        with self._client_scope(deadline=lambda: self._runtime_deadline):
+                                            status = self._run_once(stage_type=stage_type)
+                                    except WorkerClientError as exc:
+                                        if isinstance(exc, _FencedCallbackError):
+                                            continue
+                                        self._note_outage(exc)
+                                        # A healthy, still-owned session may replay its
+                                        # uncertain claim with the exact same receipt ID.
+                                        if (self._presence_error is None and exc.retryable
+                                                and self.reconnect_wait_seconds
+                                                and self._runtime_retryable(exc)):
+                                            backoff = self._wait_runtime_recovery(exc, backoff)
+                                            if backoff is None:
+                                                return
+                                            continue
+                                        raise
+                                    if self._presence_error is not None:
+                                        raise self._presence_error
+                                    self._request_guard()
+                                    self._maybe_recovered()
+                                    if self._reconnect_started is None:
+                                        backoff = min(1.0, self.reconnect_wait_seconds / 4)
+                                    if status in {"idle", "unavailable"}:
+                                        self._idle_wait(poll_seconds)
                     except WorkerClientError as exc:
-                        if not exc.retryable and exc.code not in {"STALE_ATTEMPT", "LEASE_EXPIRED"}:
-                            raise
-                        status = "unavailable"
-                    if self._presence_error is not None:
-                        raise self._presence_error
-                    if status in {"idle", "unavailable"}:
-                        self.stop.wait(poll_seconds)
+                        if self.stop.is_set():
+                            return
+                        if isinstance(exc, _FencedCallbackError):
+                            continue
+                        self._note_outage(exc)
+                        if exc.code == "WORKER_SESSION_EXPIRED":
+                            # Java definitively fenced this candidate UUID.
+                            candidate_session = str(uuid4())
+                        backoff = self._wait_runtime_recovery(exc, backoff)
+                        if backoff is None:
+                            return
+            finally:
+                self._continuous = False
 
 
 ProviderTransportFactory = Callable[[StageContext, str], httpx.BaseTransport]

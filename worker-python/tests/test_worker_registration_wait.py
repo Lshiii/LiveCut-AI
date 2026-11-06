@@ -367,7 +367,7 @@ def test_real_registration_stop_guard_interrupts_silent_read_and_closes_socket(t
             client.close()
 
 
-def test_only_registration_has_deadline_extensions_and_other_calls_keep_legacy_behavior():
+def test_all_control_plane_requests_have_bounded_response_and_pool_waits():
     requests = []
     session = str(uuid4())
 
@@ -388,8 +388,9 @@ def test_only_registration_has_deadline_extensions_and_other_calls_keep_legacy_b
     finally:
         client.close()
     assert started + 1.5 < requests[0].extensions['livecut_deadline_at'] <= time.monotonic() + 2
-    assert 'livecut_deadline_at' not in requests[1].extensions
-    assert 'livecut_guard' not in requests[1].extensions
+    assert started + 1.5 < requests[1].extensions['livecut_deadline_at'] <= time.monotonic() + 2
+    assert callable(requests[1].extensions['livecut_guard'])
+    assert 0 < requests[1].extensions['timeout']['pool'] <= 2
 
 
 def test_default_registration_transport_keeps_verified_tls_and_ignores_env(monkeypatch):

@@ -102,3 +102,39 @@ def test_interrupt_while_waiting_emits_stopped_and_closes_client(tmp_path, monke
     assert [json.loads(line)["status"] for line in capsys.readouterr().out.splitlines()] == [
         "registration-wait", "stopped",
     ]
+
+
+@pytest.mark.parametrize('value', ['-1', '3600.01', 'nan', 'inf', '-inf', '1e999', 'private-value'])
+def test_invalid_reconnect_wait_is_sanitized_before_client(tmp_path, monkeypatch, capsys, value):
+    def fail(*args, **kwargs):
+        pytest.fail('invalid recovery window must fail before client construction')
+
+    monkeypatch.setattr('livecut.worker_client.WorkerClient', fail)
+    assert main(worker_args(tmp_path, f'--reconnect-wait-seconds={value}')) == 2
+    assert json.loads(capsys.readouterr().out)['error_code'] == 'INVALID_RECONNECT_WAIT_CONFIGURATION'
+    assert not (tmp_path / 'storage').exists()
+    assert not (tmp_path / 'journal').exists()
+
+
+@pytest.mark.parametrize('options,expected', [([], 180), (['--reconnect-wait-seconds', '0'], 0),
+                                           (['--reconnect-wait-seconds', '.5'], .5)])
+def test_reconnect_option_reaches_runner_without_changing_once_result(tmp_path, monkeypatch, capsys,
+                                                                    options, expected):
+    class Client:
+        def __init__(self, *args):
+            pass
+
+        def close(self):
+            pass
+
+    class Runner:
+        def __init__(self, *args, **kwargs):
+            assert kwargs['reconnect_wait_seconds'] == expected
+
+        def run_once(self, **kwargs):
+            return 'idle'
+
+    monkeypatch.setattr('livecut.worker_client.WorkerClient', Client)
+    monkeypatch.setattr('livecut.worker.StageWorker', Runner)
+    assert main(worker_args(tmp_path, '--once', *options)) == 0
+    assert json.loads(capsys.readouterr().out)['status'] == 'idle'

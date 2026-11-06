@@ -84,6 +84,8 @@ def main(argv: list[str] | None = None) -> int:
     worker.add_argument("--poll-seconds", type=float, default=3)
     worker.add_argument("--registration-wait-seconds", default=45, metavar="SECONDS",
                         help="Wait up to 0..3600 seconds for an existing worker session; 0 fails immediately")
+    worker.add_argument("--reconnect-wait-seconds", default=180, metavar="SECONDS",
+                        help="Bound continuous-run Java recovery to 0..3600 seconds; 0 disables recovery")
     worker.add_argument("--ffprobe", default=os.environ.get("LIVECUT_FFPROBE_PATH", "ffprobe"))
     worker.add_argument("--ffmpeg", default=os.environ.get("LIVECUT_FFMPEG_PATH", "ffmpeg"))
     asr = sub.add_parser("transcribe", help="Run or resume real file ASR; never silently mock")
@@ -158,6 +160,12 @@ def main(argv: list[str] | None = None) -> int:
                 raise WorkerError("INVALID_REGISTRATION_WAIT_CONFIGURATION") from None
             if not math.isfinite(registration_wait_seconds) or not 0 <= registration_wait_seconds <= 3600:
                 raise WorkerError("INVALID_REGISTRATION_WAIT_CONFIGURATION")
+            try:
+                reconnect_wait_seconds = float(args.reconnect_wait_seconds)
+            except (TypeError, ValueError):
+                raise WorkerError("INVALID_RECONNECT_WAIT_CONFIGURATION") from None
+            if not math.isfinite(reconnect_wait_seconds) or not 0 <= reconnect_wait_seconds <= 3600:
+                raise WorkerError("INVALID_RECONNECT_WAIT_CONFIGURATION")
             if args.reuse_asr_job and (not args.once or args.stage_type != "ASR" or not args.job_id):
                 raise WorkerError("INVALID_ASR_REUSE_CONFIGURATION")
             worker_key = os.environ.get("LIVECUT_WORKER_API_KEY") or os.environ.get("LIVECUT_WORKER_KEY", "")
@@ -171,6 +179,7 @@ def main(argv: list[str] | None = None) -> int:
                 target = {"target_job_id": args.job_id} if args.job_id is not None else {}
                 runner = StageWorker(client, args.storage_root, args.journal_dir, args.worker_id, executor,
                                      registration_wait_seconds=registration_wait_seconds,
+                                     reconnect_wait_seconds=reconnect_wait_seconds,
                                      lifecycle_observer=_emit, **target)
                 if args.once:
                     status = runner.run_once(stage_type=args.stage_type)
