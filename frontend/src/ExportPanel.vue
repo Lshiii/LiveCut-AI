@@ -187,22 +187,30 @@ onBeforeUnmount(() => { stopped = true; previewPlayer.value?.pause(); resourceEp
 
 <template>
   <section :id="`exports-${jobId}`" class="exports" aria-label="正式导出与下载">
-    <div class="panel-heading"><div><div class="eyebrow">CONFIRMED VERSION → MP4</div><h2>正式导出与下载</h2></div><span class="subtle-number">每个片段一个 MP4</span></div>
+    <div v-if="!batches.length" class="panel-heading"><div><h2>生成与下载成片</h2><p>选择已确认片段，生成独立 MP4。</p></div></div>
     <div v-if="error || refreshError" class="message error" role="alert">{{ error || refreshError }}</div>
     <div v-if="notice" class="message notice" role="status">{{ notice }}</div>
     <button v-if="!approved && !loadingRevision && revision !== ''" class="text-button retry-revision" :disabled="!!pending" @click="loadRevision">重试读取确认版本</button>
-    <div class="export-create">
+    <details class="export-create" :open="!batches.length"><summary>新建导出 <span>选择已确认的片段，生成 MP4</span></summary><div class="export-create-body">
       <div v-if="!confirmedRevisions.length" class="no-approved">先保存并确认一个审核版本，即可选择片段导出。</div>
       <template v-else>
-        <div class="export-version"><label>已确认版本<select v-model="revision" aria-label="选择导出的确认版本" :disabled="!!pending || loadingRevision"><option v-for="version in confirmedRevisions" :key="version" :value="version">r{{ version }}{{ version === currentRevision ? ' · 当前版本' : ' · 历史版本' }}</option></select></label><div><b>H.264 / AAC · MP4</b><p>创建时冻结来源、时间区间和编码配置，后续编辑不会改变这个批次。</p></div></div>
+        <div class="export-version"><label>已确认版本<select v-model="revision" aria-label="选择导出的确认版本" :disabled="!!pending || loadingRevision"><option v-for="version in confirmedRevisions" :key="version" :value="version">r{{ version }}{{ version === currentRevision ? ' · 当前版本' : ' · 历史版本' }}</option></select></label><div><b>H.264 / AAC · MP4</b><p>本批使用确认版本，后续编辑不影响已创建的成片。</p></div></div>
         <p v-if="dirty || revision !== currentRevision" class="version-note">本次使用已确认的 r{{ revision }}。当前草稿或未保存修改不参与导出。</p>
         <p v-if="loadingRevision" class="help">正在读取确认快照…</p>
         <fieldset v-else :disabled="!!pending" class="export-selection"><legend>选择片段 · {{ selectedIds.length }} / {{ visibleCandidates.length }}</legend><div class="selection-actions"><label v-if="!topicMode">导出商品 <select v-model="exportProduct" aria-label="选择导出商品"><option value="">全部商品</option><option v-for="product in productOptions" :key="product.id" :value="product.id">{{ product.name }}</option></select></label><button class="text-button" @click="selectedIds = visibleCandidates.map(segment => segment.id)">{{ topicMode ? '全选片段' : '全选当前商品' }}</button><button class="text-button" @click="selectedIds = []">清空选择</button></div><label v-for="segment in visibleCandidates" :key="segment.id"><input v-model="selectedIds" type="checkbox" :value="segment.id" :aria-label="`选择导出片段 ${segment.id}`"><strong>{{ segment.title || productName(segment.product_id) }}</strong><span>{{ time(segment.start_ms) }} → {{ time(segment.end_ms) }}</span></label><p v-if="!candidates.length" class="help">这个确认版本没有可导出的启用片段。</p></fieldset>
         <div class="create-export-row"><small>已选 {{ selectedIds.length }} 段 · 选区合计 {{ (selectedDuration / 1000).toFixed(3) }} 秒</small><button class="primary" :disabled="!!pending || loadingRevision || !approved || !selectedIds.length" @click="create">{{ pending === 'create' ? '正在创建…' : '创建 / 打开导出' }} →</button></div>
       </template>
-    </div>
-    <div class="export-history"><div class="export-history-heading"><h3>导出批次 <span>{{ batches.length }}</span></h3><button class="text-button" :disabled="!!pending" @click="refresh">↻ 刷新</button></div><p v-if="!batches.length" class="help">还没有导出批次。任务创建后会保存到后台，关闭页面不影响执行。</p><div v-else class="batch-tabs"><button v-for="batch in batches" :key="batch.id" :class="{ active: selectedBatchId === batch.id }" :disabled="!!pending" @click="selectedBatchId = batch.id; previewId = ''">r{{ batch.approved_revision }} · {{ batch.id.slice(0, 8) }}<span class="status" :class="batch.status.toLowerCase()">{{ names[batch.status] ?? batch.status }}</span></button></div>
-      <template v-if="currentBatch"><div class="batch-summary"><span>冻结版本 r{{ currentBatch.approved_revision }} · {{ completed }} / {{ currentBatch.clips.length }} 完成</span><span class="snapshot-mode" role="status">{{ streamLabels[streamMode] }}</span><code>{{ currentBatch.id }}</code><button class="text-button" :disabled="!!pending" @click="downloadManifest">{{ pending === 'manifest' ? '正在下载…' : '下载文件清单 JSON ↓' }}</button><button class="secondary" :disabled="packageBusy || !!pending" @click="downloadBatchPackage">{{ packageBusy ? '正在核对字幕版本…' : '核对并准备素材包' }}</button><a v-if="packageUrl" class="text-button" :href="packageUrl" download target="_blank" rel="noopener">下载本批素材包</a></div><p class="help">整批素材包包含原 MP4 和已确认字幕；所有片段均完成并确认字幕后才可打包。</p><div v-for="clip in currentBatch.clips" :key="clip.id" class="export-clip"><div><b>{{ clip.title || clip.product_name }}</b><p>{{ time(clip.start_ms) }} → {{ time(clip.end_ms) }} <span v-if="clip.attempt">· 第 {{ clip.attempt }} 次执行</span></p><FailureDiagnostic :diagnostic="clip.diagnostic" :error-code="clip.error_code" :attempt="clip.attempt" /></div><span class="status" :class="clip.status.toLowerCase()">{{ names[clip.status] ?? clip.status }}</span><small v-if="clip.size_bytes != null">{{ (clip.size_bytes / 1024 / 1024).toFixed(2) }} MB</small><div class="clip-actions"><template v-if="clip.status === 'SUCCEEDED' && clip.content_url"><button class="secondary" @click="previewId = clip.id">预览</button><button class="secondary" :disabled="!!pending" @click="openCaptions(clip)">校对字幕</button><a v-if="clip.download_url" class="secondary" :href="clip.download_url" target="_blank" rel="noopener">下载 MP4 ↓</a></template><button v-if="clip.status === 'FAILED'" class="secondary" :disabled="!!pending" @click="retry(clip)">重试此片段</button></div></div>
+    </div></details>
+    <div class="export-history"><div class="export-history-heading"><h3>导出批次 <span>{{ batches.length }}</span></h3><button class="text-button" :disabled="!!pending" @click="refresh">↻ 刷新</button></div><p v-if="!batches.length" class="help">还没有导出批次。创建后可在这里查看进度和下载。</p><div v-else class="batch-tabs" aria-label="选择导出批次"><button v-for="batch in batches" :key="batch.id" :class="{ active: selectedBatchId === batch.id }" :disabled="!!pending" @click="selectedBatchId = batch.id; previewId = ''">r{{ batch.approved_revision }} · {{ batch.id.slice(0, 8) }}<span class="status" :class="batch.status.toLowerCase()">{{ names[batch.status] ?? batch.status }}</span></button></div>
+      <template v-if="currentBatch">
+        <div class="batch-summary">
+          <div class="batch-summary-title"><strong>确认版本 r{{ currentBatch.approved_revision }}</strong><span class="status" :class="currentBatch.status.toLowerCase()">{{ names[currentBatch.status] ?? currentBatch.status }}</span></div>
+          <div class="batch-summary-meta"><span>{{ completed }} / {{ currentBatch.clips.length }} 个成片完成</span><span class="snapshot-mode" role="status">{{ streamLabels[streamMode] }}</span><code>{{ currentBatch.id }}</code></div>
+          <div class="batch-tools"><button class="text-button" :disabled="!!pending" @click="downloadManifest">{{ pending === 'manifest' ? '正在下载…' : '下载文件清单 JSON ↓' }}</button><button class="secondary" :disabled="packageBusy || !!pending" @click="downloadBatchPackage">{{ packageBusy ? '正在核对字幕版本…' : '核对并准备素材包' }}</button><a v-if="packageUrl" class="text-button" :href="packageUrl" download target="_blank" rel="noopener">下载本批素材包</a></div>
+          <p class="package-note">素材包包含原 MP4 与确认字幕，需本批全部完成并确认字幕。</p>
+        </div>
+        <div class="export-clips-heading"><h4>成片列表</h4><span>每段可独立预览、校对字幕和下载</span></div>
+        <div v-for="clip in currentBatch.clips" :key="clip.id" class="export-clip"><div><b>{{ clip.title || clip.product_name }}</b><p>{{ time(clip.start_ms) }} → {{ time(clip.end_ms) }} <span v-if="clip.attempt">· 第 {{ clip.attempt }} 次执行</span></p><FailureDiagnostic :diagnostic="clip.diagnostic" :error-code="clip.error_code" :attempt="clip.attempt" /></div><span class="status" :class="clip.status.toLowerCase()">{{ names[clip.status] ?? clip.status }}</span><small v-if="clip.size_bytes != null">{{ (clip.size_bytes / 1024 / 1024).toFixed(2) }} MB</small><div class="clip-actions"><template v-if="clip.status === 'SUCCEEDED' && clip.content_url"><button class="secondary" @click="previewId = clip.id">预览</button><button class="secondary" :disabled="!!pending" @click="openCaptions(clip)">校对字幕</button><a v-if="clip.download_url" class="secondary" :href="clip.download_url" target="_blank" rel="noopener">下载 MP4 ↓</a></template><button v-if="clip.status === 'FAILED'" class="secondary" :disabled="!!pending" @click="retry(clip)">重试此片段</button></div></div>
         <div v-if="preview?.content_url" class="export-preview"><div><b>{{ preview.title || preview.product_name }} · 成片预览</b><button class="text-button" @click="previewId = ''">关闭预览</button></div><video ref="previewPlayer" :key="preview.id" :src="preview.content_url" controls preload="metadata" playsinline @play="guardPlayback"></video></div>
       </template>
     </div>
@@ -211,56 +219,103 @@ onBeforeUnmount(() => { stopped = true; previewPlayer.value?.pause(); resourceEp
 </template>
 
 <style scoped>
-.exports { border-top: 1px solid #e0e8d9; }
-.exports > .message { margin: 0 23px 20px; }
-.retry-revision { margin: 0 23px 20px; }
-.export-create { padding: 0 23px 24px; }
-.export-version { display: flex; gap: 24px; align-items: center; }
-.export-version label { font-size: 11px; color: #657c59; min-width: 150px; }
-.export-version select { display: block; width: 100%; margin-top: 8px; }
-.export-version b { font-size: 12px; font-weight: 500; color: #617a55; }
-.export-version p, .no-approved { color: #839677; font-size: 11px; line-height: 1.9; margin-top: 8px; }
-.version-note { margin-top: 16px; color: #b17c49; font-size: 11px; line-height: 1.9; }
-.export-selection { min-width: 0; padding: 14px; border: 1px solid #e0e8d9; border-radius: 6px; margin: 22px 0 0; position: relative; }
-.export-selection legend { font-size: 11px; padding: 0 8px; color: #7a916c; }
-.selection-actions { display: flex; gap: 16px; margin-bottom: 12px; flex-wrap: wrap; align-items: center; }
-.selection-actions label { font-size: 11px; color: #71876a; }
+.exports { min-width: 0; border-top: 1px solid #e2e8f0; color: #182230; background: #fff; font-size: 14px; line-height: 1.65; }
+.exports > .panel-heading { min-width: 0; padding: 18px 20px 16px; }
+.exports > .panel-heading h2, .exports h3, .exports h4 { margin: 0; color: #182230; font-size: 16px; line-height: 1.5; font-weight: 600; }
+.exports > .panel-heading p { margin-top: 5px; color: #64748b; font-size: 14px; line-height: 1.65; }
+.exports > .message { margin: 0 20px 16px; font-size: 14px; }
+.exports .help, .exports .no-approved { margin: 10px 0; color: #64748b; font-size: 14px; line-height: 1.75; }
+.exports .text-button { color: #64748b; font-size: 14px; line-height: 1.5; white-space: normal; }
+.exports .text-button:hover { color: #c65d37; }
+.exports .primary { padding: 10px 16px; background: #e47650; color: #fff; font-size: 14px; line-height: 1.5; }
+.exports .primary:hover:not(:disabled) { background: #cf633d; }
+.exports .secondary { border: 1px solid #e2e8f0; border-radius: 6px; padding: 8px 12px; color: #182230; background: #fff; font-size: 14px; line-height: 1.5; }
+.exports .secondary:hover:not(:disabled) { border-color: #cbd5e1; background: #f8fafc; }
+.exports select { min-width: 0; max-width: 100%; min-height: 40px; border-color: #e2e8f0; color: #182230; font-size: 14px; }
+.exports .status { flex: none; padding: 4px 8px; border-radius: 5px; color: #475569; background: #f1f5f9; font-size: 14px; line-height: 1.5; }
+.exports .status.running, .exports .status.retry_wait { color: #ad512f; background: #fff1e9; }
+.exports .status.failed, .exports .status.partial_failed { color: #b54745; background: #fef3f2; }
+.retry-revision { margin: 0 20px 16px; }
+.export-create { min-width: 0; padding: 0 20px; }
+.export-create > summary { padding: 14px 0; cursor: pointer; color: #182230; font-size: 14px; font-weight: 600; }
+.export-create > summary > span { margin-left: 10px; color: #64748b; font-size: 13px; font-weight: 400; }
+.export-create-body { padding: 4px 0 20px; }
+.export-version { display: grid; grid-template-columns: minmax(150px, 220px) minmax(0, 1fr); gap: 20px; align-items: center; }
+.export-version label { min-width: 0; color: #182230; font-size: 14px; }
+.export-version select { display: block; width: 100%; margin-top: 7px; }
+.export-version b { color: #182230; font-size: 14px; font-weight: 600; }
+.export-version p { margin-top: 5px; color: #64748b; font-size: 14px; line-height: 1.75; }
+.version-note { margin-top: 14px; padding: 10px 12px; border-radius: 6px; color: #9a4f2e; background: #fff7ed; font-size: 14px; line-height: 1.75; }
+.export-selection { position: relative; min-width: 0; margin: 18px 0 0; padding: 12px 0 0; border: 0; border-top: 1px solid #e2e8f0; }
+.export-selection legend { padding: 0 12px 0 0; color: #182230; font-size: 14px; font-weight: 600; }
+.selection-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 18px; margin-bottom: 8px; }
+.selection-actions label { min-width: 0; color: #64748b; font-size: 14px; }
 .selection-actions select { margin-left: 8px; }
-.export-selection > label { display: flex; align-items: center; gap: 10px; padding: 10px 0; border-top: 1px solid #f0f4eb; }
-.export-selection strong { font-size: 12px; font-weight: 500; color: #5e7852; }
-.export-selection > label > span { margin-left: auto; font-size: 11px; color: #879d79; }
-.create-export-row { display: flex; align-items: center; justify-content: space-between; gap: 15px; margin-top: 20px; }
-.create-export-row small { color: #819773; font-size: 11px; }
-.create-export-row .primary { padding: 11px 18px; }
-.export-history { padding: 24px 23px; border-top: 1px solid #e0e8d9; background: #fafcf7; }
-.export-history-heading { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
-.export-history h3 { font-size: 13px; font-weight: 500; color: #59734d; }
-.export-history h3 > span { color: #91a783; font-size: 11px; margin-left: 6px; }
-.batch-tabs { display: flex; flex-wrap: wrap; gap: 9px; }
-.batch-tabs > button { display: flex; align-items: center; gap: 10px; padding: 9px; border-radius: 6px; background: #fff; border: 1px solid #e1e8d9; font-size: 11px; color: #819574; }
-.batch-tabs > button.active { border-color: #e6ac89; color: #a96e43; background: #fff8f0; }
-.batch-summary { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin: 22px 0 14px; color: #6b835f; font-size: 11px; }
-.batch-summary code { color: #94a88a; font-size: 10px; overflow-wrap: anywhere; }
-.export-clip { display: flex; align-items: center; flex-wrap: wrap; gap: 14px; border-top: 1px solid #e5ecdf; padding: 17px 0; }
-.export-clip > div:first-child { flex: 1; min-width: 180px; }
-.export-clip b { font-size: 13px; font-weight: 500; color: #5a754e; }
-.export-clip p { margin-top: 8px; font-size: 11px; color: #879d7a; }
-.export-clip code { display: block; margin-top: 8px; font-size: 11px; color: #ad7457; overflow-wrap: anywhere; }
-.export-clip > small { font-size: 10px; color: #8c9f7e; }
-.clip-actions { display: flex; gap: 9px; }
-.status.partial_failed { color: #a97646; background: #faefdc; }
-.export-preview { margin-top: 20px; border: 1px solid #dce6d3; border-radius: 7px; overflow: hidden; }
-.export-preview > div { display: flex; justify-content: space-between; gap: 12px; padding: 15px; background: #fff; color: #637e54; font-size: 12px; }
-.export-preview b { font-weight: 500; }
-.export-preview video { display: block; width: 100%; max-height: 420px; background: #202720; }
-@media(max-width:650px) { .export-create { padding: 0 18px 22px; } .export-version { display: block; } .export-version > div { margin-top: 16px; } .export-selection > label { flex-wrap: wrap; } .export-selection > label > span { margin-left: 26px; width: 100%; } .create-export-row { flex-wrap: wrap; } .export-history { padding: 22px 18px; } .batch-tabs > button { max-width: 100%; flex-wrap: wrap; } }
-.workbench-shell .export-panel { color: #1f2937; font-size: 14px; }
-.workbench-shell .export-panel h2 { color: #1f2937; font-size: 19px; }
-.workbench-shell .export-panel h3 { color: #334155; font-size: 16px; }
-.workbench-shell .export-panel .help, .workbench-shell .export-version p, .workbench-shell .no-approved { color: #64748b; font-size: 13px; }
-.workbench-shell .export-controls label, .workbench-shell .export-candidates, .workbench-shell .create-export-row, .workbench-shell .export-clip p { color: #475569; font-size: 13px; }
-.workbench-shell .export-panel select, .workbench-shell .export-clip b, .workbench-shell .export-preview b { color: #1f2937; font-size: 14px; }
-.workbench-shell .batch-tabs button, .workbench-shell .batch-summary, .workbench-shell .export-clip small { color: #64748b; font-size: 12px; }
-.workbench-shell .export-panel code { color: #64748b; font-size: 12px; }
-.workbench-shell .export-version, .workbench-shell .export-history, .workbench-shell .export-clip, .workbench-shell .export-preview { border-color: #e2e8f0; }
+.selection-actions .text-button { min-height: 32px; }
+.export-selection > label { display: grid; grid-template-columns: 16px minmax(0, 1fr) auto; align-items: start; gap: 10px; padding: 12px 0; border-top: 1px solid #f1f5f9; }
+.export-selection input[type=checkbox] { width: 16px; height: 16px; margin: 4px 0 0; accent-color: #e47650; }
+.export-selection strong { min-width: 0; color: #182230; font-size: 14px; font-weight: 500; overflow-wrap: anywhere; }
+.export-selection > label > span { color: #64748b; font-size: 14px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.create-export-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; margin-top: 16px; }
+.create-export-row small { color: #64748b; font-size: 14px; }
+.export-history { min-width: 0; padding: 20px; border-top: 1px solid #e2e8f0; background: #fff; }
+.export-history-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+.export-history h3 > span { margin-left: 6px; color: #64748b; font-size: 14px; font-weight: 400; }
+.batch-tabs { display: flex; max-width: 100%; gap: 8px; padding: 0 0 8px; overflow-x: auto; overscroll-behavior-x: contain; scrollbar-width: thin; }
+.batch-tabs > button { display: flex; flex: none; align-items: center; gap: 10px; max-width: 100%; min-height: 42px; border: 1px solid #e2e8f0; border-radius: 6px; padding: 8px 12px; color: #64748b; background: #fff; font-size: 14px; line-height: 1.5; }
+.batch-tabs > button.active { border-color: #e47650; color: #a74c2b; background: #fff5ef; }
+.batch-summary { min-width: 0; margin: 12px 0 20px; padding: 14px; border-radius: 7px; background: #f8fafc; }
+.batch-summary-title { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
+.batch-summary-title strong { color: #182230; font-size: 16px; font-weight: 600; }
+.batch-summary-meta { display: flex; flex-wrap: wrap; gap: 4px 14px; margin-top: 8px; color: #64748b; font-size: 14px; }
+.batch-summary-meta code { min-width: 0; color: #64748b; font-size: 14px; overflow-wrap: anywhere; }
+.batch-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; margin-top: 12px; }
+.batch-tools > * { max-width: 100%; overflow-wrap: anywhere; }
+.batch-tools > a { color: #b75732; font-weight: 600; }
+.package-note { margin-top: 10px; color: #64748b; font-size: 14px; line-height: 1.7; }
+.export-clips-heading { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 14px; padding-bottom: 8px; }
+.export-clips-heading > span { color: #64748b; font-size: 14px; }
+.export-clip { display: grid; grid-template-columns: minmax(0, 1fr) auto auto auto; align-items: center; gap: 10px 14px; border-top: 1px solid #e2e8f0; padding: 16px 0; }
+.export-clip > div:first-child { min-width: 0; }
+.export-clip b { color: #182230; font-size: 14px; line-height: 1.65; font-weight: 600; overflow-wrap: anywhere; }
+.export-clip p { margin-top: 5px; color: #64748b; font-size: 14px; line-height: 1.7; overflow-wrap: anywhere; }
+.export-clip > small { color: #64748b; font-size: 14px; white-space: nowrap; }
+.clip-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; }
+.clip-actions > * { display: inline-flex; align-items: center; justify-content: center; max-width: 100%; min-height: 38px; }
+.clip-actions > a.secondary { border-color: #e47650; background: #e47650; color: #fff; }
+.clip-actions > a.secondary:hover { border-color: #cf633d; background: #cf633d; }
+.export-clip :deep(.failure-diagnostic) { background: #fff7ed; border-color: #f0b693; color: #64748b; }
+.export-clip :deep(.failure-diagnostic p), .export-clip :deep(.failure-details), .export-clip :deep(.failure-title > span), .export-clip :deep(.failure-diagnostic code) { color: #64748b; font-size: 14px; line-height: 1.7; }
+.export-preview { min-width: 0; margin-top: 18px; border: 1px solid #e2e8f0; border-radius: 7px; overflow: hidden; }
+.export-preview > div { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 14px; padding: 12px 14px; background: #f8fafc; color: #182230; font-size: 14px; }
+.export-preview b { min-width: 0; font-size: 16px; font-weight: 600; overflow-wrap: anywhere; }
+.export-preview video { display: block; width: 100%; max-height: min(420px, 60dvh); background: #0f172a; object-fit: contain; }
+@media (max-width: 850px) {
+  .export-clip { grid-template-columns: minmax(0, 1fr) auto auto; }
+  .clip-actions { grid-column: 1 / -1; }
+}
+@media (max-width: 650px) {
+  .exports > .panel-heading { padding: 16px 14px; }
+  .exports > .message, .retry-revision { margin-inline: 14px; }
+  .export-create { padding: 0 14px; }
+  .export-create > summary > span { display: block; margin: 3px 0 0 14px; }
+  .export-version { grid-template-columns: minmax(0, 1fr); gap: 12px; }
+  .export-selection > label { grid-template-columns: 16px minmax(0, 1fr); gap: 4px 10px; }
+  .export-selection > label > span { grid-column: 2; white-space: normal; overflow-wrap: anywhere; }
+  .export-history { padding: 18px 14px; }
+  .export-clip > div:first-child { grid-column: 1 / -1; }
+  .export-clip { gap: 8px 12px; }
+  .export-clip > .status { justify-self: start; }
+  .export-clip > small { grid-column: 2 / -1; justify-self: end; }
+  .batch-summary { padding: 12px; }
+  .batch-summary-meta code { flex-basis: 100%; }
+  .batch-tabs > button { flex-wrap: wrap; }
+}
+@media (max-width: 420px) {
+  .create-export-row { align-items: stretch; flex-direction: column; }
+  .create-export-row .primary { width: 100%; }
+  .selection-actions label { display: flex; flex-wrap: wrap; gap: 6px; width: 100%; }
+  .selection-actions select { width: 100%; margin-left: 0; }
+  .clip-actions > * { flex: 1 1 auto; }
+}
 </style>

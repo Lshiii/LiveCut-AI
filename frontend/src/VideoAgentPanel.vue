@@ -18,6 +18,9 @@ const activeTurn = computed(() => selected.value?.turns.find(agentTurnActive))
 const pending = computed(() => !!action.value), dirty = computed(() => !!question.value.trim())
 const citation = ref<AgentCitation | null>(null), sourcePlayer = ref<HTMLVideoElement | null>(null), playbackError = ref('')
 const messageList = ref<HTMLOListElement | null>(null)
+const panel = ref<HTMLElement | null>(null), referenceDock = ref<HTMLElement | null>(null)
+const compactReference = ref(true), referenceExpanded = ref(false)
+const referenceVisible = computed(() => !compactReference.value || referenceExpanded.value)
 const sessionListOpen = ref(false)
 const historyPanel = ref<HTMLElement | null>(null), historyToggle = ref<HTMLButtonElement | null>(null)
 function closeHistory(restoreFocus = true) {
@@ -38,8 +41,9 @@ function historyKey(event: KeyboardEvent) {
 }
 const scope = new AgentReadScope(), receiptCache = new Map<string, AgentReceipt>()
 let stopped = false, refreshing = false, timer: number | undefined, selectionVersion = 0, previewVersion = 0
+let referenceObserver: ResizeObserver | undefined, pendingCitationPlay: number | null = null, playIntentVersion: number | null = null
 let followLatest = true, initialScrollPending = false
-const examples = ['概括这段视频', '刚才提到的缓存失效原因有什么区别', '哪些片段值得单独剪']
+const examples = ['概括这段视频', '展开解释刚才提到的第二点', '哪些片段值得单独剪']
 const names: Record<string, string> = { QUEUED: '等待回答', RUNNING: '正在查找与回答', SUCCEEDED: '回答完成', FAILED: '本轮未完成', CANCELLED: '已取消' }
 const scopes = { VIDEO: '来自视频', GENERAL: '通用知识补充', INSUFFICIENT: '视频证据不足' }
 const toolNames = { search_transcript: '检索视频原句', read_context: '补读相邻内容', list_topics: '查看视频话题' }
@@ -107,8 +111,8 @@ function canSwitch() {
 async function selectSession(id: string) {
   if (id === selectedId.value || !canSwitch()) return
   closeHistory()
-  scope.invalidate(); selectionVersion++; selectedId.value = id; citation.value = null; previewVersion++
-  sourcePlayer.value?.pause(); error.value = ''; notice.value = ''; playbackError.value = ''
+  scope.invalidate(); selectionVersion++; selectedId.value = id; closePreview()
+  error.value = ''; notice.value = ''; playbackError.value = ''
   await refresh()
 }
 async function refresh() {
@@ -158,7 +162,7 @@ async function requestSession(version: number): Promise<AgentSession | null> {
   const raw = await post<unknown>(`/api/jobs/${props.jobId}/agent-sessions`, {}, { 'Idempotency-Key': receipt.key })
   if (!valid(version)) return null
   const value = upsertSession(parseSession(raw))
-  selectedId.value = value.id; citation.value = null; previewVersion++; sourcePlayer.value?.pause()
+  selectedId.value = value.id; closePreview()
   clearReceipt(storageKey, receipt)
   return value
 }
@@ -216,49 +220,66 @@ function suggest(value: string) {
   emit('clipInstruction', value)
 }
 async function preview(value: AgentCitation) {
-  if (!mediaActive()) return
+  if (stopped || props.active === false) return
+  referenceExpanded.value = true
   citation.value = value; playbackError.value = ''; const version = ++previewVersion
+  pendingCitationPlay = version; playIntentVersion = version
   await nextTick()
-  if (mediaActive() && version === previewVersion) sourcePlayer.value?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+  if (mediaActive() && version === previewVersion && compactReference.value) referenceDock.value?.scrollIntoView({ block: 'nearest' })
   if (mediaActive() && version === previewVersion && sourcePlayer.value && sourcePlayer.value.readyState >= 1) seekCitation()
 }
-function mediaActive() { return !stopped && props.active !== false }
+function mediaActive() { return !stopped && props.active !== false && referenceVisible.value }
 function seekCitation() {
-  const player = sourcePlayer.value, value = citation.value
-  if (!player || !value || props.active === false || stopped) return
+  const player = sourcePlayer.value, value = citation.value, version = pendingCitationPlay
+  if (!player || !value || !mediaActive() || version === null || version !== previewVersion || playIntentVersion !== version) return
+  pendingCitationPlay = null
   try {
     player.currentTime = value.start_ms / 1000
-    void player.play().then(() => { if (stopped || props.active === false) player.pause() })
-      .catch(() => { if (!stopped && props.active !== false) playbackError.value = '点击视频播放按钮，可从所选原句继续回看。' })
+    void player.play().then(() => { if (!mediaActive() || playIntentVersion === null) player.pause() })
+      .catch(() => { if (mediaActive() && version === previewVersion) playbackError.value = '点击视频播放按钮，可从所选原句继续回看。' })
   }
   catch { playbackError.value = '暂时无法定位这条原句，请检查原视频是否可播放。' }
 }
-function guardPlayback(event: Event) { if (props.active === false || stopped) (event.currentTarget as HTMLVideoElement).pause() }
-function closePreview() { previewVersion++; sourcePlayer.value?.pause(); citation.value = null; playbackError.value = '' }
+function pauseReference() { previewVersion++; pendingCitationPlay = null; playIntentVersion = null; sourcePlayer.value?.pause() }
+function toggleReference() { pauseReference(); referenceExpanded.value = !referenceExpanded.value }
+function guardPlayback(event: Event) { if (!mediaActive()) (event.currentTarget as HTMLVideoElement).pause() }
+function closePreview() { pauseReference(); citation.value = null; playbackError.value = '' }
 function previewTime() { if (sourcePlayer.value && citation.value && sourcePlayer.value.currentTime >= citation.value.end_ms / 1000) sourcePlayer.value.pause() }
 function date(value: string) { return new Date(value).toLocaleString('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }) }
 function unload(event: BeforeUnloadEvent) { if (dirty.value || pending.value) { event.preventDefault(); event.returnValue = '' } }
-onMounted(() => { window.addEventListener('beforeunload', unload); void poll() })
+onMounted(() => {
+  window.addEventListener('beforeunload', unload); void poll()
+  referenceObserver = new ResizeObserver(entries => {
+    const width = entries[0]?.contentRect.width
+    if (stopped || !width) return
+    const compact = width <= 900
+    if (compact && !compactReference.value) referenceExpanded.value = false
+    compactReference.value = compact
+  })
+  if (panel.value) referenceObserver.observe(panel.value)
+})
 watch(selectedId, id => { initialScrollPending = !!id; followLatest = true; if (id) scrollToLatest(true) }, { flush: 'post' })
 watch(() => {
   const last = selected.value?.turns.at(-1)
   return `${selectedId.value}:${last?.id ?? ''}:${last?.state_version ?? 0}`
 }, () => { if (initialScrollPending || followLatest) scrollToLatest() }, { flush: 'post' })
 watch(() => props.active, value => {
-  if (value === false) { closeHistory(false); previewVersion++; sourcePlayer.value?.pause() }
+  if (value === false) { closeHistory(false); pauseReference() }
   else if (initialScrollPending) scrollToLatest(true)
-}, { flush: 'post' })
-onBeforeUnmount(() => { stopped = true; selectionVersion++; previewVersion++; scope.dispose(); window.clearTimeout(timer); sourcePlayer.value?.pause(); window.removeEventListener('beforeunload', unload) })
+}, { flush: 'sync' })
+watch(referenceVisible, value => { if (!value) pauseReference() }, { flush: 'sync' })
+onBeforeUnmount(() => { stopped = true; selectionVersion++; pauseReference(); referenceObserver?.disconnect(); scope.dispose(); window.clearTimeout(timer); window.removeEventListener('beforeunload', unload) })
 </script>
 
 <template>
-  <section class="panel agent-panel" aria-label="视频对话助手" @keydown.esc="closeHistory()">
+  <section ref="panel" class="panel agent-panel" aria-label="视频对话助手" @keydown.esc="closeHistory()">
     <div class="panel-heading agent-toolbar"><div><h2>与视频对话</h2><p class="agent-intro">提问、追问，点击原句依据回看视频。</p></div><div class="agent-toolbar-actions"><button ref="historyToggle" class="secondary" :aria-expanded="sessionListOpen" :aria-controls="`agent-history-${jobId}`" @click="toggleHistory">对话记录 <span>{{ sessions.length }}</span></button><button class="secondary" :disabled="pending || dirty" @click="newSession">＋ 新对话</button></div></div>
     <div v-if="sessionListOpen" class="agent-history-backdrop" aria-hidden="true" @click="closeHistory()"></div>
     <p v-if="error" class="message error" role="alert">{{ error }}</p><p v-if="notice" class="message notice" role="status">{{ notice }}</p>
     <p v-if="refreshError" class="agent-refresh-error" role="status">{{ refreshError }} 已有记录与输入仍保留。</p>
     <div class="agent-layout">
       <aside v-show="sessionListOpen" ref="historyPanel" role="dialog" aria-modal="true" @keydown="historyKey" :id="`agent-history-${jobId}`" class="agent-sessions" aria-label="视频对话列表"><div class="agent-section-heading"><h3>对话记录 · {{ sessions.length }}</h3><div class="agent-history-actions"><button class="text-button" @click="closeHistory()">关闭对话记录</button><button class="text-button" :disabled="pending" @click="refresh">刷新</button></div></div><p v-if="loading && !sessions.length" class="help">正在读取对话…</p><p v-else-if="!sessions.length" class="help">发送第一个问题，即可开始对话。</p><button v-for="session in sessions" :key="session.id" class="agent-session" :class="{ selected: selectedId === session.id }" :aria-pressed="selectedId === session.id" :disabled="pending || dirty" @click="session.id === selectedId ? closeHistory() : selectSession(session.id)"><strong>{{ session.turns[0]?.question ?? '新对话' }}</strong><small>{{ date(session.created_at) }} · {{ session.turns.length }} 轮</small></button></aside>
+      <aside ref="referenceDock" class="agent-reference" :inert="sessionListOpen ? true : undefined" aria-label="视频参考"><div class="agent-reference-heading"><h3>视频参考</h3><button class="text-button agent-reference-toggle" :aria-expanded="referenceVisible" :aria-controls="`agent-reference-${jobId}`" @click="toggleReference">{{ referenceVisible ? '收起' : '展开视频' }}</button></div><div v-show="referenceVisible" :id="`agent-reference-${jobId}`" class="agent-reference-body"><video ref="sourcePlayer" :src="videoUrl" controls preload="metadata" playsinline @loadedmetadata="seekCitation" @timeupdate="previewTime" @play="guardPlayback"></video><div v-if="citation" class="agent-reference-citation"><div><strong>{{ topicTime(citation.start_ms) }} → {{ topicTime(citation.end_ms) }}</strong><button class="text-button" @click="closePreview">关闭本次引用</button></div><p>{{ citation.text }}</p></div><p v-else class="agent-reference-help">可直接播放源视频。点击回答中的原句依据，可定位并回看对应内容。</p><p v-if="playbackError" class="agent-reference-help" role="status">{{ playbackError }}</p></div></aside>
       <div class="agent-conversation" :inert="sessionListOpen ? true : undefined">
         <div v-if="!selected?.turns.length" class="agent-welcome"><h3>从视频里找答案</h3><p>可以先概括内容，也可以沿着已有回答继续追问。证据不足时会明确说明。</p></div>
         <ol v-else ref="messageList" class="agent-turns" aria-label="对话记录" @scroll.passive="messageScroll"><li v-for="turn in selected.turns" :key="turn.id" class="agent-turn"><div class="agent-question"><span>你的问题 · 第 {{ turn.sequence }} 轮</span><p>{{ turn.question }}</p></div><div class="agent-answer"><div class="agent-answer-heading"><strong>视频助手</strong><span class="agent-status">{{ names[turn.status] }}</span><button v-if="agentTurnActive(turn)" class="text-button" :disabled="pending" @click="cancel(turn)">{{ action === 'cancel' ? '正在取消…' : '取消本轮' }}</button></div><TextRequestProgress :progress="turn.stage.text_progress" :terminal="!agentTurnActive(turn)" /><FailureDiagnostic :diagnostic="turn.stage.diagnostic" :error-code="turn.stage.error_code" :attempt="turn.stage.attempt" />
@@ -268,10 +289,9 @@ onBeforeUnmount(() => { stopped = true; selectionVersion++; previewVersion++; sc
             <div v-if="turn.result.suggested_clip_instruction" class="agent-clip-suggestion"><p>{{ turn.result.suggested_clip_instruction }}</p><button class="secondary" :disabled="pending || clipTargetBusy" @click="suggest(turn.result.suggested_clip_instruction)">送到剪辑要求</button><small v-if="clipTargetBusy">请先保存或放弃剪辑区域的未提交内容。</small><small v-else>仅填入要求，你仍需在剪辑区域点击查找、核对并确认。</small></div>
           </template><p v-else class="help">{{ turn.status === 'CANCELLED' ? '本轮已取消，已有对话和视频结果仍保留。' : turn.status === 'FAILED' ? '本轮未生成可用回答。请查看原因，原转写与此前回答仍保留。' : turn.status === 'QUEUED' ? '问题已保存，正在等待执行服务。' : '正在结合视频内容查找证据并回答，进度会自动更新。' }}</p>
         </div></li></ol>
-        <div v-if="citation" class="agent-preview"><div class="agent-section-heading"><h3>回看原句</h3><span>{{ topicTime(citation.start_ms) }} → {{ topicTime(citation.end_ms) }}</span><button class="text-button" @click="closePreview">关闭回看</button></div><video ref="sourcePlayer" :src="videoUrl" controls preload="metadata" playsinline @loadedmetadata="seekCitation" @timeupdate="previewTime" @play="guardPlayback"></video><p v-if="playbackError" class="help" role="status">{{ playbackError }}</p></div>
         <form class="agent-compose" @submit.prevent="send">
           <div v-if="!selected?.turns.length" class="agent-examples"><button v-for="example in examples" :key="example" type="button" class="secondary" :disabled="pending || dirty" @click="chooseExample(example)">{{ example }}</button></div>
-          <div class="agent-input-box"><label for="agent-question" class="visually-hidden">向视频助手提问</label><textarea id="agent-question" v-model="question" :disabled="pending" maxlength="2000" rows="2" placeholder="问问这段视频，例如：哪些原因会导致缓存失效？"></textarea>
+          <div class="agent-input-box"><label for="agent-question" class="visually-hidden">向视频助手提问</label><textarea id="agent-question" v-model="question" :disabled="pending" maxlength="2000" rows="2" placeholder="问问这段视频，例如：概括主要内容，列出关键观点。"></textarea>
           <div class="agent-compose-actions"><details class="agent-options"><summary>回答设置 <span>· {{ maxCalls }} 次上限</span></summary><div class="agent-options-body"><label>本轮模型请求上限<input v-model.number="maxCalls" type="number" min="1" max="24" :disabled="pending" aria-label="对话模型请求上限"></label><p>自动重试计入此上限。只使用当前视频转写，剪辑建议需另行审核确认。</p></div></details><span class="agent-character-count">{{ question.length }} / 2000</span><button v-if="dirty" class="text-button" type="button" :disabled="pending" @click="discard">放弃输入</button><button class="primary" type="submit" :disabled="pending || !question.trim() || !!activeTurn">{{ action === 'send' ? '正在提交…' : selected ? '发送问题 ↑' : '开始提问 ↑' }}</button></div></div>
           <p v-if="activeTurn" class="help" role="status">正在处理上一轮。你可以先编辑问题，等待回答或取消本轮后发送。</p>
         </form>
@@ -281,17 +301,30 @@ onBeforeUnmount(() => { stopped = true; selectionVersion++; previewVersion++; sc
 </template>
 
 <style scoped>
-.agent-panel { position: relative; display: flex; flex-direction: column; height: 100%; min-height: 0; min-width: 0; margin: 0; padding: 0; overflow: hidden; color: #1e293b; background: #fff; font-size: 14px; border: 0; border-radius: 0; }
+.agent-panel { container: agent / inline-size; position: relative; display: flex; flex-direction: column; height: 100%; min-height: 0; min-width: 0; margin: 0; padding: 0; overflow: hidden; color: #1e293b; background: #fff; font-size: 14px; border: 0; border-radius: 0; }
 .agent-panel h2, .agent-panel h3, .agent-panel h4, .agent-panel p { margin-top: 0; }
-.agent-panel > .agent-toolbar { flex: none; padding: 20px 28px 16px; border-bottom: 1px solid #f1f5f9; gap: 16px; }
-.agent-toolbar h2 { font-size: 17px; font-weight: 650; }
-.agent-intro { font-size: 12px; color: #64748b; line-height: 1.6; margin: 5px 0 0; }
+.agent-panel > .agent-toolbar { flex: none; min-height: 52px; padding: 9px 20px; border-bottom: 1px solid #f1f5f9; gap: 12px; }
+.agent-toolbar > div:first-child { display: flex; align-items: center; min-width: 0; gap: 12px; }
+.agent-toolbar h2 { font-size: 15px; font-weight: 650; line-height: 1.6; white-space: nowrap; }
+.agent-intro { font-size: 12px; color: #64748b; line-height: 1.6; margin: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .agent-toolbar-actions { display: flex; flex: none; align-items: center; gap: 8px; }
 .agent-toolbar-actions button { padding: 8px 11px; font-size: 12px; white-space: nowrap; background: #fff; }
 .agent-toolbar-actions button span { margin-left: 4px; color: #94a3b8; }
 .agent-panel > .message, .agent-refresh-error { flex: none; max-height: 70px; overflow-y: auto; margin: 8px 24px 0; padding: 9px 12px; font-size: 13px; line-height: 1.6; }
 .agent-refresh-error { color: #9a5a37; }
-.agent-layout { display: flex; flex: 1; min-height: 0; overflow: hidden; }
+.agent-layout { display: grid; grid-template-columns: clamp(280px, 32%, 380px) minmax(0, 1fr); flex: 1; min-height: 0; min-width: 0; overflow: hidden; }
+.agent-reference { display: flex; flex-direction: column; min-width: 0; min-height: 0; border-right: 1px solid #e2e8f0; background: #f8fafc; overflow: hidden; }
+.agent-reference-heading { display: flex; flex: none; align-items: center; justify-content: space-between; gap: 12px; padding: 14px 18px; border-bottom: 1px solid #e2e8f0; }
+.agent-reference-heading h3 { margin: 0; color: #334155; font-size: 14px; font-weight: 600; }
+.agent-reference-toggle { display: none; min-height: 30px; color: #475569; font-size: 13px; }
+.agent-reference-body { display: flex; flex-direction: column; flex: 1; min-height: 0; min-width: 0; overflow: hidden; padding: 16px; }
+.agent-reference-body > video { display: block; flex: none; width: 100%; min-width: 0; max-height: min(320px, 36dvh); height: auto; object-fit: contain; border-radius: 7px; background: #0f172a; }
+.agent-reference-help { flex: none; margin: 12px 0 0; color: #64748b; font-size: 13px; line-height: 1.8; overflow-wrap: anywhere; }
+.agent-reference-citation { display: flex; flex: 1; flex-direction: column; min-height: 0; margin-top: 14px; border: 1px solid #e2e8f0; border-radius: 7px; background: white; overflow: hidden; }
+.agent-reference-citation > div { flex: none; display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 5px 10px; padding: 9px 11px; border-bottom: 1px solid #edf1f5; }
+.agent-reference-citation strong { color: #a85635; font-size: 13px; font-weight: 500; }
+.agent-reference-citation .text-button { min-height: 30px; color: #64748b; font-size: 12px; white-space: normal; }
+.agent-reference-citation > p { flex: 1; min-height: 0; margin: 0; padding: 11px; overflow-y: auto; overscroll-behavior: contain; color: #334155; font-size: 14px; line-height: 1.85; white-space: pre-wrap; overflow-wrap: anywhere; }
 .agent-history-backdrop { position: absolute; inset: 0; z-index: 9; background: #0f172a15; cursor: default; }
 .agent-sessions { position: absolute; top: 64px; right: 24px; z-index: 10; width: min(340px, calc(100% - 32px)); max-height: min(420px, calc(100% - 100px)); overflow-y: auto; overscroll-behavior: contain; border: 1px solid #dce4ed; border-radius: 10px; background: #fff; padding: 16px; box-shadow: 0 12px 36px #0f172a20; }
 .agent-section-heading, .agent-answer-heading, .agent-compose-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
@@ -334,11 +367,6 @@ onBeforeUnmount(() => { stopped = true; selectionVersion++; previewVersion++; sc
 .agent-clip-suggestion { border: 1px solid #e2e8f0; border-radius: 7px; padding: 12px; background: #f8fafc; margin-top: 14px; }
 .agent-clip-suggestion > p { margin-bottom: 10px; }
 .agent-clip-suggestion small { display: block; color: #64748b; font-size: 12px; line-height: 1.7; margin-top: 8px; }
-.agent-preview { flex: none; display: grid; grid-template-columns: 160px minmax(0, 1fr); gap: 8px 16px; margin: 8px auto; padding: 10px; width: min(820px, calc(100% - 48px)); border: 1px solid #e2e8f0; border-radius: 8px; }
-.agent-preview .agent-section-heading { grid-column: 2; grid-row: 1; justify-content: flex-start; align-content: start; }
-.agent-preview .agent-section-heading > span { font-size: 12px; color: #64748b; }
-.agent-preview video { grid-column: 1; grid-row: 1 / 3; display: block; width: 160px; height: 90px; background: #0f172a; object-fit: contain; border-radius: 5px; }
-.agent-preview > .help { grid-column: 2; margin: 0; font-size: 12px; }
 .agent-compose { position: relative; flex: none; width: min(876px, 100%); padding: 12px 28px 20px; margin: 0 auto; background: #fff; }
 .agent-input-box { border: 1px solid #d8e0e9; border-radius: 12px; padding: 10px 12px; box-shadow: 0 2px 8px #0f172a04; }
 .agent-input-box:focus-within { border-color: #d49a80; box-shadow: 0 0 0 2px #fcf0e9; }
@@ -361,7 +389,7 @@ onBeforeUnmount(() => { stopped = true; selectionVersion++; previewVersion++; sc
 .agent-compose > .help { font-size: 12px; margin: 8px 0 0; }
 .agent-panel :deep(.text-recovery) { color: #475569; background: #f8fafc; border-color: #cbd5e1; }
 @media (max-width: 600px) {
-  .agent-panel > .agent-toolbar { padding: 12px 16px; align-items: center; }
+  .agent-panel > .agent-toolbar { padding: 8px 14px; align-items: center; }
   .agent-toolbar h2 { font-size: 15px; }
   .agent-intro { display: none; }
   .agent-toolbar-actions { gap: 6px; }
@@ -374,14 +402,28 @@ onBeforeUnmount(() => { stopped = true; selectionVersion++; previewVersion++; sc
   .agent-options summary > span { display: none; }
   .agent-compose-actions { gap: 8px; }
   .agent-input-box { padding: 9px 10px; }
-  .agent-preview { width: calc(100% - 24px); grid-template-columns: 120px minmax(0, 1fr); padding: 8px; gap: 8px; }
-  .agent-preview video { width: 120px; height: 80px; }
-  .agent-preview .agent-section-heading { gap: 5px; }
   .agent-sessions { right: 12px; top: 50px; }
+}
+@container agent (max-width:900px) {
+  .agent-layout { display: flex; flex-direction: column; overflow-y: auto; }
+  .agent-reference { flex: 0 1 auto; max-height: max(44px, min(240px, calc(100% - 220px))); border-right: 0; border-bottom: 1px solid #e2e8f0; }
+  .agent-reference-heading { padding: 6px 16px; min-height: 43px; }
+  .agent-reference-toggle { display: inline-flex; align-items: center; }
+  .agent-reference-body { display: block; overflow-y: auto; padding: 12px 16px; }
+  .agent-reference-body > video { max-height: 180px; }
+  .agent-reference-citation { display: block; flex: none; margin-top: 10px; }
+  .agent-reference-citation > p { max-height: 140px; }
+  .agent-conversation { flex: 1 0 220px; min-height: 220px; }
+  .agent-compose { padding: 8px 16px 12px; max-height: 100%; overflow-y: auto; }
+  .agent-options[open] { flex-basis: 100%; margin-right: 0; }
+  .agent-options-body { position: static; width: 100%; max-width: none; margin-top: 8px; padding: 12px; box-shadow: none; }
+  .agent-compose textarea { height: 50px; max-height: 80px; }
+  .agent-examples { flex-wrap: nowrap; overflow-x: auto; margin-bottom: 10px; padding-bottom: 3px; }
+  .agent-examples > button { flex: none; white-space: nowrap; }
 }
 @media (max-height: 650px) {
   .agent-intro { display: none; }
-  .agent-panel > .agent-toolbar { padding-block: 12px; }
+  .agent-panel > .agent-toolbar { padding-block: 8px; }
   .agent-compose { padding-bottom: 12px; }
   .agent-compose textarea { height: 50px; }
 }

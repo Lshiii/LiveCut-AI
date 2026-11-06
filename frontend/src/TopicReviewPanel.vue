@@ -191,26 +191,20 @@ onBeforeUnmount(() => { stopped = true; version++; preview.cancel(); player.valu
 </script>
 <template>
   <section class="panel topic-review" aria-label="视频话题解析与人工切分">
-    <header class="panel-heading"><div><h2>话题解析与选择 <span v-if="review">r{{ review.revision }} · 第 {{ review.generation }} 次分析</span></h2></div><div class="actions"><span v-if="review" class="status" :class="review.status.toLowerCase()">{{ dirty ? '有未保存修改' : review.status === 'CONFIRMED' ? '本版已确认' : '待选择草稿' }}</span><button class="text-button" :disabled="pending" @click="load">{{ dirty ? '放弃修改并重新读取' : '重新读取' }}</button></div></header>
+    <header class="topic-toolbar"><div v-if="review" class="topic-view-switch" role="tablist" aria-label="话题审核视图" @keydown="reviewTabKey"><button :id="`topic-edit-tab-${jobId}`" ref="editViewTab" role="tab" :aria-controls="`topic-edit-view-${jobId}`" :aria-selected="reviewView === 'edit'" :tabindex="reviewView === 'edit' ? 0 : -1" @click="reviewView = 'edit'">选择与编辑<span v-if="dirty" class="topic-draft-mark">未保存</span></button><button :id="`topic-export-tab-${jobId}`" ref="exportViewTab" role="tab" :aria-controls="`topic-export-view-${jobId}`" :aria-selected="reviewView === 'exports'" :tabindex="reviewView === 'exports' ? 0 : -1" @click="reviewView = 'exports'">成片导出<span v-if="review.confirmed_revisions.length" class="topic-version-count">{{ review.confirmed_revisions.length }} 个确认版本</span></button></div><div class="topic-review-meta"><span v-if="review" class="topic-revision" :title="`第 ${review.generation} 次分析`">r{{ review.revision }}</span><span v-if="review" class="status" :class="review.status.toLowerCase()">{{ dirty ? '有未保存修改' : review.status === 'CONFIRMED' ? '本版已确认' : '待选择草稿' }}</span><button class="text-button" :disabled="pending" @click="load">{{ dirty ? '放弃修改并重新读取' : '重新读取' }}</button></div></header>
     <div v-if="error" class="message error" role="alert">{{ error }}</div><div v-if="notice" class="message notice" role="status">{{ notice }}</div>
     <p v-if="!review" class="empty">{{ pending ? '正在读取话题结果…' : '话题结果暂不可用，请重新读取。' }}</p>
     <template v-if="review">
-      <div class="topic-view-switch" role="tablist" aria-label="话题审核视图" @keydown="reviewTabKey"><button :id="`topic-edit-tab-${jobId}`" ref="editViewTab" role="tab" :aria-controls="`topic-edit-view-${jobId}`" :aria-selected="reviewView === 'edit'" :tabindex="reviewView === 'edit' ? 0 : -1" @click="reviewView = 'edit'">选择与编辑<span v-if="dirty" class="topic-draft-mark">未保存</span></button><button :id="`topic-export-tab-${jobId}`" ref="exportViewTab" role="tab" :aria-controls="`topic-export-view-${jobId}`" :aria-selected="reviewView === 'exports'" :tabindex="reviewView === 'exports' ? 0 : -1" @click="reviewView = 'exports'">成片导出<span v-if="review.confirmed_revisions.length" class="topic-version-count">{{ review.confirmed_revisions.length }} 个确认版本</span></button></div>
       <div v-show="reviewView === 'edit'" :id="`topic-edit-view-${jobId}`" class="topic-edit-page" role="tabpanel" :aria-labelledby="`topic-edit-tab-${jobId}`">
         <div class="topic-review-main">
           <aside class="topic-media-column" aria-label="话题回看与原句证据">
             <div class="topic-player"><video ref="player" :src="videoUrl" controls preload="metadata" playsinline @play="mediaPlay" @timeupdate="timeUpdate" @seeking="seeking" @seeked="seeked" @ended="timeUpdate" @error="preview.cancel()"></video></div>
-            <div class="topic-timeline" aria-label="话题时间轴"><button v-for="segment in segments" :key="segment.id" :style="position(segment)" :class="{ enabled: segment.enabled, focused: selectedId === segment.id }" :title="`${segment.title} ${topicTime(segment.start_ms)} 至 ${topicTime(segment.end_ms)}`" :aria-label="`定位话题 ${segment.title}`" @click="seek(segment)"></button></div>
-            <div class="timeline-labels"><span>当前 {{ topicTime(playhead) }}</span><span>{{ topicTime(review.duration_ms) }}</span></div>
-            <p v-if="previewRange" class="preview-status" role="status">本段预览至 {{ topicTime(previewRange.end_ms) }}<button class="text-button" @click="preview.cancel()">停止预览</button></p>
-            <p v-else class="topic-preview-hint">点击标题回看，预览到段尾自动暂停。</p>
-            <details class="topic-evidence" :open="evidenceExpanded" @toggle="evidenceExpanded = ($event.target as HTMLDetailsElement).open"><summary><h3>对应语音转写 <span>{{ evidence.length }} 句</span></h3><span>{{ evidenceExpanded ? '收起' : '展开' }}</span></summary><div class="topic-evidence-body"><p v-if="selected" class="selected-topic">{{ selected.title }}</p><p v-if="!evidence.length" class="help">选择话题查看原始转写。人工添加的静音区间可能没有语句。</p><button v-for="utterance in evidence" :key="utterance.utterance_id" @click="seekEvidence(utterance.start_ms)"><span>{{ topicTime(utterance.start_ms) }} → {{ topicTime(utterance.end_ms) }}</span><p>{{ utterance.text }}</p></button></div></details>
+            <div class="topic-playback-meta"><div class="topic-timeline" aria-label="话题时间轴"><button v-for="segment in segments" :key="segment.id" :style="position(segment)" :class="{ enabled: segment.enabled, focused: selectedId === segment.id }" :title="`${segment.title} ${topicTime(segment.start_ms)} 至 ${topicTime(segment.end_ms)}`" :aria-label="`定位话题 ${segment.title}`" @click="seek(segment)"></button></div><div class="timeline-labels"><span>当前 {{ topicTime(playhead) }}</span><span>{{ topicTime(review.duration_ms) }}</span></div><p v-if="previewRange" class="preview-status" role="status">本段预览至 {{ topicTime(previewRange.end_ms) }}<button class="text-button" @click="preview.cancel()">停止预览</button></p></div>
+            <details class="topic-evidence" :open="evidenceExpanded" @toggle="evidenceExpanded = ($event.target as HTMLDetailsElement).open"><summary><h3>原句转写 <span>{{ evidence.length }} 句</span></h3><span>{{ evidenceExpanded ? '收起' : '展开' }}</span></summary><div class="topic-evidence-body"><p v-if="!evidence.length" class="help">选择话题查看原始转写。人工添加的静音区间可能没有语句。</p><button v-for="utterance in evidence" :key="utterance.utterance_id" @click="seekEvidence(utterance.start_ms)"><span>{{ topicTime(utterance.start_ms) }} → {{ topicTime(utterance.end_ms) }}</span><p>{{ utterance.text }}</p></button></div></details>
           </aside>
           <fieldset class="topic-fields" :disabled="pending"><div ref="topicList" class="topic-list"><div class="topic-tools"><span>共 {{ segments.length }} 个话题 · 已选 {{ enabledCount }} 个</span><button class="secondary" @click="add">＋ 在播放位置补片段</button></div><div v-if="!segments.length" class="empty">暂无片段，可以手动补充。</div>
             <article v-for="(segment, index) in segments" :key="segment.id" :data-topic-id="segment.id" class="topic-card" :class="{ focused: selectedId === segment.id }">
-          <div class="topic-card-heading"><label><input v-model="segment.enabled" type="checkbox" :aria-label="`选择话题 ${segment.title}`"> 第 {{ index + 1 }} 段</label><span>{{ segment.origin === 'manual' ? '人工补充' : 'AI 识别' }}</span><button class="text-button topic-edit-toggle" :aria-expanded="editingId === segment.id" :aria-controls="`topic-edit-${segment.id}`" :aria-label="`编辑此段 ${index + 1}`" @click="editSegment(segment)">{{ editingId === segment.id ? '收起编辑' : '编辑此段' }}</button></div>
-          <button class="topic-summary-title" :aria-label="`回看话题 ${segment.title}`" @click="seek(segment)">{{ segment.title }}</button>
-          <div class="topic-card-meta"><span>{{ topicTime(segment.start_ms) }} → {{ topicTime(segment.end_ms) }}</span><button class="text-button" :disabled="!validTopicRange(segment, review.duration_ms)" :aria-label="`${previewRange?.id === segment.id ? '停止预览' : '预览本段'} ${index + 1}`" @click="previewSegment(segment)">{{ previewRange?.id === segment.id ? '停止预览' : '预览本段' }}</button></div>
+          <div class="topic-row"><label class="topic-selection"><input v-model="segment.enabled" type="checkbox" :aria-label="`选择话题 ${segment.title}`"><span>{{ index + 1 }}</span></label><div class="topic-row-copy"><button class="topic-summary-title" :title="segment.title" :aria-label="`回看话题 ${segment.title}`" @click="seek(segment)">{{ segment.title }}</button><div class="topic-card-meta"><span class="topic-range">{{ topicTime(segment.start_ms) }} → {{ topicTime(segment.end_ms) }}</span><span class="topic-review-mark">{{ review.status === 'CONFIRMED' && !dirty && segment.enabled ? '已确认' : segment.origin === 'manual' ? '人工片段' : segment.boundary_source === 'manual' ? '已调边界' : 'AI 建议' }}</span></div></div><div class="topic-row-actions"><button class="text-button topic-edit-toggle" :aria-expanded="editingId === segment.id" :aria-controls="`topic-edit-${segment.id}`" :aria-label="`编辑此段 ${index + 1}`" @click="editSegment(segment)">{{ editingId === segment.id ? '收起' : '编辑' }}</button><button class="text-button" :disabled="!validTopicRange(segment, review.duration_ms)" :aria-label="`${previewRange?.id === segment.id ? '停止预览' : '预览本段'} ${index + 1}`" @click="previewSegment(segment)">{{ previewRange?.id === segment.id ? '停止预览' : '预览本段' }}</button></div></div>
           <div v-show="editingId === segment.id" :id="`topic-edit-${segment.id}`" class="topic-editor">
             <label class="topic-title">话题标题<input v-model="segment.title" :aria-label="`话题标题 ${index + 1}`" maxlength="120"></label>
             <label class="topic-summary">本段摘要<textarea v-model="segment.summary" :aria-label="`话题摘要 ${index + 1}`" rows="3" maxlength="1000"></textarea></label>
@@ -229,107 +223,111 @@ onBeforeUnmount(() => { stopped = true; version++; preview.cancel(); player.valu
   </section>
 </template>
 <style scoped>
-.topic-review { display: flex; flex-direction: column; height: 100%; min-height: 0; min-width: 0; margin: 0; overflow: hidden; color: #334155; font-size: 14px; }
-.topic-review > .panel-heading { flex-shrink: 0; gap: 12px; flex-wrap: wrap; padding: 12px 16px; border-bottom: 1px solid #e2e8f0; }
-.panel-heading h2 { margin: 0; color: #1f2937; font-size: 16px; }
-.panel-heading h2 > span { display: inline-block; margin-left: 8px; color: #64748b; font-size: 12px; font-weight: 400; }
-.panel-heading .actions { margin: 0; gap: 12px; flex-wrap: wrap; }
-.topic-review > .message { flex-shrink: 0; max-height: 66px; overflow: auto; margin: 8px 16px; padding: 9px 12px; font-size: 13px; }
+.topic-review.panel { container: topic-review / inline-size; display: flex; flex-direction: column; height: 100%; min-height: 0; min-width: 0; margin: 0; padding: 0; overflow: hidden; border: 0; border-radius: 0; box-shadow: none; background: #fff; color: #182230; font-size: 14px; }
+.topic-toolbar { flex: none; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 0 14px; min-width: 0; padding: 0 12px; border-bottom: 1px solid #e6e9ed; }
+.topic-view-switch { display: flex; align-items: center; gap: 20px; min-width: 0; }
+.topic-view-switch > button { padding: 11px 0 9px; border: 0; border-bottom: 2px solid transparent; border-radius: 0; background: none; color: #657181; font: inherit; white-space: nowrap; }
+.topic-view-switch > button[aria-selected=true] { color: #c65f3b; border-bottom-color: #e47650; font-weight: 600; }
+.topic-draft-mark, .topic-version-count { margin-left: 6px; font-size: 12px; font-weight: 400; color: #7c8794; }
+.topic-draft-mark { color: #b06138; }
+.topic-review-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin-left: auto; color: #7c8794; font-size: 12px; }
+.topic-review-meta .status { padding: 0; border: 0; background: transparent; color: #657181; font-size: 12px; }
+.topic-review-meta .text-button { padding: 5px 0; font-size: 12px; }
+.topic-review > .message { flex: none; max-height: 54px; overflow: auto; margin: 8px 12px; padding: 7px 10px; font-size: 13px; }
 .topic-review .text-button, .topic-review .primary, .topic-review .secondary { font-size: 14px; }
-.topic-view-switch { flex-shrink: 0; display: flex; gap: 20px; padding: 0 16px; border-bottom: 1px solid #e2e8f0; background: white; }
-.topic-view-switch > button { padding: 11px 1px 9px; border-bottom: 2px solid transparent; background: none; color: #64748b; font: inherit; white-space: nowrap; }
-.topic-view-switch > button[aria-selected=true] { color: #bd5732; border-color: #e47650; font-weight: 600; }
-.topic-draft-mark, .topic-version-count { margin-left: 7px; font-size: 12px; font-weight: 400; color: #64748b; }
-.topic-draft-mark { color: #a6702e; }
-.topic-edit-page { flex: 1; display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
-.topic-review-main { display: grid; grid-template-columns: minmax(280px, 1fr) minmax(0, 1.35fr); gap: 18px; flex: 1; min-height: 0; padding: 14px 16px 12px; overflow: hidden; }
-.topic-media-column { display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; }
-.topic-player { flex-shrink: 0; width: 100%; background: #0f172a; border-radius: 7px; overflow: hidden; }
-.topic-player video { display: block; width: 100%; height: auto; max-height: 280px; aspect-ratio: 16 / 9; background: #0f172a; object-fit: contain; }
-.topic-timeline { position: relative; flex-shrink: 0; height: 22px; margin: 12px 0 7px; background: #f1f5f9; border-radius: 5px; overflow: hidden; }
-.topic-timeline button { position: absolute; height: 100%; background: #dce5ed; border: 1px solid white; border-radius: 4px; }
-.topic-timeline .enabled { background: #a7c6a0; }
-.topic-timeline .focused { background: #e99b75; }
-.timeline-labels { flex-shrink: 0; display: flex; justify-content: space-between; gap: 6px; color: #64748b; font-size: 12px; }
-.preview-status, .topic-preview-hint { flex-shrink: 0; margin: 7px 0 10px; font-size: 12px; line-height: 1.6; color: #64748b; }
-.preview-status { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; }
-.preview-status .text-button { font-size: 12px; }
-.topic-evidence { position: relative; flex: 1; min-height: 0; overflow: hidden; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 7px; }
-.topic-evidence > summary { min-height: 40px; display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 9px 10px; cursor: pointer; list-style: none; box-sizing: border-box; }
+.topic-review > .empty { margin: 0; padding: 24px 12px; }
+.topic-edit-page { flex: 1; display: flex; flex-direction: column; min-height: 0; min-width: 0; overflow: hidden; }
+.topic-review-main { display: grid; grid-template-columns: minmax(0, .95fr) minmax(0, 1.05fr); gap: 16px; flex: 1; min-height: 0; min-width: 0; padding: 12px 12px 10px; overflow: hidden; }
+.topic-media-column { display: flex; flex-direction: column; gap: 8px; min-width: 0; min-height: 0; overflow: hidden; }
+.topic-player { position: relative; flex: .95 1 0; min-height: 0; width: 100%; background: #182230; border-radius: 4px; overflow: hidden; }
+.topic-player video { position: absolute; inset: 0; display: block; width: 100%; height: 100%; max-height: none; background: #182230; object-fit: contain; }
+.topic-playback-meta { flex: none; min-width: 0; }
+.topic-timeline { position: relative; height: 16px; margin: 0 0 5px; background: #f0f2f5; border-radius: 3px; overflow: hidden; }
+.topic-timeline button { position: absolute; height: 100%; background: #dbe1e7; border: 1px solid #fff; border-radius: 2px; }
+.topic-timeline .enabled { background: #b3c8b0; }
+.topic-timeline .focused { background: #e47650; }
+.timeline-labels { display: flex; justify-content: space-between; gap: 6px; color: #74808f; font-size: 12px; font-variant-numeric: tabular-nums; line-height: 1.4; }
+.preview-status { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: center; margin: 5px 0 0; color: #657181; font-size: 12px; line-height: 1.4; }
+.preview-status .text-button { padding: 0; font-size: 12px; }
+.topic-evidence { position: relative; flex: 1.05 1 0; min-height: 0; overflow: hidden; border: 0; border-top: 1px solid #e6e9ed; border-radius: 0; background: #fafbfc; }
+.topic-evidence:not([open]) { flex: 0 0 34px; }
+.topic-evidence > summary { min-height: 34px; display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 7px 9px; cursor: pointer; list-style: none; box-sizing: border-box; }
 .topic-evidence > summary::-webkit-details-marker { display: none; }
-.topic-evidence h3 { margin: 0; color: #334155; font-size: 13px; font-weight: 600; }
-.topic-evidence h3 > span, .topic-evidence > summary > span { color: #64748b; font-size: 12px; font-weight: 400; }
-.topic-evidence-body { position: absolute; inset: 40px 0 0; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 0 11px 10px; box-sizing: border-box; scrollbar-gutter: stable; }
+.topic-evidence h3 { margin: 0; color: #182230; font-size: 14px; font-weight: 600; }
+.topic-evidence h3 > span, .topic-evidence > summary > span { margin-left: 6px; color: #7c8794; font-size: 12px; font-weight: 400; }
+.topic-evidence-body { position: absolute; inset: 34px 0 0; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 0 9px 8px; box-sizing: border-box; scrollbar-gutter: stable; }
 .topic-evidence:not([open]) .topic-evidence-body { display: none; }
-.selected-topic { margin: 4px 0 9px; color: #475569; font-size: 13px; line-height: 1.65; overflow-wrap: anywhere; }
-.topic-evidence .help { font-size: 13px; color: #64748b; }
-.topic-evidence button { display: block; width: 100%; text-align: left; background: none; border: 0; border-top: 1px solid #e2e8f0; padding: 10px 0; }
-.topic-evidence button span { color: #64748b; font-size: 12px; }
-.topic-evidence button p { font-size: 14px; color: #334155; line-height: 1.75; margin: 5px 0 0; overflow-wrap: anywhere; }
+.topic-evidence .help { margin: 7px 0; font-size: 13px; color: #74808f; }
+.topic-evidence button { display: block; width: 100%; text-align: left; background: none; border: 0; border-top: 1px solid #e8ebef; border-radius: 0; padding: 8px 0; }
+.topic-evidence button span { color: #74808f; font-size: 12px; font-variant-numeric: tabular-nums; }
+.topic-evidence button p { font-size: 14px; color: #182230; line-height: 1.65; margin: 3px 0 0; overflow-wrap: anywhere; }
 .topic-fields { display: flex; flex-direction: column; height: 100%; min-width: 0; min-height: 0; margin: 0; padding: 0; border: 0; overflow: hidden; }
-.topic-list { flex: 1; min-height: 0; min-width: 0; padding: 0 5px 8px 0; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; }
-.topic-tools { position: sticky; top: 0; z-index: 1; display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; justify-content: space-between; margin: 0 0 10px; padding: 0 0 10px; background: white; font-size: 13px; color: #475569; }
-.topic-tools > .secondary { padding: 7px 10px; font-size: 12px; }
-.topic-card { border: 1px solid #dce4ed; border-radius: 7px; padding: 12px 14px; margin-bottom: 10px; background: white; }
-.topic-card:last-child { margin-bottom: 0; }
-.topic-card.focused { border-color: #dca27f; background: #fffcf8; }
-.topic-card-heading { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; font-size: 13px; color: #475569; }
-.topic-card-heading label { display: inline-flex; align-items: center; gap: 7px; flex: 1; min-width: 90px; }
-.topic-card-heading input { width: 16px; height: 16px; accent-color: #d5754b; }
-.topic-card-heading > span { color: #64748b; font-size: 12px; }
-.topic-edit-toggle { padding-block: 3px; font-size: 13px; }
-.topic-summary-title { display: block; padding: 0; margin: 9px 0 6px; width: 100%; background: none; border: 0; text-align: left; color: #1e293b; font: inherit; font-size: 15px; font-weight: 600; line-height: 1.6; overflow-wrap: anywhere; }
-.topic-summary-title:hover { color: #a9512f; }
-.topic-card-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; color: #64748b; font-size: 12px; }
-.topic-card-meta > span { flex: 1; }
-.topic-card-meta .text-button { font-size: 13px; }
-.topic-editor { border-top: 1px solid #e2e8f0; margin-top: 12px; padding-top: 1px; }
-.topic-title, .topic-summary, .topic-keywords, .topic-times label { display: block; font-size: 13px; color: #475569; min-width: 0; margin-top: 13px; }
-.topic-card input:not([type=checkbox]), .topic-card textarea { box-sizing: border-box; display: block; width: 100%; min-width: 0; border: 1px solid #cbd5e1; border-radius: 5px; background: white; padding: 9px 10px; font: inherit; font-size: 14px; color: #1e293b; margin-top: 7px; }
-.topic-card textarea { resize: vertical; line-height: 1.75; }
-.topic-card input:focus-visible, .topic-card textarea:focus-visible, .topic-summary-title:focus-visible, .topic-edit-toggle:focus-visible { outline: 2px solid #d78960; outline-offset: 3px; }
-.topic-times { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; }
-.topic-card-footer { display: flex; justify-content: flex-end; align-items: center; gap: 16px; margin-top: 14px; flex-wrap: wrap; }
-.topic-card-footer > span { margin-right: auto; font-size: 12px; color: #64748b; }
-.topic-validation { flex-shrink: 0; max-height: 62px; overflow-y: auto; margin: 0 16px 8px; color: #9a4f2e; font-size: 13px; line-height: 1.7; }
-.topic-savebar { flex-shrink: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 10px 12px; padding: 12px 16px; border-top: 1px solid #dce4ed; background: #fff; position: relative; z-index: 2; }
-.topic-savebar > div { flex: 1; min-width: 150px; }
-.topic-savebar b { font-size: 14px; font-weight: 600; color: #334155; }
-.topic-savebar small { display: block; font-size: 12px; color: #64748b; margin-top: 4px; line-height: 1.6; }
-.topic-savebar .primary, .topic-savebar .secondary { min-height: 39px; padding: 9px 13px; }
-.topic-exports-page { flex: 1; min-height: 0; overflow-y: auto; padding: 14px 16px; overscroll-behavior: contain; }
-.topic-download { display: flex; align-items: center; flex-wrap: wrap; gap: 10px 16px; margin-bottom: 14px; color: #475569; font-size: 13px; }
-.topic-download select { margin-left: 8px; font: inherit; color: #334155; }
-.topic-export-hint { color: #64748b; background: #f8fafc; padding: 10px 12px; border: 1px solid #e2e8f0; border-radius: 6px; font-size: 13px; line-height: 1.7; }
+.topic-list { flex: 1; min-height: 0; min-width: 0; padding: 0 4px 0 0; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; }
+.topic-tools { position: sticky; top: 0; z-index: 1; display: flex; align-items: center; flex-wrap: wrap; gap: 6px 10px; justify-content: space-between; margin: 0; padding: 0 2px 8px; border-bottom: 1px solid #e6e9ed; background: #fff; font-size: 12px; color: #74808f; }
+.topic-tools > .secondary { min-height: 30px; padding: 5px 8px; border-color: #e2e6eb; border-radius: 4px; font-size: 12px; }
+.topic-card { border: 0; border-left: 2px solid transparent; border-bottom: 1px solid #e8ebef; border-radius: 0; padding: 9px 8px; margin: 0; background: #fff; box-shadow: none; }
+.topic-card.focused { border-left-color: #e47650; background: #fff6f1; }
+.topic-row { display: grid; grid-template-columns: 24px minmax(0, 1fr) auto; gap: 8px; align-items: center; min-width: 0; }
+.topic-selection { display: flex; flex-direction: column; align-items: center; gap: 5px; margin: 0; color: #7c8794; font-size: 11px; line-height: 1; }
+.topic-selection input { width: 16px; height: 16px; margin: 0; accent-color: #e47650; }
+.topic-row-copy { min-width: 0; }
+.topic-summary-title { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; padding: 0; margin: 0 0 4px; width: 100%; background: none; border: 0; border-radius: 0; text-align: left; color: #182230; font: inherit; font-size: 14px; font-weight: 600; line-height: 1.5; overflow-wrap: anywhere; }
+.topic-summary-title:hover { color: #bc5834; }
+.topic-card-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 3px 10px; color: #74808f; font-size: 12px; line-height: 1.4; }
+.topic-range { white-space: nowrap; font-variant-numeric: tabular-nums; }
+.topic-review-mark { color: #9b684d; white-space: nowrap; }
+.topic-row-actions { display: flex; align-items: center; gap: 8px; }
+.topic-row-actions .text-button { padding: 4px 0; font-size: 13px; white-space: nowrap; }
+.topic-editor { border-top: 1px solid #e6e9ed; margin-top: 10px; padding-top: 1px; }
+.topic-title, .topic-summary, .topic-keywords, .topic-times label { display: block; font-size: 12px; color: #657181; min-width: 0; margin-top: 10px; }
+.topic-card input:not([type=checkbox]), .topic-card textarea { box-sizing: border-box; display: block; width: 100%; min-width: 0; border: 1px solid #dce2e8; border-radius: 4px; background: #fff; padding: 8px 9px; font: inherit; font-size: 14px; color: #182230; margin-top: 5px; }
+.topic-card textarea { resize: vertical; line-height: 1.6; }
+.topic-card input:focus-visible, .topic-card textarea:focus-visible, .topic-summary-title:focus-visible, .topic-edit-toggle:focus-visible { outline: 2px solid #e47650; outline-offset: 2px; }
+.topic-times { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 10px; }
+.topic-card-footer { display: flex; justify-content: flex-end; align-items: center; gap: 14px; margin-top: 10px; flex-wrap: wrap; }
+.topic-card-footer > span { margin-right: auto; font-size: 12px; color: #74808f; }
+.topic-validation { flex: none; max-height: 48px; overflow-y: auto; margin: 0 12px 7px; color: #a95032; font-size: 13px; line-height: 1.5; }
+.topic-savebar { flex: none; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; padding: 8px 12px; border-top: 1px solid #e6e9ed; background: #fff; position: relative; z-index: 2; }
+.topic-savebar > div { flex: 1; min-width: 140px; display: flex; flex-wrap: wrap; align-items: center; gap: 3px 10px; }
+.topic-savebar b { font-size: 14px; font-weight: 600; color: #182230; }
+.topic-savebar small { display: block; font-size: 12px; color: #74808f; margin: 0; line-height: 1.5; }
+.topic-savebar .primary, .topic-savebar .secondary { min-height: 36px; padding: 7px 11px; border-radius: 4px; font-size: 14px; }
+.topic-savebar .primary { background: #e47650; }
+.topic-exports-page { flex: 1; min-height: 0; overflow-y: auto; padding: 12px; overscroll-behavior: contain; }
+.topic-download { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 14px; margin-bottom: 12px; color: #657181; font-size: 13px; }
+.topic-download select { margin-left: 8px; font: inherit; color: #182230; }
+.topic-export-hint { color: #657181; background: #fafbfc; padding: 8px 10px; border: 1px solid #e6e9ed; border-radius: 4px; font-size: 13px; line-height: 1.6; }
 .topic-exports-page :deep(.exports) { margin: 0; }
-@media(min-width:801px) and (max-height:800px) {
-  .topic-player video { max-height: clamp(100px, calc(100dvh - 520px), 190px); }
-  .topic-preview-hint { display: none; }
-}
-@media(max-width:800px) {
-  .topic-review { height: auto; min-height: 100%; overflow: visible; }
-  .topic-edit-page, .topic-review-main, .topic-fields { display: block; height: auto; min-height: 0; overflow: visible; }
-  .topic-review-main { padding: 12px 14px; }
-  .topic-media-column { overflow: visible; }
-  .topic-player { width: min(100%, 520px); margin: 0 auto; }
-  .topic-player video { max-height: 190px; }
-  .topic-evidence { flex: none; height: auto; margin-bottom: 16px; overflow: visible; }
-  .topic-evidence-body { position: static; inset: auto; height: auto; max-height: 240px; }
-  .topic-list { padding: 0; max-height: none; overflow: visible; }
-  .topic-tools { padding-top: 10px; }
-  .topic-savebar { position: sticky; bottom: 0; box-shadow: 0 -5px 16px #0f172a0a; }
-  .topic-exports-page { flex: none; min-height: 0; overflow: visible; padding: 12px 14px; }
+@container topic-review (max-width:900px) {
   .topic-version-count { display: none; }
+  .topic-review-meta .status { display: none; }
 }
-@media(max-width:450px) {
-  .topic-review > .panel-heading { padding: 12px 14px; }
-  .panel-heading h2 > span { display: block; margin: 5px 0 0; }
-  .topic-view-switch { gap: 17px; padding-inline: 14px; }
-  .topic-card { padding: 12px; }
-  .topic-card-heading > span { display: none; }
+@container topic-review (max-width:740px) {
+  .topic-review-main { display: flex; flex-direction: column; overflow-y: auto; gap: 14px; }
+  .topic-media-column { flex: none; overflow: visible; }
+  .topic-player { flex: none; height: auto; aspect-ratio: 16 / 9; max-height: 250px; }
+  .topic-evidence { flex: none; height: 210px; }
+  .topic-evidence:not([open]) { flex: none; height: 34px; }
+  .topic-fields { flex: none; height: auto; overflow: visible; }
+  .topic-list { flex: none; overflow: visible; padding: 0; }
+  .topic-tools { position: static; }
+  .topic-savebar > div { display: block; }
+  .topic-savebar small { margin-top: 2px; }
+}
+@container topic-review (max-width:520px) {
+  .topic-toolbar { padding: 0 10px 5px; gap: 0 8px; }
+  .topic-view-switch { flex-basis: 100%; gap: 18px; }
+  .topic-review-meta { min-height: 25px; width: 100%; justify-content: space-between; }
+  .topic-review-meta .status { display: inline; margin-right: auto; }
+  .topic-review-main { padding: 10px; }
+  .topic-player { max-height: 210px; }
+  .topic-row { grid-template-columns: 22px minmax(0, 1fr); gap: 5px 7px; }
+  .topic-selection { align-self: start; padding-top: 3px; }
+  .topic-row-actions { grid-column: 2; justify-self: end; gap: 14px; }
   .topic-times { grid-template-columns: 1fr; gap: 0; }
-  .topic-savebar { padding: 12px 14px; }
+  .topic-savebar { padding: 8px 10px; }
   .topic-savebar > div { flex-basis: 100%; }
-  .topic-savebar .primary, .topic-savebar .secondary { flex: 1; }
+  .topic-savebar .primary, .topic-savebar .secondary { flex: 1; min-width: 0; }
+  .topic-exports-page { padding: 10px; }
 }
 </style>

@@ -13,6 +13,7 @@ import { DEFAULT_OCR_MAX_FRAMES, newAnalysisConfig, samplingLabel } from './samp
 import { SnapshotError, SnapshotStream, isAnalysisTerminal, parseAnalysisSnapshot, streamLabels, type StreamMode } from './snapshotStream'
 import { analysisCanResume, analysisResumeReceipt, analysisRetryExplanation, newestAnalysisSnapshot, parseResumedAnalysisSnapshot, type AnalysisResumeReceipt } from './analysisResume'
 import { DetailRecovery, isConnectionErrorCode } from './connectionRecovery'
+import { workbenchTasks, type TaskListScope } from './workbenchTasks'
 import './style.css'
 import './workbench.css'
 
@@ -30,7 +31,9 @@ const intentEditor = ref<{ dirty: boolean; pending: boolean; prefillInstruction(
 const agentEditor = ref<{ dirty: boolean; pending: boolean } | null>(null)
 type WorkbenchTab = 'agent' | 'topics' | 'clips' | 'task'
 const activeTab = ref<WorkbenchTab>('task'), mobileTasksOpen = ref(false)
-const compactLayout = ref(window.matchMedia('(max-width: 1100px)').matches), sidebarCollapsed = ref(false)
+const compactLayout = ref(window.matchMedia('(max-width: 1100px)').matches)
+const sidebarCollapsed = ref(new URL(location.href).searchParams.has('job'))
+const taskListScope = ref<TaskListScope>('recent')
 const taskListExpanded = computed(() => compactLayout.value ? mobileTasksOpen.value : !sidebarCollapsed.value)
 const compactQuery = window.matchMedia('(max-width: 1100px)')
 function updateCompactLayout() {
@@ -39,6 +42,9 @@ function updateCompactLayout() {
   if (focusInTasks && (compactLayout.value || sidebarCollapsed.value)) void nextTick(() => document.getElementById('workbench-task-toggle')?.focus())
 }
 function toggleTasks() {
+  // A bookmarked historical analysis should still be visible when opening its library.
+  if (!taskListExpanded.value && selectedJob.value && !query.value.trim() && taskListScope.value === 'recent'
+      && !workbenchTasks(jobs.value, 'recent', '', 'ALL', videoName).some(job => job.id === selectedJob.value?.id)) taskListScope.value = 'all'
   if (compactLayout.value) {
     mobileTasksOpen.value = !mobileTasksOpen.value
     if (mobileTasksOpen.value) void nextTick(() => document.getElementById('workbench-task-close')?.focus())
@@ -84,7 +90,7 @@ const stageOrder = ['MEDIA', 'ASR', 'SEGMENT', 'TIMELINE']
 const orderedStages = computed(() => [...(selectedJob.value?.stages ?? [])].sort((a, b) => stageOrder.indexOf(a.stage_type) - stageOrder.indexOf(b.stage_type)))
 const activeCount = computed(() => jobs.value.filter(j => ['QUEUED', 'RUNNING'].includes(j.status)).length)
 const reviewCount = computed(() => jobs.value.filter(j => j.status === 'REVIEW_READY').length)
-const visibleJobs = computed(() => jobs.value.filter(j => `${videoName(j.video_id)} ${j.id}`.toLowerCase().includes(query.value.toLowerCase()) && (filter.value === 'ALL' || j.status === filter.value)))
+const visibleJobs = computed(() => workbenchTasks(jobs.value, taskListScope.value, query.value, filter.value, videoName))
 const currentVideo = computed(() => videos.value.find(v => v.id === (selectedJob.value?.video_id || selectedVideoId.value)))
 const topicMode = computed(() => selectedJob.value?.config?.analysis_mode === 'topics')
 const completeCount = computed(() => selectedJob.value?.stages.filter(s => ['SUCCEEDED', 'SKIPPED'].includes(s.status)).length ?? 0)
@@ -396,22 +402,24 @@ onUnmounted(() => { stopped = true; compactQuery.removeEventListener('change', u
       <div class="sidebar-actions"><button class="primary" :disabled="!!pending" @click="chooseUpload">＋ 上传视频</button><button class="secondary" :disabled="!!pending" @click="openNewAnalysis">新建分析</button></div>
       <div class="sidebar-heading"><h2>视频与任务 <span>{{ jobs.length }}</span></h2><button class="text-button" :disabled="loading" aria-label="刷新任务列表" @click="refresh">↻</button></div>
       <div class="sidebar-counts"><span>分析中 {{ activeCount }}</span><span>待审核 {{ reviewCount }}</span></div>
+      <div class="task-scope" role="group" aria-label="任务列表范围"><button :aria-pressed="taskListScope === 'recent'" @click="taskListScope = 'recent'">最近视频</button><button :aria-pressed="taskListScope === 'all'" @click="taskListScope = 'all'">全部分析 <span>{{ jobs.length }}</span></button></div>
       <label class="search sidebar-search"><span aria-hidden="true">⌕</span><input id="task-search" v-model="query" placeholder="搜索视频或任务" aria-label="搜索任务"></label>
       <select v-model="filter" class="sidebar-filter" aria-label="筛选任务状态"><option value="ALL">全部状态</option><option value="RUNNING">正在分析</option><option value="QUEUED">等待执行</option><option value="REVIEW_READY">待人工审核</option><option value="FAILED">执行失败</option><option value="CANCELLED">已取消</option></select>
+      <p class="task-list-caption">{{ query.trim() ? '搜索覆盖全部历史分析' : taskListScope === 'recent' ? '每个视频只显示最近一次分析' : '保留每一次分析与处理结果' }}</p>
       <div v-if="loading" class="sidebar-empty">正在读取任务…</div>
       <div v-else-if="!visibleJobs.length" class="sidebar-empty">{{ jobs.length ? '没有匹配的任务' : '上传第一段视频，开始整理。' }}</div>
       <div v-else class="task-list" aria-label="分析任务列表"><button v-for="job in visibleJobs" :key="job.id" class="task-row" :class="{ active: selectedJob?.id === job.id }" :aria-current="selectedJob?.id === job.id ? 'true' : undefined" :disabled="!!pending" @click="openTask(job.id)"><span class="video-tile" aria-hidden="true">▷</span><span class="task-info"><strong :title="videoName(job.video_id)">{{ videoName(job.video_id) }}</strong><span>第 {{ job.generation }} 次分析 · {{ date(job.created_at) }}</span><span class="task-row-bottom"><span class="status" :class="job.status.toLowerCase()">{{ names[job.status] ?? job.status }}</span><small>#{{ job.id.slice(0, 8) }}</small></span></span></button></div>
       <div class="sidebar-footer"><span class="small-dot"></span>本地工作区 <span>{{ videos.length }} 个视频素材</span></div>
     </aside>
     <main class="workbench-main" :inert="compactLayout && mobileTasksOpen ? true : undefined">
-      <header class="workbench-header"><button id="workbench-task-toggle" class="mobile-task-toggle secondary" :aria-label="taskListExpanded ? '收起任务列表' : '打开任务列表'" :title="taskListExpanded ? '收起任务列表' : '打开任务列表'" :aria-expanded="taskListExpanded" aria-controls="workbench-tasks" @click="toggleTasks"><svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16M13 9h4M13 13h4"/></svg></button><div class="current-video"><span class="workspace-kicker">视频工作台</span><h1 :title="selectedJob ? videoName(selectedJob.video_id) : ''">{{ selectedJob ? videoName(selectedJob.video_id) : '新建视频分析' }}</h1><p v-if="selectedJob">第 {{ selectedJob.generation }} 次分析 <span>·</span> {{ completeCount }}/{{ selectedJob.stages.length }} 阶段完成 <span>·</span> #{{ selectedJob.id.slice(0, 8) }}</p><p v-else>上传或选择视频，创建一次新的分析。</p></div><div class="header-state"><span v-if="selectedJob" class="status" :class="selectedJob.status.toLowerCase()">{{ names[selectedJob.status] ?? selectedJob.status }}</span><span class="connection"><i :class="{ online }"></i>{{ online ? '服务已连接' : '服务未连接' }}</span></div></header>
+      <header class="workbench-header"><button id="workbench-task-toggle" class="mobile-task-toggle secondary" :aria-label="taskListExpanded ? '收起任务列表' : '打开任务列表'" :title="taskListExpanded ? '收起任务列表' : '打开任务列表'" :aria-expanded="taskListExpanded" aria-controls="workbench-tasks" @click="toggleTasks"><svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16M13 9h4M13 13h4"/></svg><span>任务列表</span></button><span class="header-divider" aria-hidden="true"></span><div class="current-video"><span class="workspace-kicker">视频工作台</span><h1 :title="selectedJob ? videoName(selectedJob.video_id) : ''">{{ selectedJob ? videoName(selectedJob.video_id) : '新建视频分析' }}</h1><p v-if="selectedJob">第 {{ selectedJob.generation }} 次分析 <span>·</span> {{ completeCount }}/{{ selectedJob.stages.length }} 阶段完成 <span>·</span> #{{ selectedJob.id.slice(0, 8) }}</p><p v-else>上传或选择视频，创建一次新的分析。</p></div><div class="header-state"><span v-if="selectedJob" class="status" :class="selectedJob.status.toLowerCase()">{{ names[selectedJob.status] ?? selectedJob.status }}</span><span class="connection"><i :class="{ online }"></i>{{ online ? '服务已连接' : '服务未连接' }}</span><button class="header-upload secondary" :disabled="!!pending" @click="chooseUpload">＋ 上传视频</button></div></header>
       <div class="workspace-messages"><div v-if="errorMessage || connectionError" class="message error" role="alert"><span>{{ errorMessage || connectionError }}</span><button aria-label="关闭错误提示" @click="dismissErrors">×</button></div><div v-if="notice" class="message notice" role="status"><span>{{ notice }}</span><button aria-label="关闭操作提示" @click="notice = ''">×</button></div></div>
       <div class="upload-host"><UploadPanel ref="uploadPanel" :can-start="canStartUpload" @busy="uploadBusy" @started="uploadStarted" @complete="uploaded" /></div>
       <div class="workspace-tabs" role="tablist" aria-label="视频工作区" @keydown="tabKey">
         <button id="workbench-tab-agent" role="tab" aria-controls="workbench-pane-agent" :aria-selected="activeTab === 'agent'" :tabindex="activeTab === 'agent' ? 0 : -1" :disabled="!topicResultsAvailable" @click="setTab('agent')">视频对话<span v-if="agentEditor?.dirty" class="draft-dot" aria-label="有未提交输入"></span></button>
         <button id="workbench-tab-topics" role="tab" aria-controls="workbench-pane-topics" :aria-selected="activeTab === 'topics'" :tabindex="activeTab === 'topics' ? 0 : -1" :disabled="!resultsAvailable" @click="setTab('topics')">{{ selectedJob && !topicMode ? '片段审核' : '话题切分' }}<span v-if="reviewEditor?.dirty" class="draft-dot" aria-label="有未保存修改"></span></button>
         <button id="workbench-tab-clips" role="tab" aria-controls="workbench-pane-clips" :aria-selected="activeTab === 'clips'" :tabindex="activeTab === 'clips' ? 0 : -1" :disabled="!topicResultsAvailable" @click="setTab('clips')">按需剪辑<span v-if="intentEditor?.dirty" class="draft-dot" aria-label="有未提交修改"></span></button>
-        <button id="workbench-tab-task" role="tab" aria-controls="workbench-pane-task" :aria-selected="activeTab === 'task'" :tabindex="activeTab === 'task' ? 0 : -1" @click="setTab('task')">{{ selectedJob ? '任务设置' : '创建分析' }}</button>
+        <button id="workbench-tab-task" role="tab" aria-controls="workbench-pane-task" :aria-selected="activeTab === 'task'" :tabindex="activeTab === 'task' ? 0 : -1" @click="setTab('task')">{{ selectedJob ? '任务详情' : '创建分析' }}</button>
       </div>
       <div class="workbench-content">
         <div id="workbench-pane-agent" v-show="activeTab === 'agent'" class="workbench-pane conversation-pane" role="tabpanel" aria-labelledby="workbench-tab-agent">
