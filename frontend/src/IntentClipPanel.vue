@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { api, ApiError, post, type ExportJob } from './api'
 import FailureDiagnostic from './FailureDiagnostic.vue'
 import TextRequestProgress from './TextRequestProgress.vue'
@@ -10,15 +10,16 @@ import { editIntentBoundary, intentCanCancel, intentCanConfirm, intentCanExport,
   IntentReadScope, IntentResponseError, newestIntentSnapshot, parseIntentSnapshot, refreshIntentEvidence,
   parseResumedIntentSnapshot, type IntentOutput, type IntentPart, type IntentResumeReceipt, type IntentSnapshot } from './intentClips'
 
-const props = defineProps<{ jobId: string; videoUrl: string }>()
+const props = defineProps<{ jobId: string; videoUrl: string; active?: boolean }>()
 const instruction = ref(''), maxCalls = ref(6), requests = ref<IntentSnapshot[]>([])
 const selectedId = ref(''), snapshot = ref<IntentSnapshot | null>(null), outputs = ref<IntentOutput[]>([])
 const baseline = ref(''), draftRevision = ref<number | null>(null), action = ref('')
 const error = ref(''), refreshError = ref(''), notice = ref(''), loading = ref(true)
 const batches = ref<ExportJob[]>([]), previewUrl = ref(''), sourcePlayer = ref<HTMLVideoElement | null>(null)
 const instructionInput = ref<HTMLTextAreaElement | null>(null)
+const exportPlayer = ref<HTMLVideoElement | null>(null)
 const scope = new IntentReadScope()
-let stopped = false, refreshing = false, timer: number | undefined, selectionVersion = 0
+let stopped = false, refreshing = false, timer: number | undefined, selectionVersion = 0, focusVersion = 0
 let pendingCreate: { input: string; key: string } | null = null
 const pendingResumes = new Map<string, IntentResumeReceipt>()
 const pending = computed(() => !!action.value)
@@ -40,7 +41,8 @@ defineExpose({ dirty, pending, prefillInstruction })
 function prefillInstruction(value: string): boolean {
   if (!canPrefillClipInstruction(value, dirty.value, pending.value)) return false
   instruction.value = value.trim(); error.value = ''; notice.value = '已填入视频助手的建议。请核对要求，再点击查找片段。'
-  instructionInput.value?.focus()
+  const version = ++focusVersion
+  void nextTick(() => { if (!stopped && props.active !== false && version === focusVersion) instructionInput.value?.focus() })
   return true
 }
 
@@ -272,8 +274,11 @@ function goal(output: IntentOutput) { return snapshot.value?.plan?.goals.find(va
 function duration(output: IntentOutput) { return output.parts.reduce((sum, part) => sum + Math.max(0, part.end_ms - part.start_ms), 0) }
 function date(value: string) { return new Date(value).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) }
 function unload(event: BeforeUnloadEvent) { if (dirty.value || pending.value) { event.preventDefault(); event.returnValue = '' } }
+function pauseMedia() { sourcePlayer.value?.pause(); exportPlayer.value?.pause() }
+function guardPlayback(event: Event) { if (props.active === false || stopped) (event.currentTarget as HTMLVideoElement).pause() }
+watch(() => props.active, value => { if (value === false) { focusVersion++; pauseMedia() } })
 onMounted(() => { window.addEventListener('beforeunload', unload); void poll() })
-onBeforeUnmount(() => { stopped = true; selectionVersion++; scope.dispose(); window.clearTimeout(timer); window.removeEventListener('beforeunload', unload) })
+onBeforeUnmount(() => { stopped = true; selectionVersion++; focusVersion++; pauseMedia(); scope.dispose(); window.clearTimeout(timer); window.removeEventListener('beforeunload', unload) })
 </script>
 
 <template>
@@ -307,7 +312,7 @@ onBeforeUnmount(() => { stopped = true; selectionVersion++; scope.dispose(); win
         <FailureDiagnostic v-if="snapshot.status !== 'CANCELLED'" :error-code="snapshot.stage.error_code" :attempt="snapshot.stage.attempt" />
         <p v-if="!snapshot.plan" class="intent-empty">{{ snapshot.status === 'FAILED' ? '本次查找未完成。请查看执行原因，原视频和原话题结果仍保留。' : snapshot.status === 'CANCELLED' ? '本次请求已取消。' : snapshot.status === 'RUNNING' ? '正在查找候选片段，执行进度会自动更新。你可以继续回看原视频。' : '正在等待执行服务生成候选方案。你可以继续回看原视频。' }}</p>
         <template v-else>
-          <video ref="sourcePlayer" :src="videoUrl" controls preload="metadata" playsinline class="intent-source"></video>
+          <video ref="sourcePlayer" :src="videoUrl" controls preload="metadata" playsinline class="intent-source" @play="guardPlayback"></video>
           <p class="help">点击原句可定位源视频；确认后的成片会按所列区间顺序拼接。</p>
           <p v-if="unresolved" class="intent-warning">有 {{ unresolved }} 个目标未找到充分证据，不能勾选导出。你可以只确认已经核对的目标，或另建更明确的请求。</p>
           <datalist :id="`intent-utterances-${jobId}`"><option v-for="utterance in snapshot.utterances" :key="utterance.utterance_id" :value="utterance.utterance_id">{{ topicTime(utterance.start_ms) }} {{ utterance.text.slice(0, 60) }}</option></datalist>
@@ -331,7 +336,7 @@ onBeforeUnmount(() => { stopped = true; selectionVersion++; scope.dispose(); win
         </template>
       </div>
     </div>
-    <div v-if="batches.length" class="intent-exports"><h3>按需求剪辑成片</h3><p class="help">每个文件对应一个已确认目标。后续编辑不会改变已有导出批次。</p><article v-for="batch in batches" :key="batch.id" class="intent-batch"><p>确认版本 r{{ batch.approved_revision }} · {{ names[batch.status] ?? batch.status }} · {{ date(batch.created_at) }}</p><div v-for="clip in batch.clips" :key="clip.id" class="intent-export-clip"><strong>{{ clip.title ?? '剪辑视频' }}</strong><span>{{ names[clip.status] ?? clip.status }}</span><FailureDiagnostic :diagnostic="clip.diagnostic" :error-code="clip.error_code" :attempt="clip.attempt" /><div v-if="clip.status === 'SUCCEEDED'" class="actions"><button class="text-button" @click="previewUrl = clip.content_url ?? ''">预览成片</button><a class="text-button" :href="clip.download_url ?? undefined" download>下载 MP4</a></div></div></article><video v-if="previewUrl" :key="previewUrl" :src="previewUrl" controls preload="metadata" playsinline class="intent-source"></video></div>
+    <div v-if="batches.length" class="intent-exports"><h3>按需求剪辑成片</h3><p class="help">每个文件对应一个已确认目标。后续编辑不会改变已有导出批次。</p><article v-for="batch in batches" :key="batch.id" class="intent-batch"><p>确认版本 r{{ batch.approved_revision }} · {{ names[batch.status] ?? batch.status }} · {{ date(batch.created_at) }}</p><div v-for="clip in batch.clips" :key="clip.id" class="intent-export-clip"><strong>{{ clip.title ?? '剪辑视频' }}</strong><span>{{ names[clip.status] ?? clip.status }}</span><FailureDiagnostic :diagnostic="clip.diagnostic" :error-code="clip.error_code" :attempt="clip.attempt" /><div v-if="clip.status === 'SUCCEEDED'" class="actions"><button class="text-button" @click="previewUrl = clip.content_url ?? ''">预览成片</button><a class="text-button" :href="clip.download_url ?? undefined" download>下载 MP4</a></div></div></article><video v-if="previewUrl" ref="exportPlayer" :key="previewUrl" :src="previewUrl" controls preload="metadata" playsinline class="intent-source" @play="guardPlayback"></video></div>
   </section>
 </template>
 
@@ -375,4 +380,29 @@ h3 { color: #52634b; font-size: 13px; } h3 > span { font-size: 10px; font-weight
 .intent-exports { margin-top: 24px; border-top: 1px solid #e6ebdf; padding-top: 20px; }.intent-batch { border: 1px solid #e5e9de; border-radius: 6px; margin-top: 12px; padding: 14px; font-size: 11px; color: #8a957e; }.intent-export-clip { padding: 12px 0; border-top: 1px solid #edf0e7; margin-top: 12px; display: flex; flex-wrap: wrap; gap: 8px 18px; align-items: center; }.intent-export-clip strong { color: #5e6f52; overflow-wrap: anywhere; }.intent-export-clip .actions { margin-left: auto; }
 @media (max-width: 850px) { .intent-workspace { grid-template-columns: minmax(0, 1fr); }.intent-requests { border-bottom: 1px solid #e6ebdf; padding-bottom: 12px; }.intent-panel { padding: 18px; } }
 @media (max-width: 420px) { .intent-boundaries { grid-template-columns: minmax(0, 1fr); }.intent-output { padding: 12px; }.intent-create-row > button { width: 100%; }.intent-save-row .actions { width: 100%; }.intent-save-row .actions > button { flex: 1; min-width: 110px; } }
+.workbench-shell .intent-panel { margin: 0; padding: 20px 24px; border: 0; border-radius: 0; color: #1f2937; font-size: 14px; }
+.workbench-shell .intent-panel h2 { color: #1f2937; font-size: 20px; }
+.workbench-shell .intent-panel h3 { color: #334155; font-size: 16px; }
+.workbench-shell .intent-panel .eyebrow { color: #64748b; font-size: 11px; }
+.workbench-shell .intent-panel .help, .workbench-shell .intent-intro, .workbench-shell .intent-original, .workbench-shell .intent-reason { color: #64748b; font-size: 13px; line-height: 1.75; }
+.workbench-shell .intent-compose { background: #f8fafc; border-color: #e2e8f0; padding: 16px; }
+.workbench-shell .intent-compose > label, .workbench-shell .intent-title-label, .workbench-shell .intent-boundaries label { color: #475569; font-size: 13px; }
+.workbench-shell .intent-panel textarea, .workbench-shell .intent-panel input:not([type=checkbox]), .workbench-shell .intent-panel select { border-color: #cbd5e1; color: #1f2937; font-size: 14px; }
+.workbench-shell .intent-create-row, .workbench-shell .intent-part-label, .workbench-shell .intent-save-row { color: #64748b; font-size: 12px; }
+.workbench-shell .intent-workspace { grid-template-columns: 220px minmax(0, 1fr); gap: 24px; }
+.workbench-shell .intent-request { border-color: #e2e8f0; padding: 12px; }
+.workbench-shell .intent-request.selected { border-color: #efc7b7; background: #fff5ef; }
+.workbench-shell .intent-request strong { color: #334155; font-size: 13px; }
+.workbench-shell .intent-request > span { color: #64748b; font-size: 12px; }
+.workbench-shell .intent-output { border-color: #e2e8f0; background: white; }
+.workbench-shell .intent-output-heading { color: #64748b; font-size: 13px; }
+.workbench-shell .intent-output-heading label { color: #1f2937; }
+.workbench-shell .intent-quote, .workbench-shell .intent-evidence, .workbench-shell .intent-evidence > button { color: #475569; font-size: 13px; }
+.workbench-shell .intent-evidence > button { background: #f8fafc; }
+.workbench-shell .intent-evidence > button > span { color: #64748b; font-size: 12px; }
+.workbench-shell .intent-batch, .workbench-shell .intent-exports { border-color: #e2e8f0; color: #64748b; font-size: 13px; }
+.workbench-shell .intent-export-clip strong { color: #334155; font-size: 14px; }
+.workbench-shell .intent-panel :deep(.text-recovery) { color: #475569; background: #f8fafc; border-color: #cbd5e1; }
+@media(max-width: 900px) { .workbench-shell .intent-workspace { grid-template-columns: minmax(0, 1fr); } }
+@media(max-width: 650px) { .workbench-shell .intent-panel { padding: 16px; } .workbench-shell .intent-panel h2 { font-size: 18px; } }
 </style>

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { api, ApiError, post, type AnalysisJob, type Page, type VideoAsset } from './api'
 import ReviewPanel from './ReviewPanel.vue'
 import TopicReviewPanel from './TopicReviewPanel.vue'
@@ -14,6 +14,7 @@ import { SnapshotError, SnapshotStream, isAnalysisTerminal, parseAnalysisSnapsho
 import { analysisCanResume, analysisResumeReceipt, analysisRetryExplanation, newestAnalysisSnapshot, parseResumedAnalysisSnapshot, type AnalysisResumeReceipt } from './analysisResume'
 import { DetailRecovery, isConnectionErrorCode } from './connectionRecovery'
 import './style.css'
+import './workbench.css'
 
 const videos = ref<VideoAsset[]>([]), jobs = ref<AnalysisJob[]>([])
 const selectedVideoId = ref(''), selectedJob = ref<AnalysisJob | null>(null)
@@ -27,6 +28,9 @@ const uploadPanel = ref<{ chooseFile: () => void } | null>(null)
 const reviewEditor = ref<{ dirty: boolean; pending: boolean } | null>(null)
 const intentEditor = ref<{ dirty: boolean; pending: boolean; prefillInstruction(value: string): boolean } | null>(null)
 const agentEditor = ref<{ dirty: boolean; pending: boolean } | null>(null)
+type WorkbenchTab = 'agent' | 'topics' | 'clips' | 'task'
+const activeTab = ref<WorkbenchTab>('task'), mobileTasksOpen = ref(false)
+const taskPreview = ref<HTMLVideoElement | null>(null)
 const editorsDirty = computed(() => !!reviewEditor.value?.dirty || !!intentEditor.value?.dirty || !!agentEditor.value?.dirty)
 const editorsPending = computed(() => !!reviewEditor.value?.pending || !!intentEditor.value?.pending || !!agentEditor.value?.pending)
 const canResumeFromAsr = computed(() => analysisCanResume(selectedJob.value, editorsDirty.value, !!pending.value || editorsPending.value))
@@ -62,6 +66,37 @@ const currentVideo = computed(() => videos.value.find(v => v.id === (selectedJob
 const topicMode = computed(() => selectedJob.value?.config?.analysis_mode === 'topics')
 const completeCount = computed(() => selectedJob.value?.stages.filter(s => ['SUCCEEDED', 'SKIPPED'].includes(s.status)).length ?? 0)
 const retryExplanation = computed(() => analysisRetryExplanation(selectedJob.value))
+const resultsAvailable = computed(() => selectedJob.value?.status === 'REVIEW_READY' && !!currentVideo.value)
+const topicResultsAvailable = computed(() => resultsAvailable.value && topicMode.value)
+watch(() => selectedJob.value?.id, (id, previous) => {
+  if (id === previous) return
+  activeTab.value = id && selectedJob.value?.status === 'REVIEW_READY' ? topicMode.value ? 'agent' : 'topics' : 'task'
+  mobileTasksOpen.value = false
+})
+watch(activeTab, value => { if (value !== 'task') taskPreview.value?.pause() }, { flush: 'sync' })
+function setTab(tab: WorkbenchTab) {
+  if ((tab === 'agent' || tab === 'clips') && !topicResultsAvailable.value) return
+  if (tab === 'topics' && !resultsAvailable.value) return
+  activeTab.value = tab
+}
+function tabKey(event: KeyboardEvent) {
+  if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return
+  const tabs: WorkbenchTab[] = topicResultsAvailable.value ? ['agent', 'topics', 'clips', 'task'] : resultsAvailable.value ? ['topics', 'task'] : ['task']
+  event.preventDefault()
+  const index = tabs.indexOf(activeTab.value)
+  const next = event.key === 'Home' ? tabs[0]! : event.key === 'End' ? tabs.at(-1)! : tabs[(index + (event.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length]!
+  setTab(next)
+  void nextTick(() => document.getElementById(`workbench-tab-${next}`)?.focus())
+}
+function openNewAnalysis() {
+  selectVideo()
+  if (!selectedJob.value) { activeTab.value = 'task'; mobileTasksOpen.value = false }
+}
+function closeTasks() {
+  if (!mobileTasksOpen.value) return
+  mobileTasksOpen.value = false
+  void nextTick(() => document.getElementById('workbench-task-toggle')?.focus())
+}
 function latestSnapshot(incoming: AnalysisJob) {
   const candidates = [selectedJob.value, jobs.value.find(job => job.id === incoming.id)]
   // Equal versions remain refreshable: a Java restart may change the current
@@ -116,7 +151,8 @@ function connectionFailure(error: unknown) { return error instanceof ApiError &&
 function dismissErrors() { errorMessage.value = ''; listConnectionError.value = ''; detailConnectionError.value = '' }
 function useAgentClipInstruction(value: string) {
   if (!intentEditor.value?.prefillInstruction(value)) { errorMessage.value = '剪辑区域有未提交内容或正在提交，请先处理后再填入助手建议。'; return }
-  notice.value = '剪辑要求已填入。请在按需求找片段区域核对并提交。'
+  activeTab.value = 'clips'
+  notice.value = '剪辑要求已填入，请核对后点击“查找片段”。'
 }
 async function loadDetail(id: string, background = false, allowPending = false) {
   if (stopped || !canSelect(id, allowPending)) return
@@ -317,39 +353,43 @@ onUnmounted(() => { stopped = true; detailRecovery.cancel(); selectionVersion++;
 </script>
 
 <template>
-  <div class="workspace">
-    <aside class="rail">
-      <a class="brand" href="/" aria-label="LiveCut AI 首页"><span class="brand-mark">L<span>✦</span></span><strong>LiveCut<span>AI</span></strong></a>
-      <div class="rail-label">创作工作区</div>
-      <a class="nav-item selected" href="#tasks"><span>▦</span> 视频与任务 <b>{{ jobs.length }}</b></a>
-      <div class="rail-note"><span class="small-dot"></span> 本地开发环境<p>语音转写 · 话题解析 · 人工切分</p></div>
-      <div class="rail-bottom">长视频，按话题整理。<br><span>LiveCut AI / 开发预览</span></div>
+  <div class="workbench-shell" @keydown.esc="closeTasks">
+    <button v-if="mobileTasksOpen" class="task-backdrop" aria-label="关闭任务列表" @click="closeTasks"></button>
+    <aside id="workbench-tasks" class="workbench-sidebar" :class="{ open: mobileTasksOpen }" aria-label="视频与分析任务">
+      <a class="brand" href="/" aria-label="LiveCut AI 首页" @click.prevent="openNewAnalysis"><span class="brand-mark">L<span>✦</span></span><strong>LiveCut<span>AI</span></strong></a>
+      <button class="mobile-sidebar-close" aria-label="收起任务列表" @click="closeTasks">×</button>
+      <div class="sidebar-actions"><button class="primary" :disabled="!!pending" @click="uploadPanel?.chooseFile()">＋ 上传视频</button><button class="secondary" :disabled="!!pending" @click="openNewAnalysis">新建分析</button></div>
+      <div class="sidebar-heading"><h2>视频与任务 <span>{{ jobs.length }}</span></h2><button class="text-button" :disabled="loading" aria-label="刷新任务列表" @click="refresh">↻</button></div>
+      <div class="sidebar-counts"><span>分析中 {{ activeCount }}</span><span>待审核 {{ reviewCount }}</span></div>
+      <label class="search sidebar-search"><span aria-hidden="true">⌕</span><input id="task-search" v-model="query" placeholder="搜索视频或任务" aria-label="搜索任务"></label>
+      <select v-model="filter" class="sidebar-filter" aria-label="筛选任务状态"><option value="ALL">全部状态</option><option value="RUNNING">正在分析</option><option value="QUEUED">等待执行</option><option value="REVIEW_READY">待人工审核</option><option value="FAILED">执行失败</option><option value="CANCELLED">已取消</option></select>
+      <div v-if="loading" class="sidebar-empty">正在读取任务…</div>
+      <div v-else-if="!visibleJobs.length" class="sidebar-empty">{{ jobs.length ? '没有匹配的任务' : '上传第一段视频，开始整理。' }}</div>
+      <div v-else class="task-list" aria-label="分析任务列表"><button v-for="job in visibleJobs" :key="job.id" class="task-row" :class="{ active: selectedJob?.id === job.id }" :aria-current="selectedJob?.id === job.id ? 'true' : undefined" :disabled="!!pending" @click="loadDetail(job.id)"><span class="video-tile" aria-hidden="true">▷</span><span class="task-info"><strong :title="videoName(job.video_id)">{{ videoName(job.video_id) }}</strong><span>第 {{ job.generation }} 次分析 · {{ date(job.created_at) }}</span><span class="task-row-bottom"><span class="status" :class="job.status.toLowerCase()">{{ names[job.status] ?? job.status }}</span><small>#{{ job.id.slice(0, 8) }}</small></span></span></button></div>
+      <div class="sidebar-footer"><span class="small-dot"></span>本地工作区 <span>{{ videos.length }} 个视频素材</span></div>
     </aside>
-    <main>
-      <header class="topbar"><span>工作区 <span class="slash">/</span> 视频与任务</span><span class="connection"><i :class="{ online }"></i>{{ online ? '服务已连接' : '服务未连接' }}</span></header>
-      <div class="page">
-        <section class="page-title"><div><div class="eyebrow">VIDEO WORKSPACE</div><h1>把长视频，整理成话题片段<span>。</span></h1><p>上传视频，AI 识别讨论内容与时间段，由你选择、调整并切分。</p></div><button class="primary upload-button" :disabled="!!pending" @click="uploadPanel?.chooseFile()"><span>＋</span>{{ pending === 'upload' ? '正在上传…' : '上传视频' }}</button></section>
-        <div v-if="errorMessage || connectionError" class="message error" role="alert"><span>{{ errorMessage || connectionError }}</span><button aria-label="关闭错误提示" @click="dismissErrors">×</button></div>
-        <div v-if="notice" class="message notice" role="status"><span>{{ notice }}</span><button aria-label="关闭操作提示" @click="notice = ''">×</button></div>
-        <UploadPanel ref="uploadPanel" :can-start="canStartUpload" @busy="uploadBusy" @started="uploadStarted" @complete="uploaded" />
-        <section class="overview" aria-label="当前加载任务统计">
-          <div><span>视频素材</span><strong>{{ videos.length.toString().padStart(2, '0') }}</strong><small>本地来源已留档</small></div>
-          <div><span>分析进行中</span><strong>{{ activeCount.toString().padStart(2, '0') }}<i class="orange-dot"></i></strong><small>等待执行或正在处理</small></div>
-          <div><span>待人工审核</span><strong>{{ reviewCount.toString().padStart(2, '0') }}</strong><small>自动结果尚未确认</small></div>
-          <div class="workflow-note"><span class="workflow-icon">↗</span><p><b>先定位，再审核</b><br>自动识别保留为草稿<br>正式导出由审核版本决定</p></div>
-        </section>
-        <ExecutorStatus :key="selectedJob?.id ?? 'workspace'" :job="selectedJob" />
-        <div class="content-grid">
-          <section id="tasks" class="panel tasks-panel">
-            <div class="panel-heading"><h2>分析任务 <span>{{ jobs.length }}</span></h2><button class="text-button" :disabled="loading" @click="refresh">↻ 刷新</button></div>
-            <div class="toolbar"><label class="search"><span>⌕</span><input v-model="query" placeholder="搜索视频名称或任务 ID" aria-label="搜索任务"></label><select v-model="filter" aria-label="筛选任务状态"><option value="ALL">全部状态</option><option value="RUNNING">正在分析</option><option value="QUEUED">等待执行</option><option value="REVIEW_READY">待人工审核</option><option value="FAILED">执行失败</option><option value="CANCELLED">已取消</option></select></div>
-            <div v-if="loading" class="empty">正在读取本地任务…</div>
-            <div v-else-if="!visibleJobs.length" class="empty"><div>▤</div><h3>{{ jobs.length ? '没有匹配的任务' : '从第一段视频开始' }}</h3><p>{{ jobs.length ? '尝试其他名称或状态。' : '上传 MP4 视频，然后在右侧创建分析任务。' }}</p></div>
-            <div v-else class="task-list">
-            <button v-for="job in visibleJobs" :key="job.id" class="task-row" :class="{ active: selectedJob?.id === job.id }" :disabled="!!pending" @click="loadDetail(job.id)"><span class="video-tile">▷</span><span class="task-info"><strong>{{ videoName(job.video_id) }}</strong><span>第 {{ job.generation }} 次分析 <i>·</i> {{ date(job.created_at) }}</span><small>{{ job.id.slice(0, 8) }}</small></span><span class="status" :class="job.status.toLowerCase()">{{ names[job.status] ?? job.status }}</span><span class="row-arrow">›</span></button>
-            </div>
-            <footer class="list-footer">显示最近 {{ jobs.length }} 个任务（最多 100 个）<span>定时刷新任务列表</span></footer>
-          </section>
+    <main class="workbench-main">
+      <header class="workbench-header"><button id="workbench-task-toggle" class="mobile-task-toggle secondary" aria-label="打开任务列表" :aria-expanded="mobileTasksOpen" aria-controls="workbench-tasks" @click="mobileTasksOpen = !mobileTasksOpen">☰</button><div class="current-video"><span class="workspace-kicker">视频工作台</span><h1 :title="selectedJob ? videoName(selectedJob.video_id) : ''">{{ selectedJob ? videoName(selectedJob.video_id) : '新建视频分析' }}</h1><p v-if="selectedJob">第 {{ selectedJob.generation }} 次分析 <span>·</span> {{ completeCount }}/{{ selectedJob.stages.length }} 阶段完成 <span>·</span> #{{ selectedJob.id.slice(0, 8) }}</p><p v-else>上传或选择视频，创建一次新的分析。</p></div><div class="header-state"><span v-if="selectedJob" class="status" :class="selectedJob.status.toLowerCase()">{{ names[selectedJob.status] ?? selectedJob.status }}</span><span class="connection"><i :class="{ online }"></i>{{ online ? '服务已连接' : '服务未连接' }}</span></div></header>
+      <div class="workspace-messages"><div v-if="errorMessage || connectionError" class="message error" role="alert"><span>{{ errorMessage || connectionError }}</span><button aria-label="关闭错误提示" @click="dismissErrors">×</button></div><div v-if="notice" class="message notice" role="status"><span>{{ notice }}</span><button aria-label="关闭操作提示" @click="notice = ''">×</button></div></div>
+      <div class="upload-host"><UploadPanel ref="uploadPanel" :can-start="canStartUpload" @busy="uploadBusy" @started="uploadStarted" @complete="uploaded" /></div>
+      <div class="workspace-tabs" role="tablist" aria-label="视频工作区" @keydown="tabKey">
+        <button id="workbench-tab-agent" role="tab" aria-controls="workbench-pane-agent" :aria-selected="activeTab === 'agent'" :tabindex="activeTab === 'agent' ? 0 : -1" :disabled="!topicResultsAvailable" @click="setTab('agent')">视频对话<span v-if="agentEditor?.dirty" class="draft-dot" aria-label="有未提交输入"></span></button>
+        <button id="workbench-tab-topics" role="tab" aria-controls="workbench-pane-topics" :aria-selected="activeTab === 'topics'" :tabindex="activeTab === 'topics' ? 0 : -1" :disabled="!resultsAvailable" @click="setTab('topics')">{{ selectedJob && !topicMode ? '片段审核' : '话题切分' }}<span v-if="reviewEditor?.dirty" class="draft-dot" aria-label="有未保存修改"></span></button>
+        <button id="workbench-tab-clips" role="tab" aria-controls="workbench-pane-clips" :aria-selected="activeTab === 'clips'" :tabindex="activeTab === 'clips' ? 0 : -1" :disabled="!topicResultsAvailable" @click="setTab('clips')">按需剪辑<span v-if="intentEditor?.dirty" class="draft-dot" aria-label="有未提交修改"></span></button>
+        <button id="workbench-tab-task" role="tab" aria-controls="workbench-pane-task" :aria-selected="activeTab === 'task'" :tabindex="activeTab === 'task' ? 0 : -1" @click="setTab('task')">{{ selectedJob ? '任务设置' : '创建分析' }}</button>
+      </div>
+      <div class="workbench-content">
+        <div id="workbench-pane-agent" v-show="activeTab === 'agent'" class="workbench-pane conversation-pane" role="tabpanel" aria-labelledby="workbench-tab-agent">
+          <VideoAgentPanel v-if="selectedJob?.status === 'REVIEW_READY' && currentVideo && topicMode" :key="`agent-${selectedJob.id}`" ref="agentEditor" :active="activeTab === 'agent'" :job-id="selectedJob.id" :video-id="currentVideo.id" :video-hash="currentVideo.content_hash" :video-url="currentVideo.content_url" :clip-target-busy="!!intentEditor?.dirty || !!intentEditor?.pending" @clip-instruction="useAgentClipInstruction" />
+        </div>
+        <div id="workbench-pane-topics" v-show="activeTab === 'topics'" class="workbench-pane" role="tabpanel" aria-labelledby="workbench-tab-topics">
+          <TopicReviewPanel v-if="selectedJob?.status === 'REVIEW_READY' && currentVideo && topicMode" :key="selectedJob.id" ref="reviewEditor" :active="activeTab === 'topics'" :job-id="selectedJob.id" :video-url="currentVideo.content_url" />
+          <ReviewPanel v-else-if="selectedJob?.status === 'REVIEW_READY' && currentVideo" :key="selectedJob.id" ref="reviewEditor" :active="activeTab === 'topics'" :job-id="selectedJob.id" :video-url="currentVideo.content_url" />
+        </div>
+        <div id="workbench-pane-clips" v-show="activeTab === 'clips'" class="workbench-pane" role="tabpanel" aria-labelledby="workbench-tab-clips">
+          <IntentClipPanel v-if="selectedJob?.status === 'REVIEW_READY' && currentVideo && topicMode" :key="`intent-${selectedJob.id}`" ref="intentEditor" :active="activeTab === 'clips'" :job-id="selectedJob.id" :video-url="currentVideo.content_url" />
+        </div>
+        <div id="workbench-pane-task" v-show="activeTab === 'task'" class="workbench-pane task-pane" role="tabpanel" aria-labelledby="workbench-tab-task"><div class="settings-grid">
           <section class="panel setup-panel">
             <div class="panel-heading"><h2>{{ selectedJob ? '任务详情' : '新建分析' }}</h2><span class="subtle-number">{{ selectedJob ? streamLabels[streamMode] + ' · #' + selectedJob.id.slice(0, 8) : '01 — 04' }}</span></div>
             <div class="setup-body">
@@ -386,13 +426,8 @@ onUnmounted(() => { stopped = true; detailRecovery.cancel(); selectionVersion++;
               </template>
             </div>
           </section>
-        </div>
-        <VideoAgentPanel v-if="selectedJob?.status === 'REVIEW_READY' && currentVideo && topicMode" :key="`agent-${selectedJob.id}`" ref="agentEditor" :job-id="selectedJob.id" :video-id="currentVideo.id" :video-hash="currentVideo.content_hash" :video-url="currentVideo.content_url" :clip-target-busy="!!intentEditor?.dirty || !!intentEditor?.pending" @clip-instruction="useAgentClipInstruction" />
-        <TopicReviewPanel v-if="selectedJob?.status === 'REVIEW_READY' && currentVideo && topicMode" :key="selectedJob.id" ref="reviewEditor" :job-id="selectedJob.id" :video-url="currentVideo.content_url" />
-        <ReviewPanel v-else-if="selectedJob?.status === 'REVIEW_READY' && currentVideo" :key="selectedJob.id" ref="reviewEditor" :job-id="selectedJob.id" :video-url="currentVideo.content_url" />
-        <section v-else-if="currentVideo" class="panel source-panel"><div class="panel-heading"><div><h2>原视频预览</h2><p>{{ currentVideo.original_filename }}</p></div><span class="subtle-number">{{ (currentVideo.size_bytes / 1024 / 1024).toFixed(1) }} MB</span></div><div class="source-layout"><video :key="currentVideo.id" :src="currentVideo.content_url" controls preload="metadata" playsinline></video><div class="source-description"><span class="eyebrow">SOURCE VIDEO</span><h3>所有片段，共用一条时间轴。</h3><p>播放器支持按需读取原视频。ASR 时间戳映射到原视频毫秒，后续审核和切片都以此为准。</p><dl><dt>来源状态</dt><dd>{{ currentVideo.media_validation_status }}</dd><dt>文件 SHA256</dt><dd class="hash">{{ currentVideo.content_hash }}</dd></dl><small>上传时仅检查基本文件头，完整媒体探测由 Worker 执行。</small></div></div></section>
-        <IntentClipPanel v-if="selectedJob?.status === 'REVIEW_READY' && currentVideo && topicMode" :key="`intent-${selectedJob.id}`" ref="intentEditor" :job-id="selectedJob.id" :video-url="currentVideo.content_url" />
-        <footer class="page-footer"><span>LiveCut AI</span> 自动预测需要人工复核 · 真实素材仅保存在本地</footer>
+          <div class="settings-side"><section v-if="currentVideo" class="panel source-panel"><div class="panel-heading"><div><h2>原视频预览</h2><p>{{ currentVideo.original_filename }}</p></div><span class="subtle-number">{{ (currentVideo.size_bytes / 1024 / 1024).toFixed(1) }} MB</span></div><video ref="taskPreview" :key="currentVideo.id" :src="currentVideo.content_url" controls preload="metadata" playsinline @play="activeTab !== 'task' && taskPreview?.pause()"></video><p class="source-caption">分析、原句定位与导出均使用此视频。</p></section><ExecutorStatus :key="selectedJob?.id ?? 'workspace'" :job="selectedJob" /></div>
+        </div></div>
       </div>
     </main>
   </div>

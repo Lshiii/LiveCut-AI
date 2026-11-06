@@ -10,13 +10,14 @@ interface ApprovedReview {
   products?: { id: string; name: string }[]
   segments: { id: string; start_ms: number; end_ms: number; product_id?: string | null; title?: string; enabled: boolean }[]
 }
-const props = defineProps<{ jobId: string; confirmedRevisions: number[]; currentRevision: number; dirty: boolean; analysisMode?: 'topics' | 'commerce' }>()
+const props = defineProps<{ jobId: string; confirmedRevisions: number[]; currentRevision: number; dirty: boolean; analysisMode?: 'topics' | 'commerce'; active?: boolean }>()
 const topicMode = computed(() => props.analysisMode === 'topics')
 const revision = ref<number | ''>(''), approved = ref<ApprovedReview | null>(null)
 const exportProduct = ref('')
 const selectedIds = ref<string[]>([]), batches = ref<ExportJob[]>([]), selectedBatchId = ref(''), previewId = ref('')
 const pending = ref(''), error = ref(''), refreshError = ref(''), notice = ref(''), loadingRevision = ref(false)
 const streamMode = ref<StreamMode>('idle')
+const previewPlayer = ref<HTMLVideoElement | null>(null)
 let timer: number | undefined, stopped = false, refreshing = false, revisionVersion = 0, listVersion = 0, resourceEpoch = 0
 const batchStream = new SnapshotStream<ExportJob>({
   kind: 'export', parse: (raw, id) => parseExportSnapshot(raw, id, props.jobId), terminal: isExportTerminal,
@@ -149,7 +150,9 @@ watch(() => props.jobId, () => {
   void loadRevision(); void refresh()
 })
 onMounted(() => { void refresh(); timer = window.setInterval(() => { if (!document.hidden && !pending.value) void refresh() }, 15000) })
-onBeforeUnmount(() => { stopped = true; resourceEpoch++; revisionVersion++; listVersion++; window.clearInterval(timer); batchStream.dispose() })
+function guardPlayback(event: Event) { if (props.active === false || stopped) (event.currentTarget as HTMLVideoElement).pause() }
+watch(() => props.active, value => { if (value === false) previewPlayer.value?.pause() })
+onBeforeUnmount(() => { stopped = true; previewPlayer.value?.pause(); resourceEpoch++; revisionVersion++; listVersion++; window.clearInterval(timer); batchStream.dispose() })
 </script>
 
 <template>
@@ -170,7 +173,7 @@ onBeforeUnmount(() => { stopped = true; resourceEpoch++; revisionVersion++; list
     </div>
     <div class="export-history"><div class="export-history-heading"><h3>导出批次 <span>{{ batches.length }}</span></h3><button class="text-button" :disabled="!!pending" @click="refresh">↻ 刷新</button></div><p v-if="!batches.length" class="help">还没有导出批次。任务创建后会保存到后台，关闭页面不影响执行。</p><div v-else class="batch-tabs"><button v-for="batch in batches" :key="batch.id" :class="{ active: selectedBatchId === batch.id }" :disabled="!!pending" @click="selectedBatchId = batch.id; previewId = ''">r{{ batch.approved_revision }} · {{ batch.id.slice(0, 8) }}<span class="status" :class="batch.status.toLowerCase()">{{ names[batch.status] ?? batch.status }}</span></button></div>
       <template v-if="currentBatch"><div class="batch-summary"><span>冻结版本 r{{ currentBatch.approved_revision }} · {{ completed }} / {{ currentBatch.clips.length }} 完成</span><span class="snapshot-mode" role="status">{{ streamLabels[streamMode] }}</span><code>{{ currentBatch.id }}</code><button class="text-button" :disabled="!!pending" @click="downloadManifest">{{ pending === 'manifest' ? '正在下载…' : '下载文件清单 JSON ↓' }}</button></div><div v-for="clip in currentBatch.clips" :key="clip.id" class="export-clip"><div><b>{{ clip.title || clip.product_name }}</b><p>{{ time(clip.start_ms) }} → {{ time(clip.end_ms) }} <span v-if="clip.attempt">· 第 {{ clip.attempt }} 次执行</span></p><FailureDiagnostic :diagnostic="clip.diagnostic" :error-code="clip.error_code" :attempt="clip.attempt" /></div><span class="status" :class="clip.status.toLowerCase()">{{ names[clip.status] ?? clip.status }}</span><small v-if="clip.size_bytes != null">{{ (clip.size_bytes / 1024 / 1024).toFixed(2) }} MB</small><div class="clip-actions"><template v-if="clip.status === 'SUCCEEDED' && clip.content_url"><button class="secondary" @click="previewId = clip.id">预览</button><a v-if="clip.download_url" class="secondary" :href="clip.download_url">下载 MP4 ↓</a></template><button v-if="clip.status === 'FAILED'" class="secondary" :disabled="!!pending" @click="retry(clip)">重试此片段</button></div></div>
-        <div v-if="preview?.content_url" class="export-preview"><div><b>{{ preview.title || preview.product_name }} · 成片预览</b><button class="text-button" @click="previewId = ''">关闭预览</button></div><video :key="preview.id" :src="preview.content_url" controls preload="metadata" playsinline></video></div>
+        <div v-if="preview?.content_url" class="export-preview"><div><b>{{ preview.title || preview.product_name }} · 成片预览</b><button class="text-button" @click="previewId = ''">关闭预览</button></div><video ref="previewPlayer" :key="preview.id" :src="preview.content_url" controls preload="metadata" playsinline @play="guardPlayback"></video></div>
       </template>
     </div>
   </section>
@@ -220,4 +223,13 @@ onBeforeUnmount(() => { stopped = true; resourceEpoch++; revisionVersion++; list
 .export-preview b { font-weight: 500; }
 .export-preview video { display: block; width: 100%; max-height: 420px; background: #202720; }
 @media(max-width:650px) { .export-create { padding: 0 18px 22px; } .export-version { display: block; } .export-version > div { margin-top: 16px; } .export-selection > label { flex-wrap: wrap; } .export-selection > label > span { margin-left: 26px; width: 100%; } .create-export-row { flex-wrap: wrap; } .export-history { padding: 22px 18px; } .batch-tabs > button { max-width: 100%; flex-wrap: wrap; } }
+.workbench-shell .export-panel { color: #1f2937; font-size: 14px; }
+.workbench-shell .export-panel h2 { color: #1f2937; font-size: 19px; }
+.workbench-shell .export-panel h3 { color: #334155; font-size: 16px; }
+.workbench-shell .export-panel .help, .workbench-shell .export-version p, .workbench-shell .no-approved { color: #64748b; font-size: 13px; }
+.workbench-shell .export-controls label, .workbench-shell .export-candidates, .workbench-shell .create-export-row, .workbench-shell .export-clip p { color: #475569; font-size: 13px; }
+.workbench-shell .export-panel select, .workbench-shell .export-clip b, .workbench-shell .export-preview b { color: #1f2937; font-size: 14px; }
+.workbench-shell .batch-tabs button, .workbench-shell .batch-summary, .workbench-shell .export-clip small { color: #64748b; font-size: 12px; }
+.workbench-shell .export-panel code { color: #64748b; font-size: 12px; }
+.workbench-shell .export-version, .workbench-shell .export-history, .workbench-shell .export-clip, .workbench-shell .export-preview { border-color: #e2e8f0; }
 </style>

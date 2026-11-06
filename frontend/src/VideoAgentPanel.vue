@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { api, ApiError, post } from './api'
 import FailureDiagnostic from './FailureDiagnostic.vue'
 import TextRequestProgress from './TextRequestProgress.vue'
@@ -8,7 +8,7 @@ import { AgentReadScope, AgentResponseError, agentTurnActive, agentTurnReceipt, 
   newestAgentSession, newestAgentTurn, parseAgentSession, parseAgentTurn,
   type AgentCitation, type AgentReceipt, type AgentSession, type AgentTurn } from './videoAgent'
 
-const props = defineProps<{ jobId: string; videoId: string; videoHash: string; videoUrl: string; clipTargetBusy?: boolean }>()
+const props = defineProps<{ jobId: string; videoId: string; videoHash: string; videoUrl: string; clipTargetBusy?: boolean; active?: boolean }>()
 const emit = defineEmits<{ clipInstruction: [instruction: string] }>()
 const sessions = ref<AgentSession[]>([]), selectedId = ref(''), question = ref(''), maxCalls = ref(8)
 const action = ref(''), error = ref(''), refreshError = ref(''), notice = ref(''), loading = ref(true)
@@ -16,8 +16,10 @@ const selected = computed(() => sessions.value.find(session => session.id === se
 const activeTurn = computed(() => selected.value?.turns.find(agentTurnActive))
 const pending = computed(() => !!action.value), dirty = computed(() => !!question.value.trim())
 const citation = ref<AgentCitation | null>(null), sourcePlayer = ref<HTMLVideoElement | null>(null), playbackError = ref('')
+const messageList = ref<HTMLOListElement | null>(null)
 const scope = new AgentReadScope(), receiptCache = new Map<string, AgentReceipt>()
 let stopped = false, refreshing = false, timer: number | undefined, selectionVersion = 0, previewVersion = 0
+let followLatest = true, initialScrollPending = false
 const examples = ['概括这段视频', '刚才提到的缓存失效原因有什么区别', '哪些片段值得单独剪']
 const names: Record<string, string> = { QUEUED: '等待回答', RUNNING: '正在查找与回答', SUCCEEDED: '回答完成', FAILED: '本轮未完成', CANCELLED: '已取消' }
 const scopes = { VIDEO: '来自视频', GENERAL: '通用知识补充', INSUFFICIENT: '视频证据不足' }
@@ -52,6 +54,20 @@ function upsertSession(value: AgentSession) {
   else sessions.value[index] = latest
   sessions.value.sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at))
   return latest
+}
+function scrollToLatest(force = false) {
+  const sessionId = selectedId.value
+  void nextTick(() => {
+    if (!sessionId || stopped || props.active === false || selectedId.value !== sessionId || !messageList.value) return
+    if (!force && !initialScrollPending && !followLatest) return
+    messageList.value.scrollTo({ top: messageList.value.scrollHeight })
+    followLatest = true; initialScrollPending = false
+  })
+}
+function messageScroll(event: Event) {
+  if (props.active === false || stopped) return
+  const list = event.currentTarget as HTMLOListElement
+  followLatest = list.scrollHeight - list.scrollTop - list.clientHeight <= 64
 }
 function upsertTurn(value: AgentTurn, sessionId: string) {
   const index = sessions.value.findIndex(session => session.id === sessionId)
@@ -151,7 +167,7 @@ async function send() {
     if (!valid(version, session.id)) return
     const turn = parseAgentTurn(raw, session)
     if (turn.question !== input || turn.budget.max_text_calls !== budget) throw new AgentResponseError()
-    upsertTurn(turn, session.id); clearReceipt(storageKey, receipt); question.value = ''
+    upsertTurn(turn, session.id); clearReceipt(storageKey, receipt); question.value = ''; followLatest = true; scrollToLatest(true)
     notice.value = '问题已保存，回答与引用会自动更新。'
   } catch (value) { if (valid(version)) error.value = message(value) }
   finally { if (valid(version)) action.value = '' }
@@ -179,21 +195,38 @@ function suggest(value: string) {
   emit('clipInstruction', value)
 }
 async function preview(value: AgentCitation) {
+  if (!mediaActive()) return
   citation.value = value; playbackError.value = ''; const version = ++previewVersion
   await nextTick()
-  if (!stopped && version === previewVersion) sourcePlayer.value?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
-  if (!stopped && version === previewVersion && sourcePlayer.value && sourcePlayer.value.readyState >= 1) seekCitation()
+  if (mediaActive() && version === previewVersion) sourcePlayer.value?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+  if (mediaActive() && version === previewVersion && sourcePlayer.value && sourcePlayer.value.readyState >= 1) seekCitation()
 }
+function mediaActive() { return !stopped && props.active !== false }
 function seekCitation() {
   const player = sourcePlayer.value, value = citation.value
-  if (!player || !value) return
-  try { player.currentTime = value.start_ms / 1000; void player.play().catch(() => { playbackError.value = '点击视频播放按钮，可从所选原句继续回看。' }) }
+  if (!player || !value || props.active === false || stopped) return
+  try {
+    player.currentTime = value.start_ms / 1000
+    void player.play().then(() => { if (stopped || props.active === false) player.pause() })
+      .catch(() => { if (!stopped && props.active !== false) playbackError.value = '点击视频播放按钮，可从所选原句继续回看。' })
+  }
   catch { playbackError.value = '暂时无法定位这条原句，请检查原视频是否可播放。' }
 }
+function guardPlayback(event: Event) { if (props.active === false || stopped) (event.currentTarget as HTMLVideoElement).pause() }
+function closePreview() { previewVersion++; sourcePlayer.value?.pause(); citation.value = null; playbackError.value = '' }
 function previewTime() { if (sourcePlayer.value && citation.value && sourcePlayer.value.currentTime >= citation.value.end_ms / 1000) sourcePlayer.value.pause() }
 function date(value: string) { return new Date(value).toLocaleString('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }) }
 function unload(event: BeforeUnloadEvent) { if (dirty.value || pending.value) { event.preventDefault(); event.returnValue = '' } }
 onMounted(() => { window.addEventListener('beforeunload', unload); void poll() })
+watch(selectedId, id => { initialScrollPending = !!id; followLatest = true; if (id) scrollToLatest(true) }, { flush: 'post' })
+watch(() => {
+  const last = selected.value?.turns.at(-1)
+  return `${selectedId.value}:${last?.id ?? ''}:${last?.state_version ?? 0}`
+}, () => { if (initialScrollPending || followLatest) scrollToLatest() }, { flush: 'post' })
+watch(() => props.active, value => {
+  if (value === false) { previewVersion++; sourcePlayer.value?.pause() }
+  else if (initialScrollPending) scrollToLatest(true)
+}, { flush: 'post' })
 onBeforeUnmount(() => { stopped = true; selectionVersion++; previewVersion++; scope.dispose(); window.clearTimeout(timer); sourcePlayer.value?.pause(); window.removeEventListener('beforeunload', unload) })
 </script>
 
@@ -207,14 +240,14 @@ onBeforeUnmount(() => { stopped = true; selectionVersion++; previewVersion++; sc
       <aside class="agent-sessions" aria-label="视频对话列表"><div class="agent-section-heading"><h3>对话 {{ sessions.length }}</h3><button class="text-button" :disabled="pending" @click="refresh">刷新</button></div><p v-if="loading && !sessions.length" class="help">正在读取对话…</p><p v-else-if="!sessions.length" class="help">发送第一个问题，即可开始对话。</p><button v-for="session in sessions" :key="session.id" class="agent-session" :class="{ selected: selectedId === session.id }" :aria-pressed="selectedId === session.id" :disabled="pending" @click="selectSession(session.id)"><strong>{{ session.turns[0]?.question ?? '新对话' }}</strong><small>{{ date(session.created_at) }} · {{ session.turns.length }} 轮</small></button></aside>
       <div class="agent-conversation">
         <div v-if="!selected?.turns.length" class="agent-welcome"><h3>从视频里找答案</h3><p>可以先概括内容，也可以沿着已有回答继续追问。证据不足时会明确说明。</p></div>
-        <ol v-else class="agent-turns" aria-label="对话记录"><li v-for="turn in selected.turns" :key="turn.id" class="agent-turn"><div class="agent-question"><span>你的问题 · 第 {{ turn.sequence }} 轮</span><p>{{ turn.question }}</p></div><div class="agent-answer"><div class="agent-answer-heading"><strong>视频助手</strong><span class="agent-status">{{ names[turn.status] }}</span><button v-if="agentTurnActive(turn)" class="text-button" :disabled="pending" @click="cancel(turn)">{{ action === 'cancel' ? '正在取消…' : '取消本轮' }}</button></div><TextRequestProgress :progress="turn.stage.text_progress" :terminal="!agentTurnActive(turn)" /><FailureDiagnostic :diagnostic="turn.stage.diagnostic" :error-code="turn.stage.error_code" :attempt="turn.stage.attempt" />
+        <ol v-else ref="messageList" class="agent-turns" aria-label="对话记录" @scroll.passive="messageScroll"><li v-for="turn in selected.turns" :key="turn.id" class="agent-turn"><div class="agent-question"><span>你的问题 · 第 {{ turn.sequence }} 轮</span><p>{{ turn.question }}</p></div><div class="agent-answer"><div class="agent-answer-heading"><strong>视频助手</strong><span class="agent-status">{{ names[turn.status] }}</span><button v-if="agentTurnActive(turn)" class="text-button" :disabled="pending" @click="cancel(turn)">{{ action === 'cancel' ? '正在取消…' : '取消本轮' }}</button></div><TextRequestProgress :progress="turn.stage.text_progress" :terminal="!agentTurnActive(turn)" /><FailureDiagnostic :diagnostic="turn.stage.diagnostic" :error-code="turn.stage.error_code" :attempt="turn.stage.attempt" />
           <template v-if="turn.result"><span class="agent-scope" :class="turn.result.answer_scope.toLowerCase()">{{ scopes[turn.result.answer_scope] }}</span><p class="agent-answer-text">{{ turn.result.answer }}</p><p v-if="turn.result.answer_scope === 'GENERAL'" class="help">这部分是通用知识补充，不能当作视频中已经说过的话。</p><p v-else-if="turn.result.answer_scope === 'INSUFFICIENT'" class="help">当前视频证据不足，可换个说法，或补充想找的具体内容。</p>
-            <div v-if="turn.result.citations.length" class="agent-citations"><h4>视频原句依据</h4><button v-for="source in turn.result.citations" :key="source.utterance_id" class="agent-citation" :class="{ selected: citation?.utterance_id === source.utterance_id }" @click="preview(source)"><span>回看 {{ topicTime(source.start_ms) }} → {{ topicTime(source.end_ms) }}</span><p>{{ source.text }}</p></button></div>
+            <details v-if="turn.result.citations.length" class="agent-citations"><summary>视频原句依据 · {{ turn.result.citations.length }} 条</summary><button v-for="source in turn.result.citations" :key="source.utterance_id" class="agent-citation" :class="{ selected: citation?.utterance_id === source.utterance_id }" @click="preview(source)"><span>回看 {{ topicTime(source.start_ms) }} → {{ topicTime(source.end_ms) }}</span><p>{{ source.text }}</p></button></details>
             <details v-if="turn.result.tool_calls.length" class="agent-tools"><summary>查找过程 · {{ turn.result.tool_calls.length }} 步</summary><ol><li v-for="call in turn.result.tool_calls" :key="call.step"><strong>{{ call.step }}. {{ toolNames[call.tool_name] }}</strong><p v-if="call.tool_name === 'search_transcript'">查询：{{ call.arguments.query }}</p><p v-else-if="call.tool_name === 'read_context'">补读前 {{ call.arguments.before }} 句、后 {{ call.arguments.after }} 句</p><p v-else>查看第 {{ Number(call.arguments.offset) + 1 }} 项起的话题，最多 {{ call.arguments.limit }} 项</p><small>返回 {{ call.result_utterance_ids.length }} 条原句依据</small></li></ol></details>
             <div v-if="turn.result.suggested_clip_instruction" class="agent-clip-suggestion"><p>{{ turn.result.suggested_clip_instruction }}</p><button class="secondary" :disabled="pending || clipTargetBusy" @click="suggest(turn.result.suggested_clip_instruction)">送到剪辑要求</button><small v-if="clipTargetBusy">请先保存或放弃剪辑区域的未提交内容。</small><small v-else>仅填入要求，你仍需在剪辑区域点击查找、核对并确认。</small></div>
           </template><p v-else class="help">{{ turn.status === 'CANCELLED' ? '本轮已取消，已有对话和视频结果仍保留。' : turn.status === 'FAILED' ? '本轮未生成可用回答。请查看原因，原转写与此前回答仍保留。' : turn.status === 'QUEUED' ? '问题已保存，正在等待执行服务。' : '正在结合视频内容查找证据并回答，进度会自动更新。' }}</p>
         </div></li></ol>
-        <div v-if="citation" class="agent-preview"><div class="agent-section-heading"><h3>回看原句</h3><span>{{ topicTime(citation.start_ms) }} → {{ topicTime(citation.end_ms) }}</span></div><video ref="sourcePlayer" :src="videoUrl" controls preload="metadata" playsinline @loadedmetadata="seekCitation" @timeupdate="previewTime"></video><p v-if="playbackError" class="help" role="status">{{ playbackError }}</p></div>
+        <div v-if="citation" class="agent-preview"><div class="agent-section-heading"><h3>回看原句</h3><span>{{ topicTime(citation.start_ms) }} → {{ topicTime(citation.end_ms) }}</span><button class="text-button" @click="closePreview">关闭回看</button></div><video ref="sourcePlayer" :src="videoUrl" controls preload="metadata" playsinline @loadedmetadata="seekCitation" @timeupdate="previewTime" @play="guardPlayback"></video><p v-if="playbackError" class="help" role="status">{{ playbackError }}</p></div>
         <form class="agent-compose" @submit.prevent="send"><div class="agent-examples"><button v-for="example in examples" :key="example" type="button" class="text-button" :disabled="pending || dirty" @click="chooseExample(example)">{{ example }}</button></div><label for="agent-question">向视频助手提问</label><textarea id="agent-question" v-model="question" :disabled="pending" maxlength="2000" rows="3" placeholder="例如：视频里缓存失效的原因是什么？与刚才的方法有什么区别？"></textarea><div class="agent-compose-actions"><label>本轮模型请求上限<input v-model.number="maxCalls" type="number" min="1" max="24" :disabled="pending" aria-label="对话模型请求上限"></label><span>{{ question.length }} / 2000</span><button v-if="dirty" class="text-button" type="button" :disabled="pending" @click="discard">放弃输入</button><button class="primary" type="submit" :disabled="pending || !question.trim() || !!activeTurn">{{ action === 'send' ? '正在提交…' : selected ? '发送问题' : '开始提问' }}</button></div><p class="help">复用当前视频已完成的转写。自动恢复也计入本轮请求上限；对话中的建议不会自动创建剪辑或导出。</p><p v-if="activeTurn" class="help" role="status">本对话正在处理上一轮，可以先编辑问题，等待回答或取消本轮后发送。</p></form>
       </div>
     </div>
@@ -222,61 +255,109 @@ onBeforeUnmount(() => { stopped = true; selectionVersion++; previewVersion++; sc
 </template>
 
 <style scoped>
-.agent-panel { margin-top: 24px; padding: 24px; min-width: 0; }
+.agent-panel { margin-top: 24px; padding: 24px; min-width: 0; color: #1f2937; font-size: 14px; background: white; }
 .agent-panel h2, .agent-panel h3, .agent-panel h4, .agent-panel p { margin-top: 0; }
-.agent-intro, .agent-refresh-error { font-size: 12px; line-height: 1.8; color: #73816d; overflow-wrap: anywhere; }
-.agent-refresh-error { color: #a07250; }
-.agent-layout { display: grid; grid-template-columns: minmax(140px, 210px) minmax(0, 1fr); gap: 22px; margin-top: 20px; }
-.agent-sessions { min-width: 0; border-right: 1px solid #e6ebe0; padding-right: 16px; }
+.agent-panel h2 { color: #1f2937; font-size: 20px; }
+.agent-panel .eyebrow { color: #64748b; font-size: 11px; letter-spacing: .1em; }
+.agent-panel .help, .agent-intro, .agent-refresh-error { font-size: 13px; line-height: 1.7; color: #64748b; overflow-wrap: anywhere; }
+.agent-panel .help { margin: 8px 0; }
+.agent-refresh-error { color: #9a5a37; }
+.agent-layout { display: grid; grid-template-columns: 190px minmax(0, 1fr); gap: 22px; margin-top: 20px; }
+.agent-sessions { min-width: 0; border-right: 1px solid #e2e8f0; padding-right: 16px; }
 .agent-section-heading, .agent-answer-heading, .agent-compose-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 12px; }
-.agent-section-heading h3, .agent-preview h3 { margin: 0; font-size: 13px; color: #5f7051; }
-.agent-session { display: block; width: 100%; border: 1px solid transparent; border-radius: 6px; background: transparent; text-align: left; padding: 12px 10px; margin-top: 8px; color: #64745a; }
-.agent-session strong, .agent-session small { display: block; font-size: 11px; line-height: 1.7; overflow-wrap: anywhere; }
-.agent-session strong { font-weight: 500; }
-.agent-session small { color: #95a08a; margin-top: 4px; }
-.agent-session.selected { border-color: #dce6d2; background: #f3f7ee; }
+.agent-section-heading h3, .agent-preview h3 { margin: 0; font-size: 14px; font-weight: 600; color: #1f2937; }
+.agent-session { display: block; width: 100%; border: 1px solid transparent; border-radius: 8px; background: transparent; text-align: left; padding: 12px; margin-top: 8px; color: #334155; }
+.agent-session strong, .agent-session small { display: block; font-size: 13px; line-height: 1.6; overflow-wrap: anywhere; }
+.agent-session strong { font-weight: 500; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.agent-session small { font-size: 12px; color: #64748b; margin-top: 4px; }
+.agent-session.selected { border-color: #f0c9ba; background: #fff4ee; }
 .agent-conversation { min-width: 0; }
-.agent-welcome { padding: 20px 0; color: #78866e; }
-.agent-welcome h3 { color: #5d7050; font-size: 17px; font-weight: 500; }
-.agent-welcome p { font-size: 12px; line-height: 1.8; }
+.agent-welcome { padding: 24px 0; color: #64748b; }
+.agent-welcome h3 { color: #1f2937; font-size: 20px; font-weight: 600; }
+.agent-welcome p { font-size: 14px; line-height: 1.8; }
 .agent-turns, .agent-tools ol { padding: 0; margin: 0; list-style: none; }
-.agent-turn { margin-bottom: 22px; }
-.agent-question { padding: 14px 16px; border-radius: 7px; background: #f2f6ed; color: #536447; }
-.agent-question span { display: block; color: #89977d; font-size: 10px; margin-bottom: 5px; }
-.agent-question p, .agent-answer-text, .agent-clip-suggestion > p { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.9; font-size: 12px; margin-bottom: 0; }
+.agent-turn { margin-bottom: 24px; }
+.agent-question { padding: 14px 16px; border-radius: 10px; background: #f1f5f9; color: #1f2937; }
+.agent-question span { display: block; color: #64748b; font-size: 12px; margin-bottom: 5px; }
+.agent-question p, .agent-answer-text, .agent-clip-suggestion > p { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.85; font-size: 14px; margin-bottom: 0; }
 .agent-answer { padding: 16px 0 4px; }
 .agent-answer-heading { justify-content: flex-start; margin-bottom: 12px; }
-.agent-answer-heading > strong { font-weight: 500; font-size: 13px; color: #667c52; }
-.agent-status { font-size: 10px; color: #95a087; }
-.agent-scope { display: inline-block; border-radius: 4px; padding: 3px 7px; background: #edf4e6; color: #738a5b; font-size: 10px; margin-bottom: 8px; }
-.agent-scope.general { background: #edf1f8; color: #7185a0; }
-.agent-scope.insufficient { background: #fbf1e7; color: #a27e55; }
-.agent-answer-text { margin-bottom: 14px; color: #5f6e55; }
-.agent-citations h4 { font-size: 11px; font-weight: 500; color: #819170; margin-bottom: 8px; }
-.agent-citation { width: 100%; padding: 10px 12px; background: #fbfcf9; border: 1px solid #e7ecdf; border-radius: 5px; text-align: left; margin-bottom: 7px; color: #708261; }
-.agent-citation span { font-size: 10px; color: #8b9b7b; }
-.agent-citation p { margin: 5px 0 0; font-size: 11px; line-height: 1.8; overflow-wrap: anywhere; }
-.agent-citation.selected { border-color: #b3c69e; background: #f4f8ef; }
-.agent-tools { color: #8c997f; font-size: 11px; margin: 12px 0; }
-.agent-tools summary { cursor: pointer; }
-.agent-tools ol { padding: 10px 0; }
-.agent-tools li { padding: 6px 0 9px 12px; border-left: 1px solid #dfe7d6; overflow-wrap: anywhere; }
-.agent-tools strong { font-weight: 500; color: #728760; }
+.agent-answer-heading > strong { font-weight: 600; font-size: 14px; color: #1f2937; }
+.agent-status { font-size: 12px; color: #64748b; }
+.agent-scope { display: inline-block; border-radius: 5px; padding: 4px 8px; background: #f1f5f9; color: #475569; font-size: 12px; margin-bottom: 8px; }
+.agent-scope.general { background: #eff6ff; color: #526985; }
+.agent-scope.insufficient { background: #fff7ed; color: #9a6238; }
+.agent-answer-text { margin-bottom: 14px; color: #1f2937; }
+.agent-citations, .agent-tools { margin: 12px 0; border: 1px solid #e2e8f0; border-radius: 7px; color: #64748b; font-size: 13px; }
+.agent-citations summary, .agent-tools summary { cursor: pointer; padding: 10px 12px; color: #475569; }
+.agent-citation { display: block; width: calc(100% - 20px); padding: 10px 12px; background: white; border: 1px solid #e2e8f0; border-radius: 6px; text-align: left; margin: 0 10px 10px; color: #334155; }
+.agent-citation span { font-size: 12px; color: #64748b; }
+.agent-citation p { margin: 5px 0 0; font-size: 13px; line-height: 1.8; overflow-wrap: anywhere; }
+.agent-citation.selected { border-color: #e47650; background: #fff8f4; }
+.agent-tools ol { padding: 0 12px 10px; }
+.agent-tools li { padding: 6px 0 9px 12px; border-left: 2px solid #e2e8f0; overflow-wrap: anywhere; }
+.agent-tools strong { font-weight: 500; color: #334155; }
 .agent-tools p { margin: 4px 0; line-height: 1.7; }
-.agent-tools small { color: #a1ac97; }
-.agent-clip-suggestion { border: 1px solid #e2e9d9; border-radius: 5px; padding: 12px; background: #f9fbf6; margin-top: 14px; }
-.agent-clip-suggestion > p { margin-bottom: 10px; color: #6e7e60; }
-.agent-clip-suggestion small { display: block; color: #8b987e; font-size: 10px; line-height: 1.7; margin-top: 8px; }
-.agent-preview { margin: 18px 0; padding: 12px; border: 1px solid #e3eadb; border-radius: 6px; }
-.agent-preview .agent-section-heading > span { font-size: 10px; color: #89977c; }
-.agent-preview video { display: block; width: 100%; max-height: 340px; margin-top: 10px; background: #1c2516; border-radius: 4px; }
-.agent-compose { border-top: 1px solid #e6ecdf; padding-top: 14px; }
+.agent-tools small { font-size: 12px; color: #64748b; }
+.agent-clip-suggestion { border: 1px solid #e2e8f0; border-radius: 7px; padding: 12px; background: #fafafa; margin-top: 14px; }
+.agent-clip-suggestion > p { margin-bottom: 10px; color: #334155; }
+.agent-clip-suggestion small { display: block; color: #64748b; font-size: 12px; line-height: 1.7; margin-top: 8px; }
+.agent-preview { margin: 14px 0; padding: 12px; border: 1px solid #e2e8f0; border-radius: 8px; }
+.agent-preview .agent-section-heading > span { font-size: 12px; color: #64748b; }
+.agent-preview video { display: block; width: 100%; max-height: 300px; margin-top: 10px; background: #0f172a; border-radius: 5px; }
+.agent-compose { border-top: 1px solid #e2e8f0; padding-top: 14px; background: white; }
 .agent-examples { display: flex; flex-wrap: wrap; gap: 6px 15px; margin-bottom: 12px; }
-.agent-examples button { text-align: left; font-size: 10px; }
-.agent-compose > label, .agent-compose-actions label { display: flex; flex-direction: column; gap: 7px; color: #7b8a6e; font-size: 11px; }
-.agent-compose textarea { width: 100%; resize: vertical; min-height: 90px; border: 1px solid #dfe7d6; background: #fff; border-radius: 5px; font: inherit; line-height: 1.8; padding: 10px 12px; color: #5e7050; margin-top: 7px; box-sizing: border-box; }
-.agent-compose-actions { margin-top: 12px; font-size: 10px; color: #95a18a; }
-.agent-compose-actions input { width: 74px; border: 1px solid #dfe7d6; border-radius: 4px; color: #687b59; padding: 6px 8px; background: white; }
+.agent-examples button { text-align: left; font-size: 12px; color: #64748b; }
+.agent-compose > label, .agent-compose-actions label { display: flex; flex-direction: column; gap: 7px; color: #475569; font-size: 13px; }
+.agent-compose textarea { width: 100%; resize: vertical; min-height: 82px; border: 1px solid #cbd5e1; background: #fff; border-radius: 8px; font: inherit; line-height: 1.7; padding: 10px 12px; color: #1f2937; margin-top: 7px; box-sizing: border-box; }
+.agent-compose textarea:focus { outline: 2px solid #f1b19a; outline-offset: 1px; }
+.agent-compose-actions { margin-top: 12px; font-size: 12px; color: #64748b; }
+.agent-compose-actions input { width: 64px; border: 1px solid #cbd5e1; border-radius: 5px; color: #334155; padding: 6px 8px; background: white; font-size: 13px; }
 .agent-panel button:disabled { cursor: not-allowed; opacity: .55; }
-@media (max-width: 720px) { .agent-panel { padding: 16px; } .agent-layout { grid-template-columns: minmax(0, 1fr); gap: 16px; } .agent-sessions { border-right: 0; border-bottom: 1px solid #e6ebe0; padding: 0 0 12px; max-height: 200px; overflow-y: auto; } .agent-session { padding: 8px; } .agent-compose-actions { gap: 12px; } }
+.agent-panel :deep(.text-recovery) { color: #475569; background: #f8fafc; border-color: #cbd5e1; }
+.agent-panel :deep(.text-recovery strong) { font-size: 13px; }
+.agent-panel :deep(.text-recovery p) { font-size: 12px; }
+.workbench-shell .agent-panel { display: flex; flex-direction: column; height: 100%; min-height: 0; margin: 0; padding: 20px 24px; border: 0; border-radius: 0; overflow: hidden; }
+.workbench-shell .agent-panel > .panel-heading, .workbench-shell .agent-intro, .workbench-shell .agent-panel > .message, .workbench-shell .agent-refresh-error { flex-shrink: 0; }
+.workbench-shell .agent-intro { margin-bottom: 4px; font-size: 13px; }
+.workbench-shell .agent-panel > .message { max-height: 68px; overflow: auto; margin: 8px 0; }
+.workbench-shell .agent-layout { flex: 1; min-height: 0; margin-top: 12px; overflow: hidden; }
+.workbench-shell .agent-sessions { min-height: 0; overflow: auto; overscroll-behavior: contain; }
+.workbench-shell .agent-conversation { display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
+.workbench-shell .agent-turns, .workbench-shell .agent-welcome { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; padding-right: 12px; }
+.workbench-shell .agent-compose { flex-shrink: 0; padding-top: 10px; }
+.workbench-shell .agent-compose textarea { height: 72px; min-height: 66px; max-height: 120px; }
+.workbench-shell .agent-examples { flex-wrap: nowrap; overflow-x: auto; gap: 14px; margin-bottom: 8px; }
+.workbench-shell .agent-examples button { flex-shrink: 0; white-space: nowrap; }
+.workbench-shell .agent-compose-actions { margin-top: 8px; gap: 8px; }
+.workbench-shell .agent-compose-actions label { flex-direction: row; align-items: center; }
+.workbench-shell .agent-compose > .help { margin-bottom: 0; font-size: 12px; line-height: 1.6; }
+.workbench-shell .agent-preview { display: grid; grid-template-columns: 150px minmax(0, 1fr); grid-template-rows: auto 1fr; gap: 6px 12px; flex: 0 0 110px; max-height: 110px; min-height: 110px; margin: 8px 0; padding: 9px; box-sizing: border-box; overflow: hidden; }
+.workbench-shell .agent-preview video { grid-column: 1; grid-row: 1 / 3; width: 150px; height: 90px; object-fit: contain; margin: 0; }
+.workbench-shell .agent-preview .agent-section-heading { grid-column: 2; align-content: start; justify-content: flex-start; gap: 5px 12px; }
+.workbench-shell .agent-preview .help { grid-column: 2; margin: 0; overflow-y: auto; font-size: 12px; }
+@media (max-width: 650px) {
+  .agent-panel { padding: 16px; }
+  .agent-layout { grid-template-columns: minmax(0, 1fr); gap: 16px; }
+  .agent-sessions { border-right: 0; border-bottom: 1px solid #e2e8f0; padding: 0 0 12px; max-height: 180px; overflow-y: auto; }
+  .agent-compose-actions { gap: 10px; }
+  .workbench-shell .agent-panel { padding: 14px; }
+  .workbench-shell .agent-panel .eyebrow { display: none; }
+  .workbench-shell .agent-panel h2 { font-size: 18px; }
+  .workbench-shell .agent-layout { grid-template-rows: auto minmax(0, 1fr); gap: 12px; }
+  .workbench-shell .agent-sessions { display: flex; align-items: center; gap: 8px; max-height: 76px; padding: 0 0 9px; overflow-x: auto; overflow-y: hidden; }
+  .workbench-shell .agent-sessions > .agent-section-heading { flex: 0 0 100px; }
+  .workbench-shell .agent-session { flex: 0 0 158px; width: 158px; margin-top: 0; padding: 8px; }
+  .workbench-shell .agent-session strong { -webkit-line-clamp: 1; }
+  .workbench-shell .agent-session small { font-size: 11px; }
+  .workbench-shell .agent-intro { font-size: 12px; line-height: 1.6; }
+  .workbench-shell .agent-turns { padding-right: 3px; }
+  .workbench-shell .agent-compose-actions label { font-size: 12px; }
+  .workbench-shell .agent-compose-actions > span { display: none; }
+  .workbench-shell .agent-compose-actions .primary { padding-inline: 12px; }
+  .workbench-shell .agent-compose > .help { font-size: 11px; }
+  .workbench-shell .agent-preview { grid-template-columns: 116px minmax(0, 1fr); flex-basis: 100px; min-height: 100px; max-height: 100px; }
+  .workbench-shell .agent-preview video { width: 116px; height: 80px; }
+}
+@media (max-height: 720px) { .workbench-shell .agent-intro { display: none; } .workbench-shell .agent-compose > .help { display: none; } }
 </style>
