@@ -30,6 +30,29 @@ const intentEditor = ref<{ dirty: boolean; pending: boolean; prefillInstruction(
 const agentEditor = ref<{ dirty: boolean; pending: boolean } | null>(null)
 type WorkbenchTab = 'agent' | 'topics' | 'clips' | 'task'
 const activeTab = ref<WorkbenchTab>('task'), mobileTasksOpen = ref(false)
+const compactLayout = ref(window.matchMedia('(max-width: 1100px)').matches), sidebarCollapsed = ref(false)
+const taskListExpanded = computed(() => compactLayout.value ? mobileTasksOpen.value : !sidebarCollapsed.value)
+const compactQuery = window.matchMedia('(max-width: 1100px)')
+function updateCompactLayout() {
+  const focusInTasks = !!document.activeElement?.closest('#workbench-tasks')
+  compactLayout.value = compactQuery.matches; mobileTasksOpen.value = false
+  if (focusInTasks && (compactLayout.value || sidebarCollapsed.value)) void nextTick(() => document.getElementById('workbench-task-toggle')?.focus())
+}
+function toggleTasks() {
+  if (compactLayout.value) {
+    mobileTasksOpen.value = !mobileTasksOpen.value
+    if (mobileTasksOpen.value) void nextTick(() => document.getElementById('workbench-task-close')?.focus())
+  }
+  else sidebarCollapsed.value = !sidebarCollapsed.value
+}
+function taskDrawerKey(event: KeyboardEvent) {
+  if (!compactLayout.value || !mobileTasksOpen.value || event.key !== 'Tab') return
+  const elements = [...document.querySelectorAll<HTMLElement>('#workbench-tasks a, #workbench-tasks button:not(:disabled), #workbench-tasks input, #workbench-tasks select')]
+    .filter(element => element.getClientRects().length)
+  const first = elements[0], last = elements.at(-1)
+  if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus() }
+  else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus() }
+}
 const taskPreview = ref<HTMLVideoElement | null>(null)
 const editorsDirty = computed(() => !!reviewEditor.value?.dirty || !!intentEditor.value?.dirty || !!agentEditor.value?.dirty)
 const editorsPending = computed(() => !!reviewEditor.value?.pending || !!intentEditor.value?.pending || !!agentEditor.value?.pending)
@@ -71,7 +94,7 @@ const topicResultsAvailable = computed(() => resultsAvailable.value && topicMode
 watch(() => selectedJob.value?.id, (id, previous) => {
   if (id === previous) return
   activeTab.value = id && selectedJob.value?.status === 'REVIEW_READY' ? topicMode.value ? 'agent' : 'topics' : 'task'
-  mobileTasksOpen.value = false
+  closeTasks()
 })
 watch(activeTab, value => { if (value !== 'task') taskPreview.value?.pause() }, { flush: 'sync' })
 function setTab(tab: WorkbenchTab) {
@@ -90,7 +113,13 @@ function tabKey(event: KeyboardEvent) {
 }
 function openNewAnalysis() {
   selectVideo()
-  if (!selectedJob.value) { activeTab.value = 'task'; mobileTasksOpen.value = false }
+  if (!selectedJob.value) { activeTab.value = 'task'; closeTasks() }
+}
+async function chooseUpload() {
+  closeTasks()
+  // The file input lives in main, which is inert while the task drawer is open.
+  await nextTick()
+  uploadPanel.value?.chooseFile()
 }
 function closeTasks() {
   if (!mobileTasksOpen.value) return
@@ -344,21 +373,22 @@ async function action(kind: 'cancel' | 'retry') {
   finally { pending.value = '' }
 }
 onMounted(async () => {
+  compactQuery.addEventListener('change', updateCompactLayout)
   const id = new URL(location.href).searchParams.get('job'), initialVersion = selectionVersion
   await refresh()
   if (!stopped && selectionVersion === initialVersion && id && /^[0-9a-f-]{36}$/i.test(id)) await loadDetail(id)
   if (!stopped) timer = window.setInterval(() => { if (!document.hidden) void refresh() }, 15000)
 })
-onUnmounted(() => { stopped = true; detailRecovery.cancel(); selectionVersion++; window.clearInterval(timer); taskStream.dispose() })
+onUnmounted(() => { stopped = true; compactQuery.removeEventListener('change', updateCompactLayout); detailRecovery.cancel(); selectionVersion++; window.clearInterval(timer); taskStream.dispose() })
 </script>
 
 <template>
-  <div class="workbench-shell" @keydown.esc="closeTasks">
+  <div class="workbench-shell" :class="{ 'sidebar-collapsed': sidebarCollapsed }" @keydown.esc="closeTasks">
     <button v-if="mobileTasksOpen" class="task-backdrop" aria-label="关闭任务列表" @click="closeTasks"></button>
-    <aside id="workbench-tasks" class="workbench-sidebar" :class="{ open: mobileTasksOpen }" aria-label="视频与分析任务">
+    <aside id="workbench-tasks" class="workbench-sidebar" :class="{ open: mobileTasksOpen }" :role="compactLayout && mobileTasksOpen ? 'dialog' : undefined" :aria-modal="compactLayout && mobileTasksOpen ? true : undefined" aria-label="视频与分析任务" @keydown="taskDrawerKey">
       <a class="brand" href="/" aria-label="LiveCut AI 首页" @click.prevent="openNewAnalysis"><span class="brand-mark">L<span>✦</span></span><strong>LiveCut<span>AI</span></strong></a>
-      <button class="mobile-sidebar-close" aria-label="收起任务列表" @click="closeTasks">×</button>
-      <div class="sidebar-actions"><button class="primary" :disabled="!!pending" @click="uploadPanel?.chooseFile()">＋ 上传视频</button><button class="secondary" :disabled="!!pending" @click="openNewAnalysis">新建分析</button></div>
+      <button id="workbench-task-close" class="mobile-sidebar-close" aria-label="收起任务列表" @click="closeTasks">×</button>
+      <div class="sidebar-actions"><button class="primary" :disabled="!!pending" @click="chooseUpload">＋ 上传视频</button><button class="secondary" :disabled="!!pending" @click="openNewAnalysis">新建分析</button></div>
       <div class="sidebar-heading"><h2>视频与任务 <span>{{ jobs.length }}</span></h2><button class="text-button" :disabled="loading" aria-label="刷新任务列表" @click="refresh">↻</button></div>
       <div class="sidebar-counts"><span>分析中 {{ activeCount }}</span><span>待审核 {{ reviewCount }}</span></div>
       <label class="search sidebar-search"><span aria-hidden="true">⌕</span><input id="task-search" v-model="query" placeholder="搜索视频或任务" aria-label="搜索任务"></label>
@@ -368,8 +398,8 @@ onUnmounted(() => { stopped = true; detailRecovery.cancel(); selectionVersion++;
       <div v-else class="task-list" aria-label="分析任务列表"><button v-for="job in visibleJobs" :key="job.id" class="task-row" :class="{ active: selectedJob?.id === job.id }" :aria-current="selectedJob?.id === job.id ? 'true' : undefined" :disabled="!!pending" @click="loadDetail(job.id)"><span class="video-tile" aria-hidden="true">▷</span><span class="task-info"><strong :title="videoName(job.video_id)">{{ videoName(job.video_id) }}</strong><span>第 {{ job.generation }} 次分析 · {{ date(job.created_at) }}</span><span class="task-row-bottom"><span class="status" :class="job.status.toLowerCase()">{{ names[job.status] ?? job.status }}</span><small>#{{ job.id.slice(0, 8) }}</small></span></span></button></div>
       <div class="sidebar-footer"><span class="small-dot"></span>本地工作区 <span>{{ videos.length }} 个视频素材</span></div>
     </aside>
-    <main class="workbench-main">
-      <header class="workbench-header"><button id="workbench-task-toggle" class="mobile-task-toggle secondary" aria-label="打开任务列表" :aria-expanded="mobileTasksOpen" aria-controls="workbench-tasks" @click="mobileTasksOpen = !mobileTasksOpen">☰</button><div class="current-video"><span class="workspace-kicker">视频工作台</span><h1 :title="selectedJob ? videoName(selectedJob.video_id) : ''">{{ selectedJob ? videoName(selectedJob.video_id) : '新建视频分析' }}</h1><p v-if="selectedJob">第 {{ selectedJob.generation }} 次分析 <span>·</span> {{ completeCount }}/{{ selectedJob.stages.length }} 阶段完成 <span>·</span> #{{ selectedJob.id.slice(0, 8) }}</p><p v-else>上传或选择视频，创建一次新的分析。</p></div><div class="header-state"><span v-if="selectedJob" class="status" :class="selectedJob.status.toLowerCase()">{{ names[selectedJob.status] ?? selectedJob.status }}</span><span class="connection"><i :class="{ online }"></i>{{ online ? '服务已连接' : '服务未连接' }}</span></div></header>
+    <main class="workbench-main" :inert="compactLayout && mobileTasksOpen ? true : undefined">
+      <header class="workbench-header"><button id="workbench-task-toggle" class="mobile-task-toggle secondary" :aria-label="taskListExpanded ? '收起任务列表' : '打开任务列表'" :title="taskListExpanded ? '收起任务列表' : '打开任务列表'" :aria-expanded="taskListExpanded" aria-controls="workbench-tasks" @click="toggleTasks"><svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16M13 9h4M13 13h4"/></svg></button><div class="current-video"><span class="workspace-kicker">视频工作台</span><h1 :title="selectedJob ? videoName(selectedJob.video_id) : ''">{{ selectedJob ? videoName(selectedJob.video_id) : '新建视频分析' }}</h1><p v-if="selectedJob">第 {{ selectedJob.generation }} 次分析 <span>·</span> {{ completeCount }}/{{ selectedJob.stages.length }} 阶段完成 <span>·</span> #{{ selectedJob.id.slice(0, 8) }}</p><p v-else>上传或选择视频，创建一次新的分析。</p></div><div class="header-state"><span v-if="selectedJob" class="status" :class="selectedJob.status.toLowerCase()">{{ names[selectedJob.status] ?? selectedJob.status }}</span><span class="connection"><i :class="{ online }"></i>{{ online ? '服务已连接' : '服务未连接' }}</span></div></header>
       <div class="workspace-messages"><div v-if="errorMessage || connectionError" class="message error" role="alert"><span>{{ errorMessage || connectionError }}</span><button aria-label="关闭错误提示" @click="dismissErrors">×</button></div><div v-if="notice" class="message notice" role="status"><span>{{ notice }}</span><button aria-label="关闭操作提示" @click="notice = ''">×</button></div></div>
       <div class="upload-host"><UploadPanel ref="uploadPanel" :can-start="canStartUpload" @busy="uploadBusy" @started="uploadStarted" @complete="uploaded" /></div>
       <div class="workspace-tabs" role="tablist" aria-label="视频工作区" @keydown="tabKey">
@@ -400,7 +430,7 @@ onUnmounted(() => { stopped = true; detailRecovery.cancel(); selectionVersion++;
                 <div class="detail-status"><span class="status" :class="selectedJob.status.toLowerCase()">{{ names[selectedJob.status] ?? selectedJob.status }}</span><span>{{ completeCount }} / {{ selectedJob.stages.length }} 阶段完成</span></div>
                 <ol class="stages"><li v-for="(stage, index) in orderedStages" :key="stage.id" :class="stage.status.toLowerCase()"><span class="step">{{ stage.status === 'SUCCEEDED' ? '✓' : index + 1 }}</span><div><b>{{ stageLabel(stage.stage_type) }}</b><small>{{ names[stage.status] ?? stage.status }}<template v-if="stage.attempt"> · 第 {{ stage.attempt }} 次执行</template></small><TextRequestProgress v-if="stage.stage_type === 'SEGMENT'" :progress="stage.text_progress" :terminal="['SUCCEEDED', 'FAILED', 'CANCELLED', 'SKIPPED'].includes(stage.status)" /><FailureDiagnostic :diagnostic="stage.diagnostic" :error-code="stage.error_code" :attempt="stage.attempt" /></div></li></ol>
                 <div class="budget"><span>已预留模型请求</span><b>文本 {{ selectedJob.budget.text_calls_reserved }}/{{ selectedJob.budget.max_text_calls }} <i>·</i> ASR {{ selectedJob.budget.asr_calls_reserved }}/{{ selectedJob.budget.max_asr_submissions }}</b><small>次数上限，不代表人民币费用</small></div>
-                <p v-if="selectedJob.status === 'REVIEW_READY'" class="review-note">自动结果已就绪。请在下方核对内容与边界，勾选需要切分的片段，再保存并确认。</p>
+                <p v-if="selectedJob.status === 'REVIEW_READY'" class="review-note">自动结果已就绪。请前往“话题切分”核对内容与边界，勾选需要切分的片段，再保存并确认。</p>
                 <p v-if="selectedJob.status === 'FAILED' && !selectedJob.actions?.can_retry" class="help" role="status">{{ retryExplanation }}</p>
                 <p v-else-if="selectedJob.actions?.can_retry" class="help">重试仅恢复失败阶段，每阶段最多执行 {{ selectedJob.actions.max_attempts }} 次；模型请求仍受本任务原预算限制。</p>
                 <div v-if="selectedJob.actions?.can_resume_from_asr" class="analysis-recovery">

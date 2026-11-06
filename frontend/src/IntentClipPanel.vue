@@ -310,7 +310,8 @@ onBeforeUnmount(() => { stopped = true; selectionVersion++; focusVersion++; paus
 <template>
   <section class="panel intent-panel" aria-label="按需求找片段">
     <div class="panel-heading"><div><div class="eyebrow">YOUR REQUEST → CLIP PLAN</div><h2>按需求找片段</h2></div><span class="status" v-if="snapshot">{{ names[snapshot.status] }}</span></div>
-    <p class="intent-intro">告诉 AI 想保留什么内容。系统复用本视频的转写，返回原句证据与候选范围；你确认后，每个目标生成独立视频。短暂错误会在次数和预算上限内自动恢复，已完成的语音转写会保留。</p>
+    <p class="intent-intro">描述要保留的内容，核对候选后生成独立视频。</p>
+    <details class="intent-guide"><summary>查找与自动恢复说明</summary><p>系统复用本视频的转写，返回原句证据与候选范围。短暂错误会在次数和预算上限内自动恢复，已完成的语音转写会保留；每个确认目标生成一个视频。</p></details>
     <div v-if="error" class="message error" role="alert"><span>{{ error }}</span><button aria-label="关闭剪辑错误" @click="error = ''">×</button></div>
     <p v-if="refreshError" class="intent-warning" role="status">{{ refreshError }} 后台状态会继续刷新，当前修改不受影响。</p>
     <p v-if="notice" class="intent-notice" role="status">{{ notice }}</p>
@@ -319,10 +320,10 @@ onBeforeUnmount(() => { stopped = true; selectionVersion++; focusVersion++; paus
       <div class="intent-create-row"><label>模型请求上限<input v-model.number="maxCalls" type="number" min="1" max="24" :disabled="pending" aria-label="剪辑模型请求上限"></label><span>复用已完成的语音转写，本次不重新提交 ASR。</span><button class="primary" :disabled="pending || !instruction.trim() || planDirty" @click="create">{{ action === 'create' ? '正在创建…' : '查找片段' }}</button></div>
     </div>
     <div class="intent-workspace">
-      <aside class="intent-requests" aria-label="剪辑请求列表"><div class="intent-subheading"><h3>剪辑请求 {{ requests.length }}</h3><button class="text-button" :disabled="pending" @click="refresh">刷新</button></div><p v-if="loading" class="help">正在读取请求…</p><p v-else-if="!requests.length" class="help">还没有剪辑请求。上面的要求会保存为独立请求，不会覆盖原来的话题草稿。</p><button v-for="request in requests" :key="request.id" class="intent-request" :class="{ selected: selectedId === request.id }" :disabled="pending" @click="selectRequest(request.id)"><strong>{{ request.instruction }}</strong><span>{{ names[request.status] }} · {{ date(request.created_at) }}</span></button></aside>
+      <aside class="intent-requests" aria-label="剪辑请求列表"><div class="intent-subheading"><h3>剪辑请求 {{ requests.length }}</h3><button class="text-button" :disabled="pending" @click="refresh">刷新</button></div><p v-if="loading" class="help">正在读取请求…</p><p v-else-if="!requests.length" class="help">还没有剪辑请求。上面的要求会保存为独立请求，不会覆盖原来的话题草稿。</p><div class="intent-request-list"><button v-for="request in requests" :key="request.id" class="intent-request" :class="{ selected: selectedId === request.id }" :disabled="pending" @click="selectRequest(request.id)"><strong>{{ request.instruction }}</strong><span>{{ names[request.status] }} · {{ date(request.created_at) }}</span></button></div></aside>
       <div class="intent-result" v-if="snapshot">
         <div class="intent-subheading"><h3>当前方案 <span v-if="snapshot.plan">r{{ draftRevision }} · {{ selectedCount }} 个目标已选</span></h3><button v-if="dirty" class="text-button" :disabled="pending" @click="discard">放弃本页修改</button></div>
-        <p class="intent-original">{{ snapshot.instruction }}</p>
+        <details class="intent-original-details"><summary>查看本次剪辑要求</summary><p class="intent-original">{{ snapshot.instruction }}</p></details>
         <p v-if="snapshot.resumed_from_request_id" class="help">本次继续自请求 #{{ snapshot.resumed_from_request_id.slice(0, 8) }}，原转写复用，文本分析与预算独立。</p>
         <p class="help">本次已预留文本请求 {{ snapshot.budget.text_calls_reserved }} / {{ snapshot.budget.max_text_calls }}，包含自动恢复尝试，为次数上限。</p>
         <div v-if="['QUEUED', 'RUNNING'].includes(snapshot.status)" class="intent-recovery-actions">
@@ -338,6 +339,7 @@ onBeforeUnmount(() => { stopped = true; selectionVersion++; focusVersion++; paus
         <FailureDiagnostic v-if="snapshot.status !== 'CANCELLED'" :error-code="snapshot.stage.error_code" :attempt="snapshot.stage.attempt" />
         <p v-if="!snapshot.plan" class="intent-empty">{{ snapshot.status === 'FAILED' ? '本次查找未完成。请查看执行原因，原视频和原话题结果仍保留。' : snapshot.status === 'CANCELLED' ? '本次请求已取消。' : snapshot.status === 'RUNNING' ? '正在查找候选片段，执行进度会自动更新。你可以继续回看原视频。' : '正在等待执行服务生成候选方案。你可以继续回看原视频。' }}</p>
         <template v-else>
+          <div class="intent-save-row"><p v-if="validation" class="intent-validation" role="status">{{ validation }}</p><div class="intent-save-controls"><span>{{ planDirty ? '方案修改尚未保存' : confirmed ? `r${snapshot.revision} 已确认` : '核对并勾选目标，再确认生成' }}</span><div class="actions"><button class="secondary" :disabled="pending || !planDirty || !!validation" @click="save">{{ action === 'save' ? '正在保存…' : '保存方案' }}</button><button class="primary" :disabled="!canConfirm" @click="confirm">{{ action === 'confirm' ? '正在确认…' : '确认所选目标' }}</button><button class="primary" :disabled="!canExport" @click="exportPlan">{{ action === 'export' ? '正在创建…' : '生成独立 MP4' }}</button></div></div></div>
           <video ref="sourcePlayer" :src="videoUrl" controls preload="metadata" playsinline class="intent-source" @play="guardPlayback"></video>
           <p class="help">点击原句可定位源视频；确认后的成片会按所列区间顺序拼接。</p>
           <p v-if="unresolved" class="intent-warning">有 {{ unresolved }} 个目标未找到充分证据，不能勾选导出。你可以只确认已经核对的目标，或另建更明确的请求。</p>
@@ -354,11 +356,9 @@ onBeforeUnmount(() => { stopped = true; selectionVersion++; focusVersion++; paus
             </div>
             <button v-if="output.status !== 'NOT_FOUND' && output.parts.length < 12" class="text-button" :disabled="pending" @click="addPart(output)">＋ 增加保留区间</button>
             <details v-if="output.evidence_utterance_ids.length" class="intent-evidence"><summary>依据原句 {{ output.evidence_utterance_ids.length }} 条</summary><button v-for="id in output.evidence_utterance_ids" :key="id" @click="locate(id)"><span>{{ topicTime(sourceTime(id)) }} · {{ id }}</span>{{ sourceText(id) }}</button></details>
-            <div v-if="output.excluded.length" class="intent-excluded"><b>排除内容</b><div v-for="(excluded, excludeIndex) in output.excluded" :key="excluded.utterance_id"><button class="text-button" @click="locate(excluded.utterance_id)">{{ topicTime(sourceTime(excluded.utterance_id)) }} {{ sourceText(excluded.utterance_id) }}</button><small>{{ excluded.reason }}</small><button class="text-button" :disabled="pending" @click="unexclude(output, excludeIndex)">取消排除</button></div></div>
+            <details v-if="output.excluded.length" class="intent-excluded"><summary>排除内容 {{ output.excluded.length }} 条</summary><div v-for="(excluded, excludeIndex) in output.excluded" :key="excluded.utterance_id"><button class="text-button" @click="locate(excluded.utterance_id)">{{ topicTime(sourceTime(excluded.utterance_id)) }} {{ sourceText(excluded.utterance_id) }}</button><small>{{ excluded.reason }}</small><button class="text-button" :disabled="pending" @click="unexclude(output, excludeIndex)">取消排除</button></div></details>
             <p class="help">{{ output.parts.length }} 个连续区间 · 预计保留 {{ topicTime(duration(output)) }} · 导出时合成一个文件</p>
           </article>
-          <p v-if="validation" class="intent-warning" role="status">{{ validation }}</p>
-          <div class="intent-save-row"><span>{{ planDirty ? '方案修改尚未保存' : confirmed ? `r${snapshot.revision} 已确认` : '请核对、勾选并保存所需目标' }}</span><div class="actions"><button class="secondary" :disabled="pending || !planDirty || !!validation" @click="save">{{ action === 'save' ? '正在保存…' : '保存方案' }}</button><button class="primary" :disabled="!canConfirm" @click="confirm">{{ action === 'confirm' ? '正在确认…' : '确认所选目标' }}</button><button class="primary" :disabled="!canExport" @click="exportPlan">{{ action === 'export' ? '正在创建…' : '生成独立 MP4' }}</button></div></div>
         </template>
       </div>
     </div>
@@ -368,69 +368,84 @@ onBeforeUnmount(() => { stopped = true; selectionVersion++; focusVersion++; paus
 </template>
 
 <style scoped>
-.intent-panel { margin-top: 24px; padding: 24px; min-width: 0; }
-.intent-intro, .intent-original, .intent-reason { color: #73816d; line-height: 1.8; font-size: 12px; overflow-wrap: anywhere; }
-.intent-intro { margin-bottom: 18px; }
-.intent-compose { background: #f7f9f5; border: 1px solid #e6ebe0; border-radius: 7px; padding: 16px; }
-.intent-compose > label, .intent-title-label, .intent-boundaries label { display: flex; flex-direction: column; gap: 7px; color: #75816e; font-size: 11px; min-width: 0; }
-textarea, input:not([type=checkbox]) { width: 100%; border: 1px solid #dfe5d7; border-radius: 5px; background: white; padding: 9px 10px; color: #4c5d43; font: inherit; min-width: 0; }
-textarea { resize: vertical; min-height: 90px; line-height: 1.7; }
-.intent-create-row, .intent-subheading, .intent-output-heading, .intent-part-label, .intent-save-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; }
-.intent-create-row { margin-top: 12px; font-size: 10px; color: #89927e; }
+.intent-panel { container: intent / inline-size; margin-top: 24px; padding: 22px; min-width: 0; color: #1f2937; font-size: 14px; overflow: visible; }
+.intent-panel > .panel-heading { padding: 0 0 10px; }
+.intent-panel > .panel-heading .eyebrow { display: none; }
+.intent-panel h2 { color: #1f2937; font-size: 18px; }
+h3 { color: #334155; font-size: 15px; line-height: 1.6; } h3 > span { font-size: 13px; font-weight: 400; color: #64748b; }
+.intent-intro, .intent-original, .intent-reason, .intent-panel .help { color: #64748b; line-height: 1.7; font-size: 13px; overflow-wrap: anywhere; }
+.intent-intro { margin: 0 0 6px; }
+.intent-guide, .intent-original-details { color: #64748b; font-size: 13px; line-height: 1.7; margin: 0 0 12px; }
+.intent-guide summary, .intent-original-details summary, .intent-evidence summary, .intent-excluded summary { cursor: pointer; padding: 4px 0; }
+.intent-guide p, .intent-original { margin-top: 7px; overflow-wrap: anywhere; }
+.intent-compose { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 14px; }
+.intent-compose > label, .intent-title-label, .intent-boundaries label { display: flex; flex-direction: column; gap: 6px; color: #475569; font-size: 13px; min-width: 0; }
+textarea, input:not([type=checkbox]) { box-sizing: border-box; width: 100%; max-width: 100%; border: 1px solid #cbd5e1; border-radius: 5px; background: white; padding: 9px 10px; color: #1f2937; font: inherit; font-size: 14px; min-width: 0; }
+textarea { resize: vertical; min-height: 76px; line-height: 1.7; }
+.intent-panel .text-button { color: #475569; font-size: 13px; white-space: normal; line-height: 1.6; min-height: 32px; overflow-wrap: anywhere; }
+.intent-panel .primary, .intent-panel .secondary { min-height: 38px; padding: 9px 12px; font-size: 14px; line-height: 1.45; white-space: normal; }
+.intent-create-row, .intent-subheading, .intent-output-heading, .intent-part-label, .intent-save-controls { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 12px; min-width: 0; }
+.intent-create-row { margin-top: 10px; color: #64748b; font-size: 13px; }
 .intent-create-row label { display: flex; align-items: center; gap: 8px; }
 .intent-create-row input { width: 72px; }
-.intent-create-row > span { flex: 1; min-width: 140px; line-height: 1.6; }
-.intent-workspace { display: grid; grid-template-columns: minmax(180px, .6fr) minmax(0, 2fr); gap: 22px; margin-top: 22px; }
+.intent-create-row > span { flex: 1; min-width: 160px; line-height: 1.6; }
+.intent-workspace { display: grid; grid-template-columns: 210px minmax(0, 1fr); align-items: start; gap: 20px; margin-top: 20px; }
 .intent-requests, .intent-result { min-width: 0; }
-h3 { color: #52634b; font-size: 13px; } h3 > span { font-size: 10px; font-weight: 400; color: #8a967f; }
-.intent-subheading { margin-bottom: 13px; }
-.intent-request { display: block; width: 100%; text-align: left; border: 1px solid #e5e9df; background: #fff; border-radius: 6px; padding: 12px; margin-bottom: 8px; }
-.intent-request.selected { background: #fbf4ee; border-color: #e9c5ac; }
-.intent-request strong { font-size: 11px; font-weight: 500; color: #59684f; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; line-height: 1.7; }
-.intent-request > span { display: block; color: #939c89; font-size: 9px; margin-top: 6px; }
-.intent-original { padding-bottom: 10px; }
-.intent-recovery-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; padding: 10px 12px; margin: 12px 0; border: 1px solid #e5e9df; border-radius: 6px; background: #f8faf6; }.intent-recovery-actions p { flex: 1; min-width: 180px; margin: 0; }.intent-recovery-actions button { flex-shrink: 0; }
-.intent-source { width: 100%; max-height: 360px; display: block; border-radius: 6px; background: #20251e; margin: 14px 0 8px; }
-.intent-empty { padding: 25px 12px; font-size: 12px; color: #8b957e; line-height: 1.8; background: #f8faf6; margin-top: 15px; border-radius: 6px; }
-.intent-output { border: 1px solid #e4e9dc; border-radius: 7px; padding: 16px; margin-top: 16px; min-width: 0; }
-.intent-output-heading { font-size: 11px; color: #79866b; }.intent-output-heading label { color: #596a4f; display: flex; align-items: flex-start; gap: 6px; max-width: 100%; overflow-wrap: anywhere; }
-.intent-output-heading input { flex-shrink: 0; }.intent-reason { margin: 10px 0; }
-.intent-part { border-top: 1px solid #eef0e9; padding-top: 12px; margin-top: 12px; }.intent-part-label { font-size: 11px; color: #7c8a70; }
-.intent-boundaries { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr); gap: 10px; margin: 9px 0; }
-.intent-quote { font-size: 11px; color: #8a967e; line-height: 1.8; overflow-wrap: anywhere; margin-top: 7px; }
-.intent-remove { display: block; margin: 6px 0 12px auto; font-size: 10px; }.intent-evidence { margin: 12px 0; font-size: 11px; color: #79896c; }
-.intent-evidence summary { cursor: pointer; }.intent-evidence > button { display: block; text-align: left; width: 100%; background: #f8faf5; color: #7c8970; border-radius: 4px; margin: 6px 0; padding: 9px; font-size: 11px; line-height: 1.8; overflow-wrap: anywhere; }
-.intent-evidence > button > span { display: block; color: #a2ad96; font-size: 9px; }
-.intent-excluded { padding: 12px; background: #fdf8f2; margin: 12px 0; font-size: 11px; color: #9b886c; border-radius: 5px; }.intent-excluded > div { margin-top: 8px; }.intent-excluded small { display: block; margin: 5px 0; }.intent-excluded .text-button { text-align: left; overflow-wrap: anywhere; line-height: 1.7; }
-.intent-save-row { padding-top: 16px; margin-top: 17px; border-top: 1px solid #e4e9df; color: #8a977d; font-size: 11px; }.actions { flex-wrap: wrap; gap: 7px; }
-.intent-warning, .intent-notice { font-size: 11px; line-height: 1.8; padding: 10px 12px; margin: 12px 0; background: #fcf5eb; color: #a17d48; border-radius: 5px; overflow-wrap: anywhere; }.intent-notice { background: #f0f7eb; color: #758e64; }
-.intent-exports { margin-top: 24px; border-top: 1px solid #e6ebdf; padding-top: 20px; }.intent-batch { border: 1px solid #e5e9de; border-radius: 6px; margin-top: 12px; padding: 14px; font-size: 11px; color: #8a957e; }.intent-export-clip { padding: 12px 0; border-top: 1px solid #edf0e7; margin-top: 12px; display: flex; flex-wrap: wrap; gap: 8px 18px; align-items: center; }.intent-export-clip strong { color: #5e6f52; overflow-wrap: anywhere; }.intent-export-clip .actions { margin-left: auto; }
-@media (max-width: 850px) { .intent-workspace { grid-template-columns: minmax(0, 1fr); }.intent-requests { border-bottom: 1px solid #e6ebdf; padding-bottom: 12px; }.intent-panel { padding: 18px; } }
-@media (max-width: 420px) { .intent-boundaries { grid-template-columns: minmax(0, 1fr); }.intent-output { padding: 12px; }.intent-create-row > button { width: 100%; }.intent-save-row .actions { width: 100%; }.intent-save-row .actions > button { flex: 1; min-width: 110px; } }
-.workbench-shell .intent-panel { margin: 0; padding: 20px 24px; border: 0; border-radius: 0; color: #1f2937; font-size: 14px; }
-.workbench-shell .intent-panel h2 { color: #1f2937; font-size: 20px; }
-.workbench-shell .intent-panel h3 { color: #334155; font-size: 16px; }
-.workbench-shell .intent-panel .eyebrow { color: #64748b; font-size: 11px; }
-.workbench-shell .intent-panel .help, .workbench-shell .intent-intro, .workbench-shell .intent-original, .workbench-shell .intent-reason { color: #64748b; font-size: 13px; line-height: 1.75; }
-.workbench-shell .intent-compose { background: #f8fafc; border-color: #e2e8f0; padding: 16px; }
-.workbench-shell .intent-compose > label, .workbench-shell .intent-title-label, .workbench-shell .intent-boundaries label { color: #475569; font-size: 13px; }
-.workbench-shell .intent-panel textarea, .workbench-shell .intent-panel input:not([type=checkbox]), .workbench-shell .intent-panel select { border-color: #cbd5e1; color: #1f2937; font-size: 14px; }
-.workbench-shell .intent-create-row, .workbench-shell .intent-part-label, .workbench-shell .intent-save-row { color: #64748b; font-size: 12px; }
-.workbench-shell .intent-workspace { grid-template-columns: 220px minmax(0, 1fr); gap: 24px; }
-.workbench-shell .intent-request { border-color: #e2e8f0; padding: 12px; }
-.workbench-shell .intent-request.selected { border-color: #efc7b7; background: #fff5ef; }
-.workbench-shell .intent-request strong { color: #334155; font-size: 13px; }
-.workbench-shell .intent-request > span { color: #64748b; font-size: 12px; }
-.workbench-shell .intent-output { border-color: #e2e8f0; background: white; }
-.workbench-shell .intent-output-heading { color: #64748b; font-size: 13px; }
-.workbench-shell .intent-output-heading label { color: #1f2937; }
-.workbench-shell .intent-quote, .workbench-shell .intent-evidence, .workbench-shell .intent-evidence > button { color: #475569; font-size: 13px; }
-.workbench-shell .intent-evidence > button { background: #f8fafc; }
-.workbench-shell .intent-evidence > button > span { color: #64748b; font-size: 12px; }
-.workbench-shell .intent-batch, .workbench-shell .intent-exports { border-color: #e2e8f0; color: #64748b; font-size: 13px; }
-.workbench-shell .intent-export-clip strong { color: #334155; font-size: 14px; }
-.workbench-shell .intent-panel :deep(.text-recovery) { color: #475569; background: #f8fafc; border-color: #cbd5e1; }
-@media(max-width: 900px) { .workbench-shell .intent-workspace { grid-template-columns: minmax(0, 1fr); } }
-@media(max-width: 650px) { .workbench-shell .intent-panel { padding: 16px; } .workbench-shell .intent-panel h2 { font-size: 18px; } }
-.caption-batch-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; margin: 10px 0; }.caption-batch-actions small { color: #64748b; font-size: 12px; }
+.intent-subheading { margin-bottom: 10px; }
+.intent-request-list { max-height: min(420px, 60dvh); overflow-y: auto; overscroll-behavior: contain; padding-right: 4px; scrollbar-gutter: stable; }
+.intent-request { display: block; width: 100%; min-width: 0; text-align: left; border: 1px solid #e2e8f0; background: white; border-radius: 6px; padding: 11px; margin-bottom: 8px; }
+.intent-request.selected { background: #fff5ef; border-color: #efc7b7; }
+.intent-request strong { color: #334155; font-size: 14px; font-weight: 500; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; line-height: 1.6; }
+.intent-request > span { display: block; color: #64748b; font-size: 12px; margin-top: 6px; }
+.intent-recovery-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; padding: 10px 12px; margin: 12px 0; border: 1px solid #e2e8f0; border-radius: 6px; background: #f8fafc; }
+.intent-recovery-actions p { flex: 1; min-width: min(180px, 100%); margin: 0; }
+.intent-recovery-actions button { flex-shrink: 0; }
+.intent-source { width: 100%; min-width: 0; max-width: 100%; max-height: 220px; display: block; border-radius: 6px; background: #17212e; margin: 12px 0 8px; object-fit: contain; }
+.intent-empty { padding: 20px 12px; color: #64748b; font-size: 14px; line-height: 1.8; background: #f8fafc; margin-top: 14px; border-radius: 6px; }
+.intent-output { border: 1px solid #e2e8f0; background: white; border-radius: 7px; padding: 14px; margin-top: 14px; min-width: 0; scroll-margin-top: 150px; }
+.intent-output-heading { color: #64748b; font-size: 13px; }
+.intent-output-heading label { color: #1f2937; display: flex; align-items: flex-start; gap: 6px; max-width: 100%; overflow-wrap: anywhere; }
+.intent-output-heading input { flex-shrink: 0; }
+.intent-reason { margin: 9px 0; }
+.intent-part { border-top: 1px solid #e2e8f0; padding-top: 11px; margin-top: 11px; }
+.intent-part-label { color: #475569; font-size: 13px; }
+.intent-boundaries { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 10px; margin: 9px 0; }
+.intent-quote { color: #475569; font-size: 14px; line-height: 1.75; overflow-wrap: anywhere; margin-top: 7px; }
+.intent-remove { display: block; margin: 4px 0 8px auto; }
+.intent-evidence { margin: 10px 0; color: #475569; font-size: 13px; }
+.intent-evidence > button { display: block; text-align: left; width: 100%; min-width: 0; background: #f8fafc; color: #475569; border-radius: 4px; margin: 6px 0; padding: 9px; font-size: 14px; line-height: 1.75; overflow-wrap: anywhere; }
+.intent-evidence > button > span { display: block; color: #64748b; font-size: 12px; }
+.intent-excluded { padding: 9px 12px; background: #fff8ed; margin: 10px 0; color: #8b632f; font-size: 13px; border-radius: 5px; }
+.intent-excluded > div { margin-top: 8px; }
+.intent-excluded small { display: block; margin: 5px 0; font-size: 13px; }
+.intent-excluded .text-button { text-align: left; }
+.intent-save-row { position: sticky; top: 0; z-index: 3; padding: 10px 12px; margin-top: 12px; border: 1px solid #e2e8f0; border-radius: 7px; background: #fff; box-shadow: 0 3px 8px #172b4d0a; color: #475569; font-size: 13px; }
+.intent-save-controls > span { flex: 1 1 160px; line-height: 1.6; }
+.intent-validation { color: #9a4f32; line-height: 1.6; margin: 0 0 8px; overflow-wrap: anywhere; }
+.actions { display: flex; flex-wrap: wrap; min-width: 0; gap: 7px; }
+.intent-warning, .intent-notice { font-size: 13px; line-height: 1.7; padding: 10px 12px; margin: 10px 0; background: #fff7e9; color: #8b632f; border-radius: 5px; overflow-wrap: anywhere; }
+.intent-notice { background: #f1f5f9; color: #475569; }
+.intent-exports { margin-top: 22px; border-top: 1px solid #e2e8f0; padding-top: 18px; }
+.intent-batch { border: 1px solid #e2e8f0; border-radius: 6px; margin-top: 12px; padding: 14px; color: #64748b; font-size: 13px; overflow-wrap: anywhere; }
+.intent-export-clip { padding: 10px 0; border-top: 1px solid #e2e8f0; margin-top: 10px; display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; min-width: 0; }
+.intent-export-clip strong { color: #334155; font-size: 14px; overflow-wrap: anywhere; min-width: 0; }
+.intent-export-clip .actions { margin-left: auto; }
+.caption-batch-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; margin: 10px 0; min-width: 0; }
+.caption-batch-actions small { color: #64748b; font-size: 13px; overflow-wrap: anywhere; }
+.workbench-shell .intent-panel { margin: 0; border: 0; border-radius: 0; }
+.intent-panel :deep(.text-recovery) { color: #475569; background: #f8fafc; border-color: #cbd5e1; }
+@container intent (max-width: 760px) {
+  .intent-workspace { grid-template-columns: minmax(0, 1fr); gap: 16px; }
+  .intent-requests { border-bottom: 1px solid #e2e8f0; padding-bottom: 10px; }
+  .intent-request-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr)); gap: 8px; max-height: 180px; }
+  .intent-request { margin-bottom: 0; }
+}
+@container intent (max-width: 420px) {
+  .intent-boundaries { grid-template-columns: minmax(0, 1fr); }
+  .intent-output { padding: 12px; }
+  .intent-create-row > button, .intent-save-row .actions { width: 100%; }
+  .intent-save-row .actions > button { flex: 1; min-width: 105px; }
+}
+@media (max-width: 650px) { .intent-panel { padding: 16px; } }
+@media (min-width: 801px) and (max-height: 800px) { .intent-source { max-height: 170px; } }
 </style>

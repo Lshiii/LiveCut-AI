@@ -8,6 +8,7 @@ import { ResumableUploader, uploadErrorText, validateUploadFile, type UploadStat
 const props = defineProps<{ canStart: () => boolean }>()
 const emit = defineEmits<{ busy: [value: boolean]; started: []; complete: [video: VideoAsset] }>()
 const input = ref<HTMLInputElement | null>(null), selected = ref<File | null>(null), localError = ref('')
+const completedDismissed = ref(false)
 const view = ref<UploadState>({ phase: 'idle', filename: '', size: 0, hashedBytes: 0, snapshot: null, resumedParts: 0, retryAttempt: 0, error: '', storageAvailable: true })
 let stopped = false, lastBusy = false
 let storage: Storage | null = null
@@ -15,6 +16,7 @@ try { storage = window.localStorage } catch { /* This page can still pause; refr
 const uploader = new ResumableUploader(value => {
   if (stopped) return
   view.value = value
+  if (value.phase !== 'completed') completedDismissed.value = false
   const next = uploader.busy
   if (next !== lastBusy) { lastBusy = next; emit('busy', next) }
 }, { storage, hashFile: hashFileInWorker, hashPart: async blob => sha256(new Uint8Array(await blob.arrayBuffer())) })
@@ -40,6 +42,7 @@ function change(event: Event) {
   if (file) void run(file)
 }
 function resume() { if (selected.value) void run(selected.value) }
+function dismissCompleted() { if (view.value.phase === 'completed') completedDismissed.value = true }
 async function discard() {
   if (stopped || !props.canStart()) return
   localError.value = ''
@@ -53,25 +56,44 @@ onBeforeUnmount(() => { stopped = true; uploader.destroy() })
   <input ref="input" class="visually-hidden" type="file" accept=".mp4,video/mp4" aria-label="上传 MP4 视频" @change="change">
   <p v-if="view.phase === 'idle' && !localError" class="upload-hint">支持分片上传与暂停。刷新后重新选择同一原文件，可核对已保存进度并继续。</p>
   <p v-if="localError" class="message error" role="alert">{{ localError }}</p>
-  <section v-if="view.phase !== 'idle'" class="panel upload-panel" aria-label="视频上传进度">
-    <div class="upload-panel-top"><div class="upload-file"><span class="eyebrow">VIDEO UPLOAD</span><h2>{{ view.filename }}</h2></div><span class="status" :class="view.phase === 'error' ? 'failed' : view.phase === 'completed' ? 'confirmed' : 'running'">{{ labels[view.phase] }}</span></div>
+  <section v-if="view.phase === 'completed' && !completedDismissed" class="upload-completed" role="status" aria-label="视频上传完成">
+    <span class="upload-completed-label">✓ 视频已保存</span>
+    <strong :title="view.filename">{{ view.filename }}</strong>
+    <button class="text-button" @click="chooseFile">上传其他视频</button>
+    <button class="upload-completed-close" aria-label="关闭上传完成提示" title="关闭提示" @click="dismissCompleted">×</button>
+  </section>
+  <section v-else-if="view.phase !== 'idle' && view.phase !== 'completed'" class="panel upload-panel" aria-label="视频上传进度">
+    <div class="upload-panel-top"><div class="upload-file"><span class="eyebrow">VIDEO UPLOAD</span><h2>{{ view.filename }}</h2></div><span class="status" :class="view.phase === 'error' ? 'failed' : 'running'">{{ labels[view.phase] }}</span></div>
     <div class="upload-meter"><progress :value="percent" max="100" :aria-label="view.snapshot ? '已确认上传进度' : '文件校验进度'"></progress><b>{{ percent }}%</b></div>
     <div class="upload-facts"><span>{{ view.snapshot ? '服务端已确认' : '文件已校验' }} {{ bytes(view.snapshot?.received_bytes ?? view.hashedBytes) }} / {{ bytes(view.size) }}</span><span v-if="view.snapshot">{{ view.snapshot.received_parts.length }} / {{ view.snapshot.total_parts }} 个分片</span></div>
     <p v-if="view.phase === 'hashing'" class="upload-description">先核对原文件内容，避免把不同视频续接在同一份上传中。</p>
     <p v-else-if="view.phase === 'checking'" class="upload-description">正在查询已保存进度。网络异常时会保留续传记录。</p>
     <p v-else-if="view.phase === 'merging'" class="upload-description" role="status">分片已收齐，服务器正在校验并合并。完成后才可创建分析任务。</p>
-    <p v-else-if="view.phase === 'completed'" class="upload-description" role="status">视频已保存。可以选择视频来源并创建分析任务。</p>
     <p v-else-if="view.phase === 'paused' && view.snapshot?.status === 'MERGING'" class="upload-description">已暂停等待；服务器仍会继续合并。点击继续可查询完成结果。</p>
     <p v-else-if="view.phase === 'paused'" class="upload-description">上传已暂停，已确认进度保留。继续时会重新核对原文件和服务端记录。</p>
-    <p v-if="view.resumedParts > 0 && view.phase !== 'completed'" class="upload-description">已恢复 {{ view.resumedParts }} 个确认分片，本次只补传缺片。</p>
+    <p v-if="view.resumedParts > 0" class="upload-description">已恢复 {{ view.resumedParts }} 个确认分片，本次只补传缺片。</p>
     <p v-if="view.retryAttempt" class="upload-description" role="status">本轮曾触发请求重试，每个请求最多重试 3 次。</p>
     <p v-if="!view.storageAvailable" class="upload-description upload-warning">浏览器未允许保存续传记录。本页仍可暂停和继续，刷新后可能需要重新上传。</p>
     <p v-if="view.error" class="upload-failure" role="alert">{{ view.error }}</p>
     <div class="upload-controls">
       <button v-if="busy && view.phase !== 'discarding'" class="secondary" @click="uploader.pause()">{{ view.phase === 'merging' ? '稍后查看' : '暂停上传' }}</button>
       <button v-if="canContinue" class="primary" @click="resume">{{ view.snapshot?.status === 'MERGING' ? '查询合并结果' : '继续上传' }}</button>
-      <button v-if="!busy" class="secondary" @click="chooseFile">{{ view.phase === 'completed' ? '选择其他视频' : '重新选择文件' }}</button>
-      <button v-if="!busy && view.phase !== 'completed'" class="text-button" @click="discard">放弃本次上传</button>
+      <button v-if="!busy" class="secondary" @click="chooseFile">重新选择文件</button>
+      <button v-if="!busy" class="text-button" @click="discard">放弃本次上传</button>
     </div>
   </section>
 </template>
+
+<style scoped>
+.upload-completed { display: flex; align-items: center; gap: 10px; min-width: 0; margin-bottom: 12px; padding: 8px 12px; border: 1px solid #dce8df; border-radius: 7px; background: #f4f8f5; color: #4b6956; font-size: 13px; line-height: 20px; }
+.upload-completed-label { flex: none; white-space: nowrap; }
+.upload-completed strong { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 500; }
+.upload-completed > button { flex: none; }
+.upload-completed .text-button { color: #526a5b; font-size: 12px; }
+.upload-completed-close { display: inline-flex; justify-content: center; align-items: center; width: 28px; height: 28px; padding: 0; background: none; border-radius: 4px; color: #64748b; font-size: 20px; }
+.upload-completed-close:hover { background: #e8efea; }
+@media (max-width: 420px) {
+  .upload-completed { gap: 6px; padding-inline: 8px; font-size: 12px; }
+  .upload-completed strong { font-size: 12px; }
+}
+</style>

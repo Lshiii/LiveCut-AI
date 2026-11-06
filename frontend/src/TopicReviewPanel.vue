@@ -9,7 +9,7 @@ import ExportPanel from './ExportPanel.vue'
 const props = withDefaults(defineProps<{ jobId: string; videoUrl: string; active?: boolean }>(), { active: true })
 const review = ref<TopicReview | null>(null), segments = ref<TopicSegment[]>([])
 const baseline = ref(''), pending = ref(false), error = ref(''), notice = ref('')
-const selectedId = ref(''), player = ref<HTMLVideoElement | null>(null), playhead = ref(0)
+const selectedId = ref(''), editingId = ref(''), player = ref<HTMLVideoElement | null>(null), playhead = ref(0)
 const topicList = ref<HTMLElement | null>(null)
 const keywordInputs = ref<Record<string, string>>({})
 const timeInputs = ref<TopicTimeDrafts>({}), previewRange = ref<TopicPreviewRange | null>(null)
@@ -104,6 +104,7 @@ function seek(segment: TopicSegment) {
 function editSegment(segment: TopicSegment) {
   preview.cancel()
   selectedId.value = segment.id
+  editingId.value = editingId.value === segment.id ? '' : segment.id
 }
 function revealSelected() {
   const id = selectedId.value
@@ -145,7 +146,7 @@ function add() {
   preview.cancel()
   const start = Math.min(Math.max(0, Math.round(playhead.value)), review.value.duration_ms - 1)
   const segment: TopicSegment = { id: crypto.randomUUID(), start_ms: start, end_ms: Math.min(start + 30000, review.value.duration_ms), title: '新增话题', summary: '请填写本段讨论内容。', keywords: [], enabled: false, origin: 'manual' }
-  segments.value.push(segment); selectedId.value = segment.id
+  segments.value.push(segment); selectedId.value = segment.id; editingId.value = segment.id
   revealSelected()
 }
 function split(segment: TopicSegment) {
@@ -153,7 +154,7 @@ function split(segment: TopicSegment) {
   const pair = splitTopic(segment, playhead.value, crypto.randomUUID())
   if (!pair) { error.value = '此片段太短或边界无效，暂时不能拆分。'; return }
   segments.value.splice(segments.value.indexOf(segment), 1, ...pair)
-  selectedId.value = pair[1].id
+  selectedId.value = pair[1].id; editingId.value = pair[1].id
   revealSelected()
   delete timeInputs.value[segment.id]
   notice.value = `已在 ${topicTime(pair[1].start_ms)} 拆分，请分别核对两段标题、摘要和选择状态。`
@@ -163,6 +164,7 @@ function remove(segment: TopicSegment) {
   segments.value = segments.value.filter(value => value.id !== segment.id)
   delete timeInputs.value[segment.id]; delete keywordInputs.value[segment.id]
   if (selectedId.value === segment.id) selectedId.value = segments.value[0]?.id ?? ''
+  if (editingId.value === segment.id) editingId.value = ''
 }
 function keywords(segment: TopicSegment, event: Event) {
   const value = (event.target as HTMLInputElement).value
@@ -181,7 +183,7 @@ function position(segment: TopicSegment) {
 }
 function onUnload(event: BeforeUnloadEvent) { if (dirty.value || pending.value) { event.preventDefault(); event.returnValue = '' } }
 window.addEventListener('beforeunload', onUnload)
-watch(() => props.jobId, () => { preview.cancel(); reviewView.value = 'edit'; review.value = null; segments.value = []; selectedId.value = ''; timeInputs.value = {}; keywordInputs.value = {}; void load() }, { immediate: true })
+watch(() => props.jobId, () => { preview.cancel(); reviewView.value = 'edit'; review.value = null; segments.value = []; selectedId.value = ''; editingId.value = ''; timeInputs.value = {}; keywordInputs.value = {}; void load() }, { immediate: true })
 watch(() => props.videoUrl, () => { preview.cancel() })
 watch(() => props.active, value => { if (!value) { preview.cancel(); player.value?.pause() } }, { flush: 'sync' })
 watch(reviewView, () => { preview.cancel(); player.value?.pause() }, { flush: 'sync' })
@@ -206,10 +208,10 @@ onBeforeUnmount(() => { stopped = true; version++; preview.cancel(); player.valu
           </aside>
           <fieldset class="topic-fields" :disabled="pending"><div ref="topicList" class="topic-list"><div class="topic-tools"><span>共 {{ segments.length }} 个话题 · 已选 {{ enabledCount }} 个</span><button class="secondary" @click="add">＋ 在播放位置补片段</button></div><div v-if="!segments.length" class="empty">暂无片段，可以手动补充。</div>
             <article v-for="(segment, index) in segments" :key="segment.id" :data-topic-id="segment.id" class="topic-card" :class="{ focused: selectedId === segment.id }">
-          <div class="topic-card-heading"><label><input v-model="segment.enabled" type="checkbox" :aria-label="`选择话题 ${segment.title}`"> 第 {{ index + 1 }} 段</label><span>{{ segment.origin === 'manual' ? '人工补充' : 'AI 识别' }}</span><button class="text-button topic-edit-toggle" :aria-expanded="selectedId === segment.id" :aria-controls="`topic-edit-${segment.id}`" :aria-label="`编辑此段 ${index + 1}`" @click="editSegment(segment)">{{ selectedId === segment.id ? '正在编辑' : '编辑此段' }}</button></div>
+          <div class="topic-card-heading"><label><input v-model="segment.enabled" type="checkbox" :aria-label="`选择话题 ${segment.title}`"> 第 {{ index + 1 }} 段</label><span>{{ segment.origin === 'manual' ? '人工补充' : 'AI 识别' }}</span><button class="text-button topic-edit-toggle" :aria-expanded="editingId === segment.id" :aria-controls="`topic-edit-${segment.id}`" :aria-label="`编辑此段 ${index + 1}`" @click="editSegment(segment)">{{ editingId === segment.id ? '收起编辑' : '编辑此段' }}</button></div>
           <button class="topic-summary-title" :aria-label="`回看话题 ${segment.title}`" @click="seek(segment)">{{ segment.title }}</button>
           <div class="topic-card-meta"><span>{{ topicTime(segment.start_ms) }} → {{ topicTime(segment.end_ms) }}</span><button class="text-button" :disabled="!validTopicRange(segment, review.duration_ms)" :aria-label="`${previewRange?.id === segment.id ? '停止预览' : '预览本段'} ${index + 1}`" @click="previewSegment(segment)">{{ previewRange?.id === segment.id ? '停止预览' : '预览本段' }}</button></div>
-          <div v-show="selectedId === segment.id" :id="`topic-edit-${segment.id}`" class="topic-editor">
+          <div v-show="editingId === segment.id" :id="`topic-edit-${segment.id}`" class="topic-editor">
             <label class="topic-title">话题标题<input v-model="segment.title" :aria-label="`话题标题 ${index + 1}`" maxlength="120"></label>
             <label class="topic-summary">本段摘要<textarea v-model="segment.summary" :aria-label="`话题摘要 ${index + 1}`" rows="3" maxlength="1000"></textarea></label>
             <label class="topic-keywords">关键词（逗号分隔）<input :value="keywordInputs[segment.id] ?? segment.keywords.join('，')" :aria-label="`话题关键词 ${index + 1}`" @input="keywords(segment, $event)"></label>
@@ -240,10 +242,10 @@ onBeforeUnmount(() => { stopped = true; version++; preview.cancel(); player.valu
 .topic-draft-mark, .topic-version-count { margin-left: 7px; font-size: 12px; font-weight: 400; color: #64748b; }
 .topic-draft-mark { color: #a6702e; }
 .topic-edit-page { flex: 1; display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
-.topic-review-main { display: grid; grid-template-columns: minmax(250px, .9fr) minmax(0, 1.45fr); gap: 18px; flex: 1; min-height: 0; padding: 14px 16px 12px; overflow: hidden; }
+.topic-review-main { display: grid; grid-template-columns: minmax(280px, 1fr) minmax(0, 1.35fr); gap: 18px; flex: 1; min-height: 0; padding: 14px 16px 12px; overflow: hidden; }
 .topic-media-column { display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; }
 .topic-player { flex-shrink: 0; width: 100%; background: #0f172a; border-radius: 7px; overflow: hidden; }
-.topic-player video { display: block; width: 100%; height: auto; max-height: 190px; aspect-ratio: 16 / 9; background: #0f172a; object-fit: contain; }
+.topic-player video { display: block; width: 100%; height: auto; max-height: 280px; aspect-ratio: 16 / 9; background: #0f172a; object-fit: contain; }
 .topic-timeline { position: relative; flex-shrink: 0; height: 22px; margin: 12px 0 7px; background: #f1f5f9; border-radius: 5px; overflow: hidden; }
 .topic-timeline button { position: absolute; height: 100%; background: #dce5ed; border: 1px solid white; border-radius: 4px; }
 .topic-timeline .enabled { background: #a7c6a0; }
@@ -301,7 +303,7 @@ onBeforeUnmount(() => { stopped = true; version++; preview.cancel(); player.valu
 .topic-export-hint { color: #64748b; background: #f8fafc; padding: 10px 12px; border: 1px solid #e2e8f0; border-radius: 6px; font-size: 13px; line-height: 1.7; }
 .topic-exports-page :deep(.exports) { margin: 0; }
 @media(min-width:801px) and (max-height:800px) {
-  .topic-player video { max-height: 145px; }
+  .topic-player video { max-height: clamp(100px, calc(100dvh - 520px), 190px); }
   .topic-preview-hint { display: none; }
 }
 @media(max-width:800px) {
