@@ -68,3 +68,5 @@ uv run pytest worker-python/tests/test_contracts.py worker-python/tests/test_inp
 [caption-render-spec.schema.json](./caption-render-spec.schema.json) 定义独立派生 EXPORT_CLIP 的小型冻结输入，包含已验证 clean MP4、确认字幕修订与 cues 文件、固定字体、样式和输出几何。canonical hash 绑定 claim、checkpoint 与新 captioned_export manifest；旧 reviewed_export 分支继续保持。本文 Schema 检查结构，三端另核验来源/相对 key/真实字节哈希、时序、非重叠、允许的固定参数与租约。API、进度及验收见 [带字幕成片](../docs/49-带字幕成片导出.md)。
 
 字幕渲染专用 [cues 文件](./caption-render-cues.schema.json) 与 [公共快照](./caption-render.schema.json) 分别约束纯文本输入和独立状态；示例 fixtures/caption-render.example.json 完全合成。UTF-16/UTF-8字节限制、半开区间非重叠、URL与本记录ID绑定及进度不回退仍需业务校验。
+
+`PORTRAIT_BLUR_720` 为固定 720×1280 的[竖屏柔化背景](../docs/50-竖屏柔化背景.md)扩展；新枚举进入原有冻结哈希，旧普通竖屏保持补黑。新旧 Worker 需要协调发布。

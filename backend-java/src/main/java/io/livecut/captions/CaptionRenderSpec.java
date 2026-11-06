@@ -11,9 +11,19 @@ public final class CaptionRenderSpec {
     public static final String FONT_PROFILE="noto-sans-cjk-sc-2.004",FONT_FAMILY="Noto Sans CJK SC";
     public static final String FONT_HASH="2c76254f6fc379fddfce0a7e84fb5385bb135d3e399294f6eeb6680d0365b74b";
     public static final long FONT_SIZE=16437364,MAX_SAFE=9007199254740991L;
-    public static final Set<String> STYLES=Set.of("WHITE_OUTLINE_V1","DARK_BOX_V1"),FRAMES=Set.of("SOURCE","LANDSCAPE_720","PORTRAIT_720");
+    public static final Set<String> STYLES=Set.of("WHITE_OUTLINE_V1","DARK_BOX_V1"),FRAMES=Set.of("SOURCE","LANDSCAPE_720","PORTRAIT_720","PORTRAIT_BLUR_720");
     public static final Set<String> INPUT_REQUIRES_NEW_RENDER=Set.of("CAPTION_RENDER_GLYPH_UNSUPPORTED","CAPTION_RENDER_TEXT_TOO_LARGE","CAPTION_RENDER_TIMING_UNSUPPORTED");
     public static boolean requiresNewRender(Object code){return code instanceof String&&INPUT_REQUIRES_NEW_RENDER.contains(code);}
+    public record OutputSize(int width,int height) {}
+    public static OutputSize outputSize(String frame,int sourceWidth,int sourceHeight){
+        if(frame==null||sourceWidth<2||sourceWidth>4096||sourceHeight<2||sourceHeight>4096)throw invalid();
+        return switch(frame){
+            case "SOURCE"->new OutputSize((sourceWidth+1)/2*2,(sourceHeight+1)/2*2);
+            case "LANDSCAPE_720"->new OutputSize(1280,720);
+            case "PORTRAIT_720","PORTRAIT_BLUR_720"->new OutputSize(720,1280);
+            default->throw invalid();
+        };
+    }
     public static void validate(JsonNode value){
         fields(value,Set.of("schema_version","profile_version","source_export_id","source_clip_id","source_snapshot_hash","input_media","captions","style_preset","frame_preset","output","font","timing_basis"));
         if(number(value,"schema_version",1,1)!=1||!VERSION.equals(text(value,"profile_version"))||!"CLIP_RELATIVE_ASS_CS_FLOOR".equals(text(value,"timing_basis")))throw invalid();
@@ -25,9 +35,8 @@ public final class CaptionRenderSpec {
         JsonNode captions=value.path("captions");fields(captions,Set.of("revision","content_hash","cues_key","cues_sha256","duration_ms"));
         number(captions,"revision",0,MAX_SAFE);hash(text(captions,"content_hash"));key(text(captions,"cues_key"));hash(text(captions,"cues_sha256"));number(captions,"duration_ms",1,MAX_SAFE);
         JsonNode output=value.path("output");fields(output,Set.of("width","height"));long outWidth=number(output,"width",2,4096),outHeight=number(output,"height",2,4096);
-        int expectedWidth=frame.equals("LANDSCAPE_720")?1280:frame.equals("PORTRAIT_720")?720:(width+1)/2*2;
-        int expectedHeight=frame.equals("LANDSCAPE_720")?720:frame.equals("PORTRAIT_720")?1280:(height+1)/2*2;
-        if(outWidth!=expectedWidth||outHeight!=expectedHeight)throw invalid();
+        var expected=outputSize(frame,width,height);
+        if(outWidth!=expected.width()||outHeight!=expected.height())throw invalid();
         JsonNode font=value.path("font");fields(font,Set.of("profile_id","family","key","sha256","size_bytes"));
         if(!FONT_PROFILE.equals(text(font,"profile_id"))||!FONT_FAMILY.equals(text(font,"family"))||!FONT_HASH.equals(text(font,"sha256"))||number(font,"size_bytes",FONT_SIZE,FONT_SIZE)!=FONT_SIZE)throw invalid();
         key(text(font,"key"));

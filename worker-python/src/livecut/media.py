@@ -534,17 +534,33 @@ def export_composed_clip(
         temporary.unlink(missing_ok=True)
 
 
+def _portrait_blur_foreground_size(width: int, height: int) -> tuple[int, int]:
+    """Contain the whole frame with bounded, nonzero chroma-aligned dimensions."""
+    if not 2 <= width <= 4096 or not 2 <= height <= 4096:
+        raise MediaError("INVALID_ARGUMENT", "Blur input dimensions must be within the frozen profile")
+    if width * 1280 >= height * 720:
+        foreground_width, foreground_height = 720, max(2, height * 720 // width // 2 * 2)
+    else:
+        foreground_width, foreground_height = max(2, width * 1280 // height // 2 * 2), 1280
+    return foreground_width, foreground_height
+
+
 def burn_caption_clip(
     source: str | Path, output: str | Path, working_dir: Path, *,
     width: int, height: int, expected_duration_ms: int, has_audio: bool,
     source_frame: bool = False,
+    blur_background: bool = False,
     ffmpeg_path: str | Path = "ffmpeg", ffprobe_path: str | Path = "ffprobe",
     timeout_seconds: float = 300, guard: Callable[[], None],
     on_encoding: Callable[[int], None], on_phase: Callable[[str], None],
 ) -> MediaInfo:
     """Burn only program-generated relative ASS; never seek or cut the clean clip."""
+    if type(blur_background) is not bool or (blur_background and (source_frame or (width, height) != (720, 1280))):
+        raise MediaError("INVALID_ARGUMENT", "Blur is available only for the fixed portrait output")
     info = probe_media(source, ffprobe_path=ffprobe_path, timeout_seconds=timeout_seconds, guard=guard)
     _require_aligned_timeline(info)
+    if blur_background:
+        foreground_width, foreground_height = _portrait_blur_foreground_size(info.width, info.height)
     target = _output_file(info.path, output, ".mp4")
     progress_path = working_dir / "ffmpeg-progress.txt"
     if progress_path.is_symlink():
@@ -572,9 +588,22 @@ def burn_caption_clip(
                 f"scale={width}:{height}:force_original_aspect_ratio=decrease:force_divisible_by=2,")
                + f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,"
                "ass=filename=captions.ass:fontsdir=fonts")
+    if blur_background:
+        # Only the decorative background stretches the complete source frame.
+        # Both scales have fixed bounds, even for extreme source aspect ratios.
+        graph = ("[0:v]split=2[background][foreground];"
+                 "[background]scale=360:640,gblur=sigma=20:steps=2,scale=720:1280,"
+                 "eq=contrast=0.8:brightness=-0.04:saturation=0.8,setsar=1[blurred];"
+                 f"[foreground]scale={foreground_width}:{foreground_height},setsar=1[contained];"
+                 "[blurred][contained]overlay=(W-w)/2:(H-h)/2:shortest=1:eof_action=endall,"
+                 "setsar=1,ass=filename=captions.ass:fontsdir=fonts[v]")
+        video_arguments = ["-filter_complex_threads", "1", "-filter_complex", graph,
+                           "-map", "[v]", "-map", "0:a:0?"]
+    else:
+        video_arguments = ["-map", "0:v:0", "-map", "0:a:0?", "-vf", filters]
     try:
         _run_process([str(ffmpeg_path), "-hide_banner", "-loglevel", "warning", "-nostdin", "-y",
-            "-i", str(info.path), "-map", "0:v:0", "-map", "0:a:0?", "-vf", filters,
+            "-i", str(info.path), *video_arguments,
             "-c:v", "libx264", "-threads", "2", "-preset", "veryfast", "-crf", "23",
             "-pix_fmt", "yuv420p", "-c:a", "aac", "-movflags", "+faststart", "-nostats",
             "-stats_period", "0.5", "-progress", "ffmpeg-progress.txt", str(temporary)],

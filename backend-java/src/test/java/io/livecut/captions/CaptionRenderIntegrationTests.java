@@ -10,6 +10,7 @@ import java.security.MessageDigest;
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
 import io.livecut.LivecutBackendApplication;
+import io.livecut.clips.ClipRequestService;
 import io.livecut.exports.ExportModels;
 import io.livecut.exports.ExportService;
 import io.livecut.jobs.*;
@@ -82,11 +83,44 @@ class CaptionRenderIntegrationTests {
     }
     @Test void allStylesAndFramesFreezeExactGeometryAndPrivateContentAddressedInputs()throws Exception{
         var f=fixture(0,4000,false);var caption=confirm(f);
+        Map<String,List<Integer>> sizes=Map.of("SOURCE",List.of(640,360),"LANDSCAPE_720",List.of(1280,720),"PORTRAIT_720",List.of(720,1280),"PORTRAIT_BLUR_720",List.of(720,1280));
+        assertEquals(sizes.keySet(),CaptionRenderSpec.FRAMES);
         for(String style:CaptionRenderSpec.STYLES)for(String frame:CaptionRenderSpec.FRAMES){var render=renders.create(f.export(),f.clip(),style+frame,body(caption).put("style_preset",style).put("frame_preset",frame));
             var frozen=JSON.readTree(jdbc.queryForObject("SELECT frozen_json FROM export_job WHERE id=?",String.class,render.id())).path("caption_render");CaptionRenderSpec.validate(frozen);
-            assertEquals(frame.equals("LANDSCAPE_720")?1280:frame.equals("PORTRAIT_720")?720:640,frozen.path("output").path("width").intValue());
+            assertEquals(sizes.get(frame).get(0).intValue(),frozen.path("output").path("width").intValue());assertEquals(sizes.get(frame).get(1).intValue(),frozen.path("output").path("height").intValue());
             for(String part:List.of("font","captions")){var node=frozen.path(part);String key=node.path(part.equals("font")?"key":"cues_key").asText(),hash=node.path(part.equals("font")?"sha256":"cues_sha256").asText();assertEquals(hash,sha(Files.readAllBytes(root.resolve(key))));}
         }
+    }
+    @Test void portraitBlurIsAnIndependentFrozenRenderAndKeepsLegacyGeometryAndReadsUnchanged()throws Exception{
+        var f=fixture(0,4000,false);var caption=confirm(f);var clean=exports.get(f.export());var parent=jobs.get(f.parent().job());
+        Map<String,List<Integer>> sizes=Map.of("SOURCE",List.of(640,360),"LANDSCAPE_720",List.of(1280,720),"PORTRAIT_720",List.of(720,1280));
+        Map<String,CaptionRenderModels.Snapshot> old=new HashMap<>();Map<String,String> frozenBefore=new HashMap<>();Map<String,byte[]> httpBefore=new HashMap<>();
+        for(String frame:sizes.keySet()){
+            var created=renders.create(f.export(),f.clip(),"legacy-"+frame,body(caption).put("frame_preset",frame));var lease=claim(stage(created));complete(lease,renderManifest(lease));
+            var done=renders.get(created.id());assertEquals("SUCCEEDED",done.status());assertEquals(sizes.get(frame).get(0).intValue(),done.media().width());assertEquals(sizes.get(frame).get(1).intValue(),done.media().height());old.put(frame,done);
+            frozenBefore.put(frame,jdbc.queryForObject("SELECT frozen_json FROM export_job WHERE id=?",String.class,done.id()));
+            var response=send("GET","/api/caption-renders/"+done.id(),null,null);assertEquals(200,response.statusCode());httpBefore.put(frame,response.body());
+        }
+        var portrait=old.get("PORTRAIT_720");var blurBody=body(caption).put("frame_preset","PORTRAIT_BLUR_720");
+        assertEquals("IDEMPOTENCY_CONFLICT",failure(()->renders.create(f.export(),f.clip(),"legacy-PORTRAIT_720",blurBody)));
+        var conflictingRequest=HttpRequest.newBuilder(base.resolve(f.path())).header("Content-Type","application/json").header("Idempotency-Key","legacy-PORTRAIT_720").POST(HttpRequest.BodyPublishers.ofByteArray(JSON.writeValueAsBytes(blurBody))).build();
+        var conflict=http.send(conflictingRequest,HttpResponse.BodyHandlers.ofByteArray());assertEquals(409,conflict.statusCode());assertEquals("IDEMPOTENCY_CONFLICT",JSON.readTree(conflict.body()).path("error_code").asText());
+        var blur=renders.create(f.export(),f.clip(),"new-blur",blurBody);assertEquals(blur,renders.create(f.export(),f.clip(),"new-blur",blurBody));assertNotEquals(portrait.id(),blur.id());
+        var portraitFrozen=JSON.readTree(frozenBefore.get("PORTRAIT_720"));var blurFrozen=JSON.readTree(jdbc.queryForObject("SELECT frozen_json FROM export_job WHERE id=?",String.class,blur.id()));
+        assertNotEquals(portraitFrozen.path("caption_render_hash").asText(),blurFrozen.path("caption_render_hash").asText());
+        assertNotEquals(jdbc.queryForObject("SELECT snapshot_hash FROM export_job WHERE id=?",String.class,portrait.id()),jdbc.queryForObject("SELECT snapshot_hash FROM export_job WHERE id=?",String.class,blur.id()));
+        assertNotEquals(jdbc.queryForObject("SELECT input_hash FROM job_stage WHERE id=?",String.class,stage(portrait)),jdbc.queryForObject("SELECT input_hash FROM job_stage WHERE id=?",String.class,stage(blur)));
+        var expectedSpec=(ObjectNode)portraitFrozen.path("caption_render").deepCopy();expectedSpec.put("frame_preset","PORTRAIT_BLUR_720");
+        assertEquals(ClipRequestService.canonicalJson(expectedSpec),ClipRequestService.canonicalJson(blurFrozen.path("caption_render")));
+        assertEquals("h264-aac-burn-v1",blurFrozen.path("encoding_profile").asText());assertEquals("caption-burn-v1",blurFrozen.path("caption_render").path("profile_version").asText());
+        var lease=claim(stage(blur));var wrong=renderManifest(lease);byte[] wrongMedia=JSON.writeValueAsBytes(Map.of("duration_ms",4000,"video_codec","h264","audio_codec","aac","frame_rate",30,"width",640,"height",360));write(prefix(lease)+"media-info.json",wrongMedia);
+        for(var ref:wrong.path("artifacts"))if(ref.path("kind").asText().equals("media_info"))((ObjectNode)ref).put("sha256",sha(wrongMedia));assertThrows(JobException.class,()->complete(lease,wrong));
+        complete(lease,renderManifest(lease));var done=renders.get(blur.id());assertEquals("SUCCEEDED",done.status());assertEquals(720,done.media().width());assertEquals(1280,done.media().height());assertEquals(200,send("GET",done.contentUrl(),null,null).statusCode());
+        for(String frame:sizes.keySet()){
+            var legacy=old.get(frame);assertEquals(legacy,renders.get(legacy.id()));assertEquals(frozenBefore.get(frame),jdbc.queryForObject("SELECT frozen_json FROM export_job WHERE id=?",String.class,legacy.id()));
+            var response=send("GET","/api/caption-renders/"+legacy.id(),null,null);assertEquals(200,response.statusCode());assertArrayEquals(httpBefore.get(frame),response.body());
+        }
+        assertEquals(4,renders.list(f.export(),f.clip()).items().size());assertEquals(clean,exports.get(f.export()));assertEquals(parent,jobs.get(f.parent().job()));assertEquals(0,jdbc.queryForObject("SELECT COUNT(*) FROM model_call WHERE job_id=?",Integer.class,f.parent().job()));
     }
     @Test void emptyAndSubCentisecondConfirmedCaptionsAreRejectedWithoutRenderRows()throws Exception{
         var f=fixture(0,4000,false);var caption=confirm(f);var edit=JSON.createObjectNode().put("base_revision",0);edit.putArray("cues");var empty=captions.save(f.export(),f.clip(),edit);captions.confirm(f.export(),f.clip(),JSON.valueToTree(Map.of("revision",1,"acknowledge_review",true)));

@@ -64,7 +64,7 @@ def spec(frame="SOURCE", style="WHITE_OUTLINE_V1", audio=True):
         "output": dict(
             zip(
                 ("width", "height"),
-                {"SOURCE": (320, 180), "LANDSCAPE_720": (1280, 720), "PORTRAIT_720": (720, 1280)}[
+                {"SOURCE": (320, 180), "LANDSCAPE_720": (1280, 720), "PORTRAIT_720": (720, 1280), "PORTRAIT_BLUR_720": (720, 1280)}[
                     frame
                 ],
             )

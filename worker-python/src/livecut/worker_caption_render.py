@@ -74,7 +74,7 @@ def validate_spec(value, expected_hash):
         or value["profile_version"] != PROFILE
         or value["timing_basis"] != "CLIP_RELATIVE_ASS_CS_FLOOR"
         or value["style_preset"] not in {"WHITE_OUTLINE_V1", "DARK_BOX_V1"}
-        or value["frame_preset"] not in {"SOURCE", "LANDSCAPE_720", "PORTRAIT_720"}
+        or value["frame_preset"] not in {"SOURCE", "LANDSCAPE_720", "PORTRAIT_720", "PORTRAIT_BLUR_720"}
     ):
         raise invalid()
     for name in ("source_export_id", "source_clip_id"):
@@ -110,6 +110,7 @@ def validate_spec(value, expected_hash):
         "SOURCE": ((media["width"] + 1) // 2 * 2, (media["height"] + 1) // 2 * 2),
         "LANDSCAPE_720": (1280, 720),
         "PORTRAIT_720": (720, 1280),
+        "PORTRAIT_BLUR_720": (720, 1280),
     }[value["frame_preset"]]
     if (
         (output["width"], output["height"]) != expected

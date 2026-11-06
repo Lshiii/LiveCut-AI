@@ -70,7 +70,8 @@
       "enum": [
         "SOURCE",
         "LANDSCAPE_720",
-        "PORTRAIT_720"
+        "PORTRAIT_720",
+        "PORTRAIT_BLUR_720"
       ]
     },
     "profile_version": {
@@ -327,6 +328,63 @@
           },
           "media": {
             "type": "null"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "frame_preset": {
+            "enum": [
+              "LANDSCAPE_720"
+            ]
+          },
+          "status": {
+            "const": "SUCCEEDED"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "media": {
+            "properties": {
+              "width": {
+                "const": 1280
+              },
+              "height": {
+                "const": 720
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "frame_preset": {
+            "enum": [
+              "PORTRAIT_720",
+              "PORTRAIT_BLUR_720"
+            ]
+          },
+          "status": {
+            "const": "SUCCEEDED"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "media": {
+            "properties": {
+              "width": {
+                "const": 720
+              },
+              "height": {
+                "const": 1280
+              }
+            }
           }
         }
       }

@@ -2,7 +2,7 @@ import { parseDiagnostic, type StageDiagnostic } from './diagnostics.ts'
 import type { CaptionSnapshot } from './captions.ts'
 
 export const captionRenderStyles = { WHITE_OUTLINE_V1: '白字黑描边', DARK_BOX_V1: '深色底字幕' } as const
-export const captionRenderFrames = { SOURCE: '保留原画幅', LANDSCAPE_720: '横屏 16:9 · 1280×720', PORTRAIT_720: '竖屏 9:16 · 720×1280' } as const
+export const captionRenderFrames = { SOURCE: '保留原画幅', LANDSCAPE_720: '横屏 16:9 · 1280×720', PORTRAIT_720: '竖屏补边 9:16 · 720×1280', PORTRAIT_BLUR_720: '竖屏背景柔化 · 720×1280' } as const
 export type CaptionRenderStyle = keyof typeof captionRenderStyles
 export type CaptionRenderFrame = keyof typeof captionRenderFrames
 export type CaptionRenderStatus = 'QUEUED' | 'RUNNING' | 'SUCCEEDED' | 'FAILED' | 'CANCELLED'
@@ -70,7 +70,7 @@ export function parseCaptionRender(raw: unknown, source: CaptionRenderSource, id
       || !row(raw.media) || !integer(raw.media.duration_ms, 1) || !integer(raw.media.width, 2, 4096) || raw.media.width % 2
       || !integer(raw.media.height, 2, 4096) || raw.media.height % 2 || raw.error_code !== null
       || raw.frame_preset === 'LANDSCAPE_720' && (raw.media.width !== 1280 || raw.media.height !== 720)
-      || raw.frame_preset === 'PORTRAIT_720' && (raw.media.width !== 720 || raw.media.height !== 1280)) invalid()
+      || ['PORTRAIT_720', 'PORTRAIT_BLUR_720'].includes(raw.frame_preset as string) && (raw.media.width !== 720 || raw.media.height !== 1280)) invalid()
   } else if (raw.content_url !== null || raw.download_url !== null || raw.size_bytes !== null || raw.media !== null) invalid()
   const { diagnostic: rawDiagnostic, ...rest } = raw
   const diagnostic = parseDiagnostic(rawDiagnostic, raw.attempt, raw.error_code)

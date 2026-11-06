@@ -132,7 +132,8 @@
       "enum": [
         "SOURCE",
         "LANDSCAPE_720",
-        "PORTRAIT_720"
+        "PORTRAIT_720",
+        "PORTRAIT_BLUR_720"
       ]
     },
     "output": {
@@ -189,5 +190,58 @@
     "timing_basis": {
       "const": "CLIP_RELATIVE_ASS_CS_FLOOR"
     }
-  }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "frame_preset": {
+            "enum": [
+              "LANDSCAPE_720"
+            ]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "output": {
+            "properties": {
+              "width": {
+                "const": 1280
+              },
+              "height": {
+                "const": 720
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "frame_preset": {
+            "enum": [
+              "PORTRAIT_720",
+              "PORTRAIT_BLUR_720"
+            ]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "output": {
+            "properties": {
+              "width": {
+                "const": 720
+              },
+              "height": {
+                "const": 1280
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
 }

@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs'
 import type { CaptionSnapshot } from '../captions.ts'
 import { captionRenderActive, captionRenderBase, captionRenderInput, captionRenderPath, captionRenderProgressCopy,
   captionRenderReceipt, createCaptionRenderReceiptStore, newestCaptionRender, parseCaptionRender, parseCaptionRenderList, CaptionRenderResponseError, CaptionRenderReceiptStorageError,
-  type CaptionRenderInput, type CaptionRenderSource } from '../captionRenders.ts'
+  type CaptionRenderFrame, type CaptionRenderInput, type CaptionRenderSource } from '../captionRenders.ts'
 
 const fixture = JSON.parse(readFileSync(new URL('../../../fixtures/caption-render.example.json', import.meta.url), 'utf8')) as Record<string, unknown>
 const source: CaptionRenderSource = { export_id: fixture.source_export_id as string, clip_id: fixture.source_clip_id as string, clip_sha256: fixture.source_clip_sha256 as string }
@@ -67,6 +67,28 @@ test('success dimensions match the chosen frame preset and the output must have 
   }
 })
 
+test('both portrait presets require exact 720 by 1280 geometry before publishing content', () => {
+  for (const frame of ['PORTRAIT_720', 'PORTRAIT_BLUR_720'] as const) {
+    const ready = success(); ready.frame_preset = frame; ready.media = { duration_ms: 4034, width: 720, height: 1280 }
+    assert.equal(parseCaptionRender(ready, source).frame_preset, frame)
+    for (const [width, height] of [[1280, 720], [718, 1280], [720, 1278], [721, 1280], [720, 0], [720, 4098]]) {
+      const wrong = { ...ready, media: { duration_ms: 4034, width, height } }
+      assert.throws(() => parseCaptionRender(wrong, source), CaptionRenderResponseError)
+    }
+  }
+})
+
+test('blur and all legacy presets preserve the four-field request contract including confirmed revision zero', () => {
+  const caption = confirmed(); caption.revision = 0
+  for (const frame of ['SOURCE', 'LANDSCAPE_720', 'PORTRAIT_720', 'PORTRAIT_BLUR_720'] as CaptionRenderFrame[]) {
+    assert.deepEqual(captionRenderInput(caption, 'WHITE_OUTLINE_V1', frame), {
+      caption_revision: 0, caption_content_hash: caption.content_hash, style_preset: 'WHITE_OUTLINE_V1', frame_preset: frame,
+    })
+    const queued = raw(); queued.caption_revision = 0; queued.frame_preset = frame
+    assert.equal(parseCaptionRender(queued, source).frame_preset, frame)
+  }
+})
+
 test('real progress is bounded and encoding 100 percent is not represented as a completed file', () => {
   const v = raw(); v.status = 'RUNNING'; v.attempt = 1; v.state_version = 3
   v.progress = { phase: 'ENCODING', processed_ms: 4000, total_ms: 4000, updated_at: fixture.updated_at }
@@ -114,12 +136,14 @@ test('a failed render may retry with the same frozen input while immutable ident
   const failed = raw(); failed.status = 'FAILED'; failed.state_version = 4; failed.attempt = 1; actions(failed).can_cancel = false; actions(failed).can_retry = true; actions(failed).retry_block_reason = null
   const known = parseCaptionRender(failed, source), retried = parseCaptionRender({ ...raw(), state_version: 5, attempt: 1 }, source)
   assert.equal(newestCaptionRender(known, retried), retried)
-  for (const patch of [{ caption_content_hash: 'c'.repeat(64) }, { caption_revision: 2 }, { style_preset: 'DARK_BOX_V1' }, { frame_preset: 'LANDSCAPE_720' }, { job_id: source.export_id }]) {
+  for (const patch of [{ caption_content_hash: 'c'.repeat(64) }, { caption_revision: 2 }, { style_preset: 'DARK_BOX_V1' }, { frame_preset: 'LANDSCAPE_720' }, { frame_preset: 'PORTRAIT_BLUR_720' }, { job_id: source.export_id }]) {
     const changed = parseCaptionRender({ ...raw(), ...patch, state_version: 10 }, source)
     assert.throws(() => newestCaptionRender(known, changed), CaptionRenderResponseError)
   }
   const done = parseCaptionRender(success(), source), changed = success(); changed.state_version = 6; changed.size_bytes = 22222
   assert.throws(() => newestCaptionRender(done, parseCaptionRender(changed, source)), CaptionRenderResponseError)
+  const oldPortrait = { ...failed, frame_preset: 'PORTRAIT_720' }, blurredRetry = { ...oldPortrait, frame_preset: 'PORTRAIT_BLUR_720', state_version: 5 }
+  assert.throws(() => newestCaptionRender(parseCaptionRender(oldPortrait, source), parseCaptionRender(blurredRetry, source)), CaptionRenderResponseError)
 })
 
 test('history rejects duplicates, cross-job records, and oversized responses while ordering newest first', () => {
@@ -175,6 +199,20 @@ test('unknown A survives B submission and successful B acknowledgement, includin
   assert.equal(issued, 2)
   assert.notEqual(reloadedPage.prepare(b).key, pendingB.key, 'an acknowledged configuration can intentionally create a new task')
   assert.deepEqual(reloadedPage.prepare(a), pendingA)
+})
+
+test('padded and blurred portrait requests retain different unknown keys after reload and independent acknowledgement', () => {
+  const storage = receiptStorage(), caption = confirmed(); caption.revision = 0
+  const padded = captionRenderInput(caption, 'WHITE_OUTLINE_V1', 'PORTRAIT_720'), blurred = captionRenderInput(caption, 'WHITE_OUTLINE_V1', 'PORTRAIT_BLUR_720')
+  let issued = 0; const issue = () => `portrait-request-${++issued}`
+  const page = createCaptionRenderReceiptStore('same-source', storage, issue)
+  const original = page.prepare(padded), decorated = page.prepare(blurred)
+  assert.notEqual(original.key, decorated.key)
+  const reload = createCaptionRenderReceiptStore('same-source', storage, issue)
+  assert.deepEqual(reload.prepare(padded), original); assert.deepEqual(reload.prepare(blurred), decorated)
+  reload.accept(blurred, decorated)
+  assert.deepEqual(createCaptionRenderReceiptStore('same-source', storage, issue).prepare(padded), original)
+  assert.equal(issued, 2)
 })
 
 test('all frozen input fields and source identities isolate persisted unknown outcomes', () => {

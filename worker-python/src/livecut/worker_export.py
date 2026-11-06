@@ -218,6 +218,7 @@ class ExportStageExecutor:
                     width=output["width"], height=output["height"], expected_duration_ms=spec.end_ms,
                     has_audio=spec.caption_render["input_media"]["has_audio"],
                     source_frame=spec.caption_render["frame_preset"] == "SOURCE",
+                    blur_background=spec.caption_render["frame_preset"] == "PORTRAIT_BLUR_720",
                     ffmpeg_path=self.ffmpeg_path, ffprobe_path=self.ffprobe_path,
                     timeout_seconds=min(300, context.guard.remaining_seconds()), guard=context.guard.check,
                     on_encoding=progress.encoding, on_phase=progress.phase)
