@@ -382,7 +382,7 @@ onUnmounted(() => { stopped = true; detailRecovery.cancel(); selectionVersion++;
         <div id="workbench-pane-agent" v-show="activeTab === 'agent'" class="workbench-pane conversation-pane" role="tabpanel" aria-labelledby="workbench-tab-agent">
           <VideoAgentPanel v-if="selectedJob?.status === 'REVIEW_READY' && currentVideo && topicMode" :key="`agent-${selectedJob.id}`" ref="agentEditor" :active="activeTab === 'agent'" :job-id="selectedJob.id" :video-id="currentVideo.id" :video-hash="currentVideo.content_hash" :video-url="currentVideo.content_url" :clip-target-busy="!!intentEditor?.dirty || !!intentEditor?.pending" @clip-instruction="useAgentClipInstruction" />
         </div>
-        <div id="workbench-pane-topics" v-show="activeTab === 'topics'" class="workbench-pane" role="tabpanel" aria-labelledby="workbench-tab-topics">
+        <div id="workbench-pane-topics" v-show="activeTab === 'topics'" class="workbench-pane" :class="{ 'topic-workspace-pane': topicMode }" role="tabpanel" aria-labelledby="workbench-tab-topics">
           <TopicReviewPanel v-if="selectedJob?.status === 'REVIEW_READY' && currentVideo && topicMode" :key="selectedJob.id" ref="reviewEditor" :active="activeTab === 'topics'" :job-id="selectedJob.id" :video-url="currentVideo.content_url" />
           <ReviewPanel v-else-if="selectedJob?.status === 'REVIEW_READY' && currentVideo" :key="selectedJob.id" ref="reviewEditor" :active="activeTab === 'topics'" :job-id="selectedJob.id" :video-url="currentVideo.content_url" />
         </div>
