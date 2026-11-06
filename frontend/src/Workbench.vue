@@ -435,7 +435,7 @@ onUnmounted(() => { stopped = true; compactQuery.removeEventListener('change', u
           <TopicReviewPanel v-if="selectedJob?.status === 'REVIEW_READY' && currentVideo && topicMode" :key="selectedJob.id" ref="reviewEditor" :active="activeTab === 'topics'" :job-id="selectedJob.id" :video-url="currentVideo.content_url" />
           <ReviewPanel v-else-if="selectedJob?.status === 'REVIEW_READY' && currentVideo" :key="selectedJob.id" ref="reviewEditor" :active="activeTab === 'topics'" :job-id="selectedJob.id" :video-url="currentVideo.content_url" />
         </div>
-        <div id="workbench-pane-clips" v-show="activeTab === 'clips'" class="workbench-pane" role="tabpanel" aria-labelledby="workbench-tab-clips">
+        <div id="workbench-pane-clips" v-show="activeTab === 'clips'" class="workbench-pane intent-workspace-pane" role="tabpanel" aria-labelledby="workbench-tab-clips">
           <IntentClipPanel v-if="selectedJob?.status === 'REVIEW_READY' && currentVideo && topicMode" :key="`intent-${selectedJob.id}`" ref="intentEditor" :active="activeTab === 'clips'" :job-id="selectedJob.id" :video-url="currentVideo.content_url" />
         </div>
         <div id="workbench-pane-task" v-show="activeTab === 'task'" class="workbench-pane task-pane" role="tabpanel" aria-labelledby="workbench-tab-task"><div class="settings-grid">

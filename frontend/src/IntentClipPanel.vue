@@ -23,6 +23,13 @@ const exportPlayer = ref<HTMLVideoElement | null>(null)
 const captionTarget = ref<{ exportId: string; clipId: string; contentUrl: string } | null>(null)
 const captionEditor = ref<{ dirty: boolean; pending: boolean } | null>(null)
 const packageBusyId = ref(''), packageUrls = ref<Record<string, string>>({})
+type IntentView = 'compose' | 'review' | 'deliveries'
+const intentView = ref<IntentView>('compose'), historyOpen = ref(false)
+const historyPanel = ref<HTMLElement | null>(null), historyToggle = ref<HTMLButtonElement | null>(null)
+const previewSection = ref<HTMLElement | null>(null)
+const intentPanel = ref<HTMLElement | null>(null), sourceContextOpen = ref(true)
+let contextObserver: ResizeObserver | undefined, compactContext = false
+let viewChosen = false, defaultViewRequest = '', navigationVersion = 0
 const scope = new IntentReadScope()
 let stopped = false, refreshing = false, timer: number | undefined, selectionVersion = 0, focusVersion = 0
 let pendingCreate: { input: string; key: string } | null = null
@@ -39,6 +46,12 @@ const canResume = computed(() => intentCanResume(snapshot.value, dirty.value, pe
 const selectedCount = computed(() => outputs.value.filter(value => value.enabled).length)
 const unresolved = computed(() => outputs.value.filter(value => value.status !== 'FOUND').length)
 const confirmed = computed(() => !!snapshot.value && snapshot.value.confirmed_revisions.includes(snapshot.value.revision))
+const completedClips = computed(() => batches.value.reduce((count, batch) => count + batch.clips.filter(clip => clip.status === 'SUCCEEDED').length, 0))
+const primaryAction = computed(() => planDirty.value
+  ? { label: action.value === 'save' ? '正在保存…' : '保存方案', enabled: !pending.value && !validation.value, run: save }
+  : confirmed.value
+    ? { label: action.value === 'export' ? '正在创建…' : '生成独立 MP4', enabled: canExport.value, run: exportPlan }
+    : { label: action.value === 'confirm' ? '正在确认…' : '确认所选目标', enabled: canConfirm.value, run: confirm })
 const names: Record<string, string> = { QUEUED: '等待执行', RUNNING: '正在查找', PLAN_READY: '候选已生成', FAILED: '执行失败', CANCELLED: '已取消',
   FOUND: '已找到证据', NOT_FOUND: '未找到', NEEDS_REVIEW: '需进一步核对', READY: '等待领取', BLOCKED: '等待前序',
   RETRY_WAIT: '等待重试', SUCCEEDED: '已完成', PARTIAL_FAILED: '部分失败', SKIPPED: '已跳过' }
@@ -46,8 +59,9 @@ defineExpose({ dirty: computed(() => dirty.value || !!captionEditor.value?.dirty
 function prefillInstruction(value: string): boolean {
   if (!canPrefillClipInstruction(value, dirty.value || !!captionEditor.value?.dirty, pending.value || !!captionEditor.value?.pending)) return false
   instruction.value = value.trim(); error.value = ''; notice.value = '已填入视频助手的建议。请核对要求，再点击查找片段。'
+  closeHistory(false); setView('compose')
   const version = ++focusVersion
-  void nextTick(() => { if (!stopped && props.active !== false && version === focusVersion) instructionInput.value?.focus() })
+  void nextTick(() => { if (!stopped && props.active !== false && intentView.value === 'compose' && version === focusVersion) instructionInput.value?.focus() })
   return true
 }
 
@@ -98,7 +112,9 @@ function canChangeRequest() {
   return true
 }
 async function selectRequest(id: string) {
+  closeHistory()
   if (id === selectedId.value || !canChangeRequest()) return
+  pauseMedia(); defaultViewRequest = id; viewChosen = false; intentView.value = 'review'
   scope.invalidate(); selectionVersion++; selectedId.value = id; snapshot.value = null; outputs.value = []
   baseline.value = ''; draftRevision.value = null; batches.value = []; previewUrl.value = ''; error.value = ''; notice.value = ''
   const known = requests.value.find(row => row.id === id)
@@ -106,7 +122,9 @@ async function selectRequest(id: string) {
   await refresh()
 }
 async function refresh() {
-  if (refreshing || stopped) return
+  // Mutations invalidate older reads; do not start a new list read during their POST.
+  // Otherwise an exports response captured before creation can erase the new batch.
+  if (refreshing || stopped || pending.value) return
   refreshing = true
   const read = scope.begin(), jobId = props.jobId
   try {
@@ -122,6 +140,7 @@ async function refresh() {
     requests.value.sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at))
     if (!selectedId.value && requests.value[0]) {
       selectedId.value = requests.value[0].id; accept(requests.value[0], true)
+      defaultViewRequest = selectedId.value
     }
     const requestId = selectedId.value
     if (requestId) {
@@ -136,6 +155,10 @@ async function refresh() {
         return parseExportSnapshot(value, value.id, jobId)
       })
       batches.value = incoming.map(value => newestSnapshot(batches.value.find(known => known.id === value.id), value))
+      if (defaultViewRequest === requestId) {
+        defaultViewRequest = ''
+        if (!viewChosen && !dirty.value) intentView.value = batches.value.length ? 'deliveries' : 'review'
+      }
     }
     refreshError.value = ''
   } catch (value) { if (read.current()) refreshError.value = message(value) }
@@ -160,13 +183,14 @@ async function create() {
   pendingCreate = { input, key }
   try { localStorage.setItem(storageKey, JSON.stringify(pendingCreate)) } catch { /* Keep the mounted-view receipt when storage is unavailable. */ }
   action.value = 'create'; error.value = ''; notice.value = ''; scope.invalidate()
-  const version = ++selectionVersion
+  const version = ++selectionVersion, navigation = navigationVersion
   try {
     const raw = await post<unknown>(`/api/jobs/${jobId}/clip-requests`, payload, { 'Idempotency-Key': key })
     if (stopped || version !== selectionVersion || jobId !== props.jobId) return
     const value = parseIntentSnapshot(raw, jobId)
     selectedId.value = value.id; snapshot.value = null; outputs.value = []; batches.value = []; previewUrl.value = ''
-    instruction.value = ''; accept(value, true)
+    instruction.value = ''; accept(value, true); defaultViewRequest = ''
+    if (navigation === navigationVersion && intentView.value === 'compose') setView('review', false)
     pendingCreate = null
     try {
       const current = JSON.parse(localStorage.getItem(storageKey) ?? 'null')
@@ -202,13 +226,15 @@ async function resumeRequest() {
   pendingResumes.set(storageKey, receipt)
   try { localStorage.setItem(storageKey, JSON.stringify(receipt)) } catch { /* Keep the mounted-view receipt if storage is unavailable. */ }
   action.value = 'resume'; error.value = ''; notice.value = ''; scope.invalidate()
-  const version = ++selectionVersion
+  const version = ++selectionVersion, navigation = navigationVersion
   try {
     const raw = await post<unknown>(`/api/clip-requests/${id}/resume`, { max_text_calls: budget }, { 'Idempotency-Key': receipt.key })
     if (!validOperation(id, version) || props.jobId !== jobId) return
     const value = parseResumedIntentSnapshot(raw, source, budget)
     selectedId.value = value.id; snapshot.value = null; outputs.value = []; batches.value = []; previewUrl.value = ''
     accept(value, true)
+    defaultViewRequest = ''
+    if (navigation === navigationVersion) setView('review', false)
     pendingResumes.delete(storageKey)
     try {
       const current = JSON.parse(localStorage.getItem(storageKey) ?? 'null')
@@ -245,7 +271,7 @@ async function confirm() {
 }
 async function exportPlan() {
   if (!canExport.value || !snapshot.value) return
-  const id = selectedId.value, version = selectionVersion, revision = snapshot.value.revision, planHash = snapshot.value.plan_hash
+  const id = selectedId.value, version = selectionVersion, navigation = navigationVersion, revision = snapshot.value.revision, planHash = snapshot.value.plan_hash
   action.value = 'export'; error.value = ''; notice.value = ''; scope.invalidate()
   try {
     const raw = await post<unknown>(`/api/clip-requests/${id}/exports`, { revision, plan_hash: planHash, profile: 'h264-aac-v1' })
@@ -255,6 +281,7 @@ async function exportPlan() {
     const known = batches.value.findIndex(batch => batch.id === value.id)
     if (known < 0) batches.value.unshift(value)
     else batches.value[known] = newestSnapshot(batches.value[known], value)
+    if (navigation === navigationVersion && intentView.value === 'review') setView('deliveries', false)
     notice.value = '导出任务已创建。每个已选目标生成一个文件，多段内容按原视频顺序拼接。'
   } catch (value) { if (validOperation(id, version)) fail(value) }
   finally { if (validOperation(id, version)) action.value = '' }
@@ -275,13 +302,72 @@ function removePart(output: IntentOutput, index: number) { output.parts.splice(i
 function unexclude(output: IntentOutput, index: number) { output.excluded.splice(index, 1) }
 function sourceText(id: string) { return snapshot.value?.utterances.find(value => value.utterance_id === id)?.text ?? '原句不可用' }
 function sourceTime(id: string) { return snapshot.value?.utterances.find(value => value.utterance_id === id)?.start_ms ?? -1 }
-function locate(id: string) { const start = sourceTime(id); if (sourcePlayer.value && start >= 0) { sourcePlayer.value.pause(); sourcePlayer.value.currentTime = start / 1000 } }
+async function locate(id: string) {
+  const start = sourceTime(id)
+  if (start < 0 || !mediaActive('review')) return
+  const requestId = selectedId.value, version = selectionVersion, navigation = navigationVersion
+  sourceContextOpen.value = true
+  await nextTick()
+  if (!sourcePlayer.value || !validOperation(requestId, version) || navigation !== navigationVersion || !mediaActive('review')) return
+  sourcePlayer.value.pause()
+  try {
+    sourcePlayer.value.currentTime = start / 1000
+    if (compactContext) sourcePlayer.value.scrollIntoView({ block: 'nearest' })
+  }
+  catch { error.value = '暂时无法定位原句，请等待视频加载后重试。' }
+}
 function goal(output: IntentOutput) { return snapshot.value?.plan?.goals.find(value => value.goal_id === output.goal_id)?.description ?? output.title }
 function duration(output: IntentOutput) { return output.parts.reduce((sum, part) => sum + Math.max(0, part.end_ms - part.start_ms), 0) }
 function date(value: string) { return new Date(value).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) }
 function unload(event: BeforeUnloadEvent) { if (dirty.value || pending.value) { event.preventDefault(); event.returnValue = '' } }
 function pauseMedia() { sourcePlayer.value?.pause(); exportPlayer.value?.pause() }
-function guardPlayback(event: Event) { if (props.active === false || stopped || captionTarget.value) (event.currentTarget as HTMLVideoElement).pause() }
+function mediaActive(view: IntentView) { return props.active !== false && !stopped && !(captionTarget.value && intentView.value === 'deliveries') && !historyOpen.value && intentView.value === view }
+function guardPlayback(event: Event) {
+  const player = event.currentTarget as HTMLVideoElement
+  if (!(player === sourcePlayer.value && sourceContextOpen.value && mediaActive('review')) && !(player === exportPlayer.value && mediaActive('deliveries'))) player.pause()
+}
+function setView(view: IntentView, userInitiated = true) {
+  if (view !== 'compose' && !snapshot.value) return
+  if (userInitiated) { viewChosen = true; navigationVersion++ }
+  intentView.value = view
+  if (!userInitiated) {
+    const id = selectedId.value, version = selectionVersion, navigation = navigationVersion
+    void nextTick(() => {
+      if (validOperation(id, version) && props.active !== false && !historyOpen.value && navigation === navigationVersion && intentView.value === view) document.getElementById(`intent-view-${props.jobId}-${view}`)?.focus()
+    })
+  }
+}
+function viewKey(event: KeyboardEvent) {
+  if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return
+  const views: IntentView[] = snapshot.value ? ['compose', 'review', 'deliveries'] : ['compose']
+  event.preventDefault()
+  const index = views.indexOf(intentView.value)
+  const next = event.key === 'Home' ? views[0]! : event.key === 'End' ? views.at(-1)! : views[(index + (event.key === 'ArrowRight' ? 1 : -1) + views.length) % views.length]!
+  setView(next)
+  void nextTick(() => document.getElementById(`intent-view-${props.jobId}-${next}`)?.focus())
+}
+function closeHistory(restoreFocus = true) {
+  if (!historyOpen.value) return
+  historyOpen.value = false
+  if (restoreFocus && props.active !== false) void nextTick(() => historyToggle.value?.focus())
+}
+function toggleHistory() {
+  if (historyOpen.value) { closeHistory(); return }
+  pauseMedia(); historyOpen.value = true
+  void nextTick(() => historyPanel.value?.querySelector<HTMLButtonElement>('button:not(:disabled)')?.focus())
+}
+function historyKey(event: KeyboardEvent) {
+  if (event.key !== 'Tab') return
+  const buttons = [...(historyPanel.value?.querySelectorAll<HTMLButtonElement>('button:not(:disabled)') ?? [])]
+  if (event.shiftKey && document.activeElement === buttons[0]) { event.preventDefault(); buttons.at(-1)?.focus() }
+  else if (!event.shiftKey && document.activeElement === buttons.at(-1)) { event.preventDefault(); buttons[0]?.focus() }
+}
+function showExportPreview(url: string) {
+  if (!mediaActive('deliveries') || !url) return
+  exportPlayer.value?.pause(); previewUrl.value = url
+  const requestId = selectedId.value, version = selectionVersion
+  void nextTick(() => { if (validOperation(requestId, version) && mediaActive('deliveries') && previewUrl.value === url) previewSection.value?.scrollIntoView({ block: 'nearest' }) })
+}
 function openCaptions(batch: ExportJob, clip: ExportJob['clips'][number]) {
   if (pending.value || captionEditor.value?.pending || clip.status !== 'SUCCEEDED' || !clip.content_url) return
   if (captionEditor.value?.dirty) { error.value = '字幕有未保存修改，请先保存或放弃字幕修改。'; return }
@@ -302,28 +388,48 @@ async function downloadBatchPackage(batch: ExportJob) {
     }
   } finally { if (packageBusyId.value === batch.id) packageBusyId.value = '' }
 }
-watch(() => props.active, value => { if (value === false) { focusVersion++; pauseMedia() } })
-onMounted(() => { window.addEventListener('beforeunload', unload); void poll() })
-onBeforeUnmount(() => { stopped = true; selectionVersion++; focusVersion++; pauseMedia(); scope.dispose(); window.clearTimeout(timer); window.removeEventListener('beforeunload', unload) })
+watch(intentView, () => { focusVersion++; pauseMedia() }, { flush: 'sync' })
+watch(sourceContextOpen, open => { if (!open) sourcePlayer.value?.pause() }, { flush: 'sync' })
+watch(() => props.active, value => { if (value === false) { focusVersion++; closeHistory(false); pauseMedia() } }, { flush: 'sync' })
+onMounted(() => {
+  window.addEventListener('beforeunload', unload); void poll()
+  contextObserver = new ResizeObserver(entries => {
+    const width = entries[0]?.contentRect.width
+    if (stopped || !width) return
+    const compact = width <= 900
+    if (compact !== compactContext) { compactContext = compact; sourceContextOpen.value = !compact }
+  })
+  if (intentPanel.value) contextObserver.observe(intentPanel.value)
+})
+onBeforeUnmount(() => { stopped = true; selectionVersion++; focusVersion++; pauseMedia(); contextObserver?.disconnect(); scope.dispose(); window.clearTimeout(timer); window.removeEventListener('beforeunload', unload) })
 </script>
 
 <template>
-  <section class="panel intent-panel" aria-label="按需求找片段">
-    <div class="panel-heading"><div><div class="eyebrow">YOUR REQUEST → CLIP PLAN</div><h2>按需求找片段</h2></div><span class="status" v-if="snapshot">{{ names[snapshot.status] }}</span></div>
-    <p class="intent-intro">描述要保留的内容，核对候选后生成独立视频。</p>
-    <details class="intent-guide"><summary>查找与自动恢复说明</summary><p>系统复用本视频的转写，返回原句证据与候选范围。短暂错误会在次数和预算上限内自动恢复，已完成的语音转写会保留；每个确认目标生成一个视频。</p></details>
-    <div v-if="error" class="message error" role="alert"><span>{{ error }}</span><button aria-label="关闭剪辑错误" @click="error = ''">×</button></div>
-    <p v-if="refreshError" class="intent-warning" role="status">{{ refreshError }} 后台状态会继续刷新，当前修改不受影响。</p>
-    <p v-if="notice" class="intent-notice" role="status">{{ notice }}</p>
-    <div class="intent-compose">
-      <label for="intent-instruction">剪辑要求<textarea id="intent-instruction" ref="instructionInput" v-model="instruction" :disabled="pending" maxlength="2000" rows="3" placeholder="例如：把缓存失效原因和解决方法分别剪出来，保留完整解释，跳过关注引导。"></textarea></label>
-      <div class="intent-create-row"><label>模型请求上限<input v-model.number="maxCalls" type="number" min="1" max="24" :disabled="pending" aria-label="剪辑模型请求上限"></label><span>复用已完成的语音转写，本次不重新提交 ASR。</span><button class="primary" :disabled="pending || !instruction.trim() || planDirty" @click="create">{{ action === 'create' ? '正在创建…' : '查找片段' }}</button></div>
-    </div>
-    <div class="intent-workspace">
-      <aside class="intent-requests" aria-label="剪辑请求列表"><div class="intent-subheading"><h3>剪辑请求 {{ requests.length }}</h3><button class="text-button" :disabled="pending" @click="refresh">刷新</button></div><p v-if="loading" class="help">正在读取请求…</p><p v-else-if="!requests.length" class="help">还没有剪辑请求。上面的要求会保存为独立请求，不会覆盖原来的话题草稿。</p><div class="intent-request-list"><button v-for="request in requests" :key="request.id" class="intent-request" :class="{ selected: selectedId === request.id }" :disabled="pending" @click="selectRequest(request.id)"><strong>{{ request.instruction }}</strong><span>{{ names[request.status] }} · {{ date(request.created_at) }}</span></button></div></aside>
-      <div class="intent-result" v-if="snapshot">
-        <div class="intent-subheading"><h3>当前方案 <span v-if="snapshot.plan">r{{ draftRevision }} · {{ selectedCount }} 个目标已选</span></h3><button v-if="dirty" class="text-button" :disabled="pending" @click="discard">放弃本页修改</button></div>
-        <details class="intent-original-details"><summary>查看本次剪辑要求</summary><p class="intent-original">{{ snapshot.instruction }}</p></details>
+  <section ref="intentPanel" class="panel intent-panel" aria-label="按需求找片段" @keydown.esc="closeHistory()">
+    <div class="intent-surface" :inert="historyOpen ? true : undefined">
+      <header class="intent-toolbar"><h2>按需剪辑 <span v-if="snapshot" class="status">{{ names[snapshot.status] }}</span></h2><div class="intent-toolbar-actions"><button ref="historyToggle" class="secondary" :aria-expanded="historyOpen" :aria-controls="`intent-history-${jobId}`" @click="toggleHistory">历史请求 {{ requests.length }}</button><button class="text-button" :disabled="pending" @click="refresh">刷新</button></div></header>
+      <nav class="intent-view-tabs" role="tablist" aria-label="按需剪辑流程" @keydown="viewKey">
+        <button :id="`intent-view-${jobId}-compose`" role="tab" :aria-controls="`intent-page-${jobId}-compose`" :aria-selected="intentView === 'compose'" :tabindex="intentView === 'compose' ? 0 : -1" @click="setView('compose')">剪辑要求<span v-if="instruction.trim()" class="draft-dot" aria-label="有未提交要求"></span></button>
+        <button :id="`intent-view-${jobId}-review`" role="tab" :aria-controls="`intent-page-${jobId}-review`" :aria-selected="intentView === 'review'" :tabindex="intentView === 'review' ? 0 : -1" :disabled="!snapshot" @click="setView('review')">核对方案<span v-if="planDirty" class="draft-dot" aria-label="有未保存修改"></span></button>
+        <button :id="`intent-view-${jobId}-deliveries`" role="tab" :aria-controls="`intent-page-${jobId}-deliveries`" :aria-selected="intentView === 'deliveries'" :tabindex="intentView === 'deliveries' ? 0 : -1" :disabled="!snapshot" @click="setView('deliveries')">成片与字幕<span v-if="batches.length" class="intent-view-count">{{ completedClips }}</span></button>
+      </nav>
+      <div class="intent-feedback"><div v-if="error" class="message error" role="alert"><span>{{ error }}</span><button aria-label="关闭剪辑错误" @click="error = ''">×</button></div><p v-if="refreshError" class="intent-warning" role="status">{{ refreshError }} 后台状态会继续刷新，当前修改不受影响。</p><p v-if="notice" class="intent-notice" role="status">{{ notice }}</p></div>
+      <div class="intent-views">
+        <div v-show="intentView === 'compose'" :id="`intent-page-${jobId}-compose`" class="intent-compose-view" role="tabpanel" :aria-labelledby="`intent-view-${jobId}-compose`">
+          <div class="intent-compose-title"><h3>想从视频里剪出什么？</h3><p class="help">每个目标生成一个视频。先找候选，再由你核对、确认。</p></div>
+          <div class="intent-compose"><label for="intent-instruction">剪辑要求<textarea id="intent-instruction" ref="instructionInput" v-model="instruction" :disabled="pending" maxlength="2000" rows="4" placeholder="例如：把缓存失效原因和解决方法分别剪出来，保留完整解释，跳过关注引导。"></textarea></label><div class="intent-create-row"><label>模型请求上限<input v-model.number="maxCalls" type="number" min="1" max="24" :disabled="pending" aria-label="剪辑模型请求上限"></label><span>复用现有转写，不重新提交 ASR。</span><button class="primary" :disabled="pending || !instruction.trim() || planDirty" @click="create">{{ action === 'create' ? '正在创建…' : '查找片段' }}</button></div></div>
+          <p v-if="planDirty" class="intent-draft-hint">当前方案有未保存修改。新要求会保留，先回到核对方案保存或放弃修改，再查找。<button class="text-button" @click="setView('review')">回到核对方案 →</button></p>
+          <div v-if="instruction.trim()" class="intent-compose-actions"><button class="text-button" :disabled="pending" @click="instruction = ''">放弃新要求</button></div>
+          <details class="intent-guide"><summary>查找与自动恢复说明</summary><p>系统复用本视频的转写，返回原句证据与候选范围。短暂错误会在次数和预算上限内自动恢复，已完成的语音转写会保留；每个确认目标生成一个视频。新请求不会覆盖原来的话题草稿或既有成片。</p></details>
+        </div>
+        <div v-show="intentView === 'review'" :id="`intent-page-${jobId}-review`" class="intent-review-view" role="tabpanel" :aria-labelledby="`intent-view-${jobId}-review`">
+          <div v-if="snapshot" class="intent-review-layout">
+            <aside class="intent-context" aria-label="剪辑原视频与执行信息">
+              <details class="intent-source-details" :open="sourceContextOpen" @toggle="sourceContextOpen = ($event.target as HTMLDetailsElement).open"><summary>回看原视频 <span>{{ sourceContextOpen ? '收起' : '展开' }}</span></summary>
+              <video ref="sourcePlayer" :src="videoUrl" controls preload="metadata" playsinline class="intent-source" @play="guardPlayback"></video>
+              <p class="help">点击候选原句可定位回看；多段内容按所列顺序拼接。</p>
+              <details class="intent-original-details"><summary>本次剪辑要求</summary><p class="intent-original">{{ snapshot.instruction }}</p></details>
+              </details>
         <p v-if="snapshot.resumed_from_request_id" class="help">本次继续自请求 #{{ snapshot.resumed_from_request_id.slice(0, 8) }}，原转写复用，文本分析与预算独立。</p>
         <p class="help">本次已预留文本请求 {{ snapshot.budget.text_calls_reserved }} / {{ snapshot.budget.max_text_calls }}，包含自动恢复尝试，为次数上限。</p>
         <div v-if="['QUEUED', 'RUNNING'].includes(snapshot.status)" class="intent-recovery-actions">
@@ -331,17 +437,17 @@ onBeforeUnmount(() => { stopped = true; selectionVersion++; focusVersion++; paus
           <button class="text-button" :disabled="!canCancel" @click="cancelRequest">{{ action === 'cancel' ? '正在取消…' : '取消本次查找' }}</button>
         </div>
         <div v-if="['FAILED', 'CANCELLED'].includes(snapshot.status)" class="intent-recovery-actions">
-          <p class="help">继续查找会复用已完成转写，新建一次文本分析，使用上方设置的调用次数上限；旧请求与调用记录保留。</p>
-          <p v-if="instruction.trim()" class="help">上方有尚未提交的新要求，请先提交或放弃输入，再继续当前请求。</p>
-          <button class="primary" :disabled="!canResume" @click="resumeRequest">{{ action === 'resume' ? '正在继续…' : '继续查找' }}</button>
+          <p class="help">继续查找会复用已完成转写，新建一次文本分析，使用下方设置的调用次数上限；旧请求与调用记录保留。</p>
+          <p v-if="instruction.trim()" class="help">剪辑要求页有尚未提交的新要求，请先提交或放弃输入，再继续当前请求。</p>
+          <label class="intent-resume-budget">新请求模型上限<input v-model.number="maxCalls" type="number" min="1" max="24" :disabled="pending" aria-label="继续查找模型请求上限"></label><button class="primary" :disabled="!canResume" @click="resumeRequest">{{ action === 'resume' ? '正在继续…' : '继续查找' }}</button>
         </div>
         <TextRequestProgress :progress="snapshot.stage.text_progress" :terminal="['PLAN_READY', 'FAILED', 'CANCELLED'].includes(snapshot.status)" />
         <FailureDiagnostic v-if="snapshot.status !== 'CANCELLED'" :error-code="snapshot.stage.error_code" :attempt="snapshot.stage.attempt" />
-        <p v-if="!snapshot.plan" class="intent-empty">{{ snapshot.status === 'FAILED' ? '本次查找未完成。请查看执行原因，原视频和原话题结果仍保留。' : snapshot.status === 'CANCELLED' ? '本次请求已取消。' : snapshot.status === 'RUNNING' ? '正在查找候选片段，执行进度会自动更新。你可以继续回看原视频。' : '正在等待执行服务生成候选方案。你可以继续回看原视频。' }}</p>
-        <template v-else>
-          <div class="intent-save-row"><p v-if="validation" class="intent-validation" role="status">{{ validation }}</p><div class="intent-save-controls"><span>{{ planDirty ? '方案修改尚未保存' : confirmed ? `r${snapshot.revision} 已确认` : '核对并勾选目标，再确认生成' }}</span><div class="actions"><button class="secondary" :disabled="pending || !planDirty || !!validation" @click="save">{{ action === 'save' ? '正在保存…' : '保存方案' }}</button><button class="primary" :disabled="!canConfirm" @click="confirm">{{ action === 'confirm' ? '正在确认…' : '确认所选目标' }}</button><button class="primary" :disabled="!canExport" @click="exportPlan">{{ action === 'export' ? '正在创建…' : '生成独立 MP4' }}</button></div></div></div>
-          <video ref="sourcePlayer" :src="videoUrl" controls preload="metadata" playsinline class="intent-source" @play="guardPlayback"></video>
-          <p class="help">点击原句可定位源视频；确认后的成片会按所列区间顺序拼接。</p>
+
+            </aside>
+            <div class="intent-output-list"><div class="intent-subheading"><h3>候选目标 <span v-if="snapshot.plan">{{ outputs.length }} 个 · 已选 {{ selectedCount }} 个 · r{{ draftRevision }}</span></h3><button v-if="dirty" class="text-button" :disabled="pending" @click="discard">放弃本页修改</button></div>
+              <p v-if="!snapshot.plan" class="intent-empty">{{ snapshot.status === 'FAILED' ? '本次查找未完成。请查看执行原因，原视频和原话题结果仍保留。' : snapshot.status === 'CANCELLED' ? '本次请求已取消。' : snapshot.status === 'RUNNING' ? '正在查找候选片段，执行进度会自动更新。' : '正在等待执行服务生成候选方案。' }}</p>
+              <template v-else>
           <p v-if="unresolved" class="intent-warning">有 {{ unresolved }} 个目标未找到充分证据，不能勾选导出。你可以只确认已经核对的目标，或另建更明确的请求。</p>
           <datalist :id="`intent-utterances-${jobId}`"><option v-for="utterance in snapshot.utterances" :key="utterance.utterance_id" :value="utterance.utterance_id">{{ topicTime(utterance.start_ms) }} {{ utterance.text.slice(0, 60) }}</option></datalist>
           <article v-for="(output, index) in outputs" :key="output.output_id" class="intent-output">
@@ -350,7 +456,7 @@ onBeforeUnmount(() => { stopped = true; selectionVersion++; focusVersion++; paus
             <label class="intent-title-label">成片标题<input v-model="output.title" maxlength="120" :disabled="pending" :aria-label="`剪辑标题 ${index + 1}`"></label>
             <div v-for="(part, partIndex) in output.parts" :key="partIndex" class="intent-part">
               <div class="intent-part-label"><b>保留第 {{ partIndex + 1 }} 段</b><button class="text-button" :disabled="pending" @click="locate(part.start_utterance_id)">定位原视频 ↗</button></div>
-              <div class="intent-boundaries"><label>起始原句<input :value="part.start_utterance_id" :list="`intent-utterances-${jobId}`" :disabled="pending" :aria-label="`目标 ${index + 1} 第 ${partIndex + 1} 段起始原句`" @input="editBoundary(output, partIndex, 'start_utterance_id', $event)"></label><label>结束原句<input :value="part.end_utterance_id" :list="`intent-utterances-${jobId}`" :disabled="pending" :aria-label="`目标 ${index + 1} 第 ${partIndex + 1} 段结束原句`" @input="editBoundary(output, partIndex, 'end_utterance_id', $event)"></label></div>
+              <details class="intent-part-editor"><summary>调整起止原句</summary><div class="intent-boundaries"><label>起始原句<input :value="part.start_utterance_id" :list="`intent-utterances-${jobId}`" :disabled="pending" :aria-label="`目标 ${index + 1} 第 ${partIndex + 1} 段起始原句`" @input="editBoundary(output, partIndex, 'start_utterance_id', $event)"></label><label>结束原句<input :value="part.end_utterance_id" :list="`intent-utterances-${jobId}`" :disabled="pending" :aria-label="`目标 ${index + 1} 第 ${partIndex + 1} 段结束原句`" @input="editBoundary(output, partIndex, 'end_utterance_id', $event)"></label></div></details>
               <p class="help">{{ topicTime(part.start_ms) }} → {{ topicTime(part.end_ms) }}</p><p class="intent-quote">{{ sourceText(part.start_utterance_id) }}<template v-if="part.end_utterance_id !== part.start_utterance_id"> … {{ sourceText(part.end_utterance_id) }}</template></p>
               <button class="text-button intent-remove" :disabled="pending" @click="removePart(output, partIndex)">移除此段</button>
             </div>
@@ -359,93 +465,24 @@ onBeforeUnmount(() => { stopped = true; selectionVersion++; focusVersion++; paus
             <details v-if="output.excluded.length" class="intent-excluded"><summary>排除内容 {{ output.excluded.length }} 条</summary><div v-for="(excluded, excludeIndex) in output.excluded" :key="excluded.utterance_id"><button class="text-button" @click="locate(excluded.utterance_id)">{{ topicTime(sourceTime(excluded.utterance_id)) }} {{ sourceText(excluded.utterance_id) }}</button><small>{{ excluded.reason }}</small><button class="text-button" :disabled="pending" @click="unexclude(output, excludeIndex)">取消排除</button></div></details>
             <p class="help">{{ output.parts.length }} 个连续区间 · 预计保留 {{ topicTime(duration(output)) }} · 导出时合成一个文件</p>
           </article>
-        </template>
+              </template>
+            </div>
+          </div>
+          <p v-else class="intent-empty">{{ loading ? '正在读取剪辑请求…' : '先描述剪辑要求，或打开一条历史请求。' }}</p>
+        </div>
+        <div v-show="intentView === 'deliveries'" :id="`intent-page-${jobId}-deliveries`" class="intent-delivery-view" role="tabpanel" :aria-labelledby="`intent-view-${jobId}-deliveries`">
+          <div class="intent-delivery-heading"><h3>成片与字幕 <span>{{ completedClips }} 个成片完成 · {{ batches.length }} 个批次</span></h3><p class="help">这里展示本次请求已经冻结的成片。修改新方案不会改变已有文件。</p><p v-if="dirty" class="intent-draft-hint">其他页面的未提交要求与方案修改仍保留；下载只包含已确认版本。</p></div>
+          <section v-if="previewUrl" ref="previewSection" class="intent-preview" aria-label="剪辑成片预览"><div class="intent-subheading"><h3>成片预览</h3><button class="text-button" @click="exportPlayer?.pause(); previewUrl = ''">收起预览</button></div><video ref="exportPlayer" :key="previewUrl" :src="previewUrl" controls preload="metadata" playsinline class="intent-source" @play="guardPlayback"></video></section>
+          <div v-if="batches.length" class="intent-exports"><article v-for="batch in batches" :key="batch.id" class="intent-batch"><p>确认版本 r{{ batch.approved_revision }} · {{ names[batch.status] ?? batch.status }} · {{ date(batch.created_at) }}</p><div class="caption-batch-actions"><button class="secondary" :disabled="!!packageBusyId || pending" @click="downloadBatchPackage(batch)">{{ packageBusyId === batch.id ? '正在核对字幕版本…' : '核对并准备素材包' }}</button><a v-if="packageUrls[batch.id]" class="text-button" :href="packageUrls[batch.id]" download target="_blank" rel="noopener">下载本批素材包</a><small>全部成片完成并确认字幕后，可打包原 MP4 与字幕。</small></div><div v-for="clip in batch.clips" :key="clip.id" class="intent-export-clip"><strong>{{ clip.title ?? '剪辑视频' }}</strong><span>{{ names[clip.status] ?? clip.status }}</span><FailureDiagnostic :diagnostic="clip.diagnostic" :error-code="clip.error_code" :attempt="clip.attempt" /><div v-if="clip.status === 'SUCCEEDED'" class="actions"><button class="text-button" @click="showExportPreview(clip.content_url ?? '')">预览成片</button><button class="text-button" :disabled="pending" @click="openCaptions(batch, clip)">校对字幕</button><a class="text-button" :href="clip.download_url ?? undefined" download target="_blank" rel="noopener">下载 MP4</a></div></div></article></div>
+          <div v-else class="intent-empty"><p>还没有生成成片。先核对并确认所选目标，再生成 MP4。</p><button class="secondary" @click="setView('review')">回到核对方案</button></div>
+        </div>
       </div>
+      <footer v-if="snapshot?.plan" v-show="intentView === 'review'" class="intent-save-row"><p v-if="validation" class="intent-validation" role="status">{{ validation }}</p><div class="intent-save-controls"><span>{{ instruction.trim() ? '有尚未提交的新要求，请先提交或放弃输入。' : planDirty ? '方案修改尚未保存' : confirmed ? `r${snapshot.revision} 已确认，可以生成成片。` : '核对并勾选目标，再确认生成' }}</span><div class="actions"><button class="primary" :disabled="!primaryAction.enabled" @click="primaryAction.run">{{ primaryAction.label }}</button></div></div></footer>
     </div>
-    <div v-if="batches.length" class="intent-exports"><h3>按需求剪辑成片</h3><p class="help">每个文件对应一个已确认目标。后续编辑不会改变已有导出批次。</p><article v-for="batch in batches" :key="batch.id" class="intent-batch"><p>确认版本 r{{ batch.approved_revision }} · {{ names[batch.status] ?? batch.status }} · {{ date(batch.created_at) }}</p><div class="caption-batch-actions"><button class="secondary" :disabled="!!packageBusyId || pending" @click="downloadBatchPackage(batch)">{{ packageBusyId === batch.id ? '正在核对字幕版本…' : '核对并准备素材包' }}</button><a v-if="packageUrls[batch.id]" class="text-button" :href="packageUrls[batch.id]" download target="_blank" rel="noopener">下载本批素材包</a><small>全部成片完成并确认字幕后，可打包原 MP4 与字幕。</small></div><div v-for="clip in batch.clips" :key="clip.id" class="intent-export-clip"><strong>{{ clip.title ?? '剪辑视频' }}</strong><span>{{ names[clip.status] ?? clip.status }}</span><FailureDiagnostic :diagnostic="clip.diagnostic" :error-code="clip.error_code" :attempt="clip.attempt" /><div v-if="clip.status === 'SUCCEEDED'" class="actions"><button class="text-button" @click="previewUrl = clip.content_url ?? ''">预览成片</button><button class="text-button" :disabled="pending" @click="openCaptions(batch, clip)">校对字幕</button><a class="text-button" :href="clip.download_url ?? undefined" download target="_blank" rel="noopener">下载 MP4</a></div></div></article><video v-if="previewUrl" ref="exportPlayer" :key="previewUrl" :src="previewUrl" controls preload="metadata" playsinline class="intent-source" @play="guardPlayback"></video></div>
-  <CaptionPanel v-if="captionTarget" :key="`${captionTarget.exportId}:${captionTarget.clipId}`" ref="captionEditor" :export-id="captionTarget.exportId" :clip-id="captionTarget.clipId" :content-url="captionTarget.contentUrl" :active="props.active !== false" @close="captionTarget = null" />
+    <div v-if="historyOpen" class="intent-history-backdrop" aria-hidden="true" @click="closeHistory()"></div>
+    <aside v-show="historyOpen" ref="historyPanel" :id="`intent-history-${jobId}`" class="intent-history" role="dialog" aria-modal="true" aria-label="剪辑请求列表" @keydown="historyKey"><div class="intent-subheading"><h3>历史请求 {{ requests.length }}</h3><button class="text-button" @click="closeHistory()">关闭历史请求</button></div><p v-if="loading" class="help">正在读取请求…</p><p v-else-if="!requests.length" class="help">还没有剪辑请求。填写要求即可开始。</p><div class="intent-request-list"><button v-for="request in requests" :key="request.id" class="intent-request" :class="{ selected: selectedId === request.id }" :aria-pressed="selectedId === request.id" :disabled="pending" @click="selectRequest(request.id)"><strong>{{ request.instruction }}</strong><span>{{ names[request.status] }} · {{ date(request.created_at) }}</span></button></div></aside>
+    <CaptionPanel v-if="captionTarget" :key="`${captionTarget.exportId}:${captionTarget.clipId}`" ref="captionEditor" :export-id="captionTarget.exportId" :clip-id="captionTarget.clipId" :content-url="captionTarget.contentUrl" :active="props.active !== false && intentView === 'deliveries' && !historyOpen" @close="captionTarget = null" />
   </section>
 </template>
 
-<style scoped>
-.intent-panel { container: intent / inline-size; margin-top: 24px; padding: 22px; min-width: 0; color: #1f2937; font-size: 14px; overflow: visible; }
-.intent-panel > .panel-heading { padding: 0 0 10px; }
-.intent-panel > .panel-heading .eyebrow { display: none; }
-.intent-panel h2 { color: #1f2937; font-size: 18px; }
-h3 { color: #334155; font-size: 15px; line-height: 1.6; } h3 > span { font-size: 13px; font-weight: 400; color: #64748b; }
-.intent-intro, .intent-original, .intent-reason, .intent-panel .help { color: #64748b; line-height: 1.7; font-size: 13px; overflow-wrap: anywhere; }
-.intent-intro { margin: 0 0 6px; }
-.intent-guide, .intent-original-details { color: #64748b; font-size: 13px; line-height: 1.7; margin: 0 0 12px; }
-.intent-guide summary, .intent-original-details summary, .intent-evidence summary, .intent-excluded summary { cursor: pointer; padding: 4px 0; }
-.intent-guide p, .intent-original { margin-top: 7px; overflow-wrap: anywhere; }
-.intent-compose { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 14px; }
-.intent-compose > label, .intent-title-label, .intent-boundaries label { display: flex; flex-direction: column; gap: 6px; color: #475569; font-size: 13px; min-width: 0; }
-textarea, input:not([type=checkbox]) { box-sizing: border-box; width: 100%; max-width: 100%; border: 1px solid #cbd5e1; border-radius: 5px; background: white; padding: 9px 10px; color: #1f2937; font: inherit; font-size: 14px; min-width: 0; }
-textarea { resize: vertical; min-height: 76px; line-height: 1.7; }
-.intent-panel .text-button { color: #475569; font-size: 13px; white-space: normal; line-height: 1.6; min-height: 32px; overflow-wrap: anywhere; }
-.intent-panel .primary, .intent-panel .secondary { min-height: 38px; padding: 9px 12px; font-size: 14px; line-height: 1.45; white-space: normal; }
-.intent-create-row, .intent-subheading, .intent-output-heading, .intent-part-label, .intent-save-controls { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 12px; min-width: 0; }
-.intent-create-row { margin-top: 10px; color: #64748b; font-size: 13px; }
-.intent-create-row label { display: flex; align-items: center; gap: 8px; }
-.intent-create-row input { width: 72px; }
-.intent-create-row > span { flex: 1; min-width: 160px; line-height: 1.6; }
-.intent-workspace { display: grid; grid-template-columns: 210px minmax(0, 1fr); align-items: start; gap: 20px; margin-top: 20px; }
-.intent-requests, .intent-result { min-width: 0; }
-.intent-subheading { margin-bottom: 10px; }
-.intent-request-list { max-height: min(420px, 60dvh); overflow-y: auto; overscroll-behavior: contain; padding-right: 4px; scrollbar-gutter: stable; }
-.intent-request { display: block; width: 100%; min-width: 0; text-align: left; border: 1px solid #e2e8f0; background: white; border-radius: 6px; padding: 11px; margin-bottom: 8px; }
-.intent-request.selected { background: #fff5ef; border-color: #efc7b7; }
-.intent-request strong { color: #334155; font-size: 14px; font-weight: 500; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; line-height: 1.6; }
-.intent-request > span { display: block; color: #64748b; font-size: 12px; margin-top: 6px; }
-.intent-recovery-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; padding: 10px 12px; margin: 12px 0; border: 1px solid #e2e8f0; border-radius: 6px; background: #f8fafc; }
-.intent-recovery-actions p { flex: 1; min-width: min(180px, 100%); margin: 0; }
-.intent-recovery-actions button { flex-shrink: 0; }
-.intent-source { width: 100%; min-width: 0; max-width: 100%; max-height: 220px; display: block; border-radius: 6px; background: #17212e; margin: 12px 0 8px; object-fit: contain; }
-.intent-empty { padding: 20px 12px; color: #64748b; font-size: 14px; line-height: 1.8; background: #f8fafc; margin-top: 14px; border-radius: 6px; }
-.intent-output { border: 1px solid #e2e8f0; background: white; border-radius: 7px; padding: 14px; margin-top: 14px; min-width: 0; scroll-margin-top: 150px; }
-.intent-output-heading { color: #64748b; font-size: 13px; }
-.intent-output-heading label { color: #1f2937; display: flex; align-items: flex-start; gap: 6px; max-width: 100%; overflow-wrap: anywhere; }
-.intent-output-heading input { flex-shrink: 0; }
-.intent-reason { margin: 9px 0; }
-.intent-part { border-top: 1px solid #e2e8f0; padding-top: 11px; margin-top: 11px; }
-.intent-part-label { color: #475569; font-size: 13px; }
-.intent-boundaries { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 10px; margin: 9px 0; }
-.intent-quote { color: #475569; font-size: 14px; line-height: 1.75; overflow-wrap: anywhere; margin-top: 7px; }
-.intent-remove { display: block; margin: 4px 0 8px auto; }
-.intent-evidence { margin: 10px 0; color: #475569; font-size: 13px; }
-.intent-evidence > button { display: block; text-align: left; width: 100%; min-width: 0; background: #f8fafc; color: #475569; border-radius: 4px; margin: 6px 0; padding: 9px; font-size: 14px; line-height: 1.75; overflow-wrap: anywhere; }
-.intent-evidence > button > span { display: block; color: #64748b; font-size: 12px; }
-.intent-excluded { padding: 9px 12px; background: #fff8ed; margin: 10px 0; color: #8b632f; font-size: 13px; border-radius: 5px; }
-.intent-excluded > div { margin-top: 8px; }
-.intent-excluded small { display: block; margin: 5px 0; font-size: 13px; }
-.intent-excluded .text-button { text-align: left; }
-.intent-save-row { position: sticky; top: 0; z-index: 3; padding: 10px 12px; margin-top: 12px; border: 1px solid #e2e8f0; border-radius: 7px; background: #fff; box-shadow: 0 3px 8px #172b4d0a; color: #475569; font-size: 13px; }
-.intent-save-controls > span { flex: 1 1 160px; line-height: 1.6; }
-.intent-validation { color: #9a4f32; line-height: 1.6; margin: 0 0 8px; overflow-wrap: anywhere; }
-.actions { display: flex; flex-wrap: wrap; min-width: 0; gap: 7px; }
-.intent-warning, .intent-notice { font-size: 13px; line-height: 1.7; padding: 10px 12px; margin: 10px 0; background: #fff7e9; color: #8b632f; border-radius: 5px; overflow-wrap: anywhere; }
-.intent-notice { background: #f1f5f9; color: #475569; }
-.intent-exports { margin-top: 22px; border-top: 1px solid #e2e8f0; padding-top: 18px; }
-.intent-batch { border: 1px solid #e2e8f0; border-radius: 6px; margin-top: 12px; padding: 14px; color: #64748b; font-size: 13px; overflow-wrap: anywhere; }
-.intent-export-clip { padding: 10px 0; border-top: 1px solid #e2e8f0; margin-top: 10px; display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; min-width: 0; }
-.intent-export-clip strong { color: #334155; font-size: 14px; overflow-wrap: anywhere; min-width: 0; }
-.intent-export-clip .actions { margin-left: auto; }
-.caption-batch-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; margin: 10px 0; min-width: 0; }
-.caption-batch-actions small { color: #64748b; font-size: 13px; overflow-wrap: anywhere; }
-.workbench-shell .intent-panel { margin: 0; border: 0; border-radius: 0; }
-.intent-panel :deep(.text-recovery) { color: #475569; background: #f8fafc; border-color: #cbd5e1; }
-@container intent (max-width: 760px) {
-  .intent-workspace { grid-template-columns: minmax(0, 1fr); gap: 16px; }
-  .intent-requests { border-bottom: 1px solid #e2e8f0; padding-bottom: 10px; }
-  .intent-request-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr)); gap: 8px; max-height: 180px; }
-  .intent-request { margin-bottom: 0; }
-}
-@container intent (max-width: 420px) {
-  .intent-boundaries { grid-template-columns: minmax(0, 1fr); }
-  .intent-output { padding: 12px; }
-  .intent-create-row > button, .intent-save-row .actions { width: 100%; }
-  .intent-save-row .actions > button { flex: 1; min-width: 105px; }
-}
-@media (max-width: 650px) { .intent-panel { padding: 16px; } }
-@media (min-width: 801px) and (max-height: 800px) { .intent-source { max-height: 170px; } }
-</style>
+<style scoped src="./intent-workspace.css"></style>

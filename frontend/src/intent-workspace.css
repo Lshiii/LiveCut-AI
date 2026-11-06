@@ -1,0 +1,198 @@
+.intent-panel {
+  container: intent / inline-size;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  background: #fff;
+  color: #1f2937;
+  font-size: 14px;
+}
+.intent-panel h2, .intent-panel h3, .intent-panel p { margin: 0; }
+.intent-surface { display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0; overflow: hidden; }
+.intent-toolbar h2 .status { margin-left: 6px; font-size: 11px; font-weight: 500; }
+.intent-panel h2 { font-size: 16px; line-height: 1.5; font-weight: 650; }
+.intent-panel h3 { color: #334155; font-size: 15px; line-height: 1.6; font-weight: 600; }
+.intent-panel h3 > span { margin-left: 6px; color: #64748b; font-size: 13px; font-weight: 400; }
+.intent-toolbar, .intent-toolbar-actions, .intent-subheading, .intent-delivery-heading, .intent-preview-heading,
+.intent-create-row, .intent-output-heading, .intent-part-label, .intent-save-controls, .caption-batch-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  min-width: 0;
+}
+.intent-toolbar { justify-content: space-between; flex: none; min-height: 54px; padding: 10px 16px; }
+.intent-toolbar-actions { justify-content: flex-end; gap: 8px; }
+.intent-panel .text-button { min-height: 32px; color: #475569; font-size: 13px; line-height: 1.6; white-space: normal; overflow-wrap: anywhere; }
+.intent-panel .primary, .intent-panel .secondary {
+  display: inline-flex;
+  justify-content: center;
+  align-items: center;
+  min-height: 38px;
+  max-width: 100%;
+  padding: 9px 12px;
+  border-radius: 6px;
+  font-size: 14px;
+  line-height: 1.45;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.intent-toolbar-actions .secondary, .intent-toolbar-actions .text-button { min-height: 34px; padding: 7px 10px; font-size: 13px; }
+.intent-panel button:focus-visible, .intent-panel a:focus-visible, .intent-panel summary:focus-visible { outline: 2px solid #e89778; outline-offset: 2px; }
+.intent-view-tabs { display: flex; flex: none; min-width: 0; gap: 18px; padding: 0 16px; border-bottom: 1px solid #e2e8f0; }
+.intent-view-tabs > button { min-width: 0; min-height: 42px; border: 0; border-bottom: 2px solid transparent; border-radius: 0; padding: 10px 2px 8px; background: transparent; color: #64748b; font-size: 14px; line-height: 1.5; white-space: nowrap; }
+.intent-view-tabs > button:hover:not(:disabled) { color: #334155; background: transparent; }
+.intent-view-tabs > button[aria-selected=true], .intent-view-tabs > button[aria-selected=true]:hover { border-bottom-color: #e47650; color: #b95431; font-weight: 600; background: transparent; }
+.intent-view-tabs > button:focus-visible { outline-offset: -4px; }
+.intent-view-tabs > button > span { margin-left: 5px; font-size: 12px; }
+.intent-view-count { padding: 1px 5px; border-radius: 4px; background: #f1f5f9; color: #64748b; }
+.intent-feedback { flex: none; max-height: 90px; overflow-y: auto; overscroll-behavior: contain; padding: 0 16px; }
+.intent-feedback:empty { display: none; }
+.intent-panel .message, .intent-warning, .intent-notice { padding: 9px 12px; border-radius: 6px; font-size: 13px; line-height: 1.7; overflow-wrap: anywhere; }
+.intent-panel .message { margin: 8px 0; }
+.intent-warning { margin: 10px 0; background: #fff7e9; color: #8b632f; }
+.intent-notice { margin: 8px 0; background: #f1f5f9; color: #475569; }
+.intent-views { position: relative; flex: 1; min-width: 0; min-height: 0; overflow: hidden; }
+.intent-compose-view, .intent-review-view, .intent-delivery-view { height: 100%; min-width: 0; min-height: 0; }
+.intent-compose-view, .intent-delivery-view { overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; padding: 20px 16px; }
+.intent-compose-view { max-width: 880px; margin: 0 auto; }
+.intent-compose-title { margin-bottom: 16px; }
+.intent-compose-title > p { margin-top: 7px; color: #64748b; font-size: 14px; line-height: 1.8; overflow-wrap: anywhere; }
+.intent-compose { min-width: 0; }
+.intent-compose > label, .intent-title-label, .intent-boundaries label { display: flex; flex-direction: column; min-width: 0; gap: 6px; color: #475569; font-size: 13px; line-height: 1.6; }
+.intent-panel textarea, .intent-panel input:not([type=checkbox]) { box-sizing: border-box; width: 100%; min-width: 0; max-width: 100%; padding: 9px 10px; border: 1px solid #cbd5e1; border-radius: 6px; background: #fff; color: #1f2937; font: inherit; font-size: 14px; }
+.intent-panel textarea { resize: vertical; min-height: 120px; line-height: 1.8; }
+.intent-panel input[type=checkbox] { flex: none; width: 16px; height: 16px; margin: 3px 0 0; accent-color: #e47650; }
+.intent-create-row { justify-content: space-between; margin-top: 14px; color: #64748b; font-size: 13px; }
+.intent-create-row > label { display: flex; align-items: center; gap: 8px; }
+.intent-panel .intent-create-row input { width: 72px; }
+.intent-create-row > span { flex: 1 1 180px; line-height: 1.7; }
+.intent-compose-actions { margin-top: 8px; text-align: right; }
+.intent-draft-hint { margin-top: 12px; padding: 10px 12px; border-radius: 6px; background: #fff7ed; color: #9a6337; font-size: 13px; line-height: 1.7; overflow-wrap: anywhere; }
+.intent-guide, .intent-original-details { margin: 14px 0 0; color: #64748b; font-size: 13px; line-height: 1.8; }
+.intent-guide summary, .intent-original-details summary, .intent-evidence summary, .intent-excluded summary { cursor: pointer; padding: 5px 0; }
+.intent-guide p, .intent-panel .intent-original { margin-top: 8px; overflow-wrap: anywhere; white-space: pre-wrap; }
+.intent-panel .help, .intent-reason, .intent-original { color: #64748b; font-size: 13px; line-height: 1.8; overflow-wrap: anywhere; }
+.intent-panel .help { margin: 10px 0; }
+.intent-review-view { overflow: hidden; padding: 16px; }
+.intent-review-layout { display: grid; grid-template-columns: minmax(0, .8fr) minmax(0, 1.2fr); gap: 16px; height: 100%; min-width: 0; min-height: 0; }
+.intent-context, .intent-output-list { min-width: 0; min-height: 0; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; scrollbar-gutter: stable; }
+.intent-context { padding-right: 4px; }
+.intent-source-details > summary { display: none; }
+.intent-source-details > .intent-source { margin-top: 0; }
+.intent-context .intent-original-details { padding: 10px 12px; margin-top: 12px; border: 1px solid #e2e8f0; border-radius: 6px; background: #f8fafc; }
+.intent-source { display: block; width: 100%; min-width: 0; max-width: 100%; max-height: 230px; aspect-ratio: 16/9; margin: 12px 0 8px; border-radius: 7px; background: #17212e; object-fit: contain; }
+.intent-subheading { justify-content: space-between; margin-bottom: 10px; }
+.intent-recovery-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; padding: 10px 12px; margin: 12px 0; border: 1px solid #e2e8f0; border-radius: 6px; background: #f8fafc; }
+.intent-recovery-actions .help { flex: 1 1 180px; margin: 0; }
+.intent-recovery-actions > button { flex: none; }
+.intent-resume-budget { display: flex; align-items: center; gap: 8px; color: #64748b; font-size: 13px; }
+.intent-panel .intent-resume-budget input { width: 64px; }
+.intent-empty { padding: 20px 14px; border: 1px dashed #dce3ec; border-radius: 7px; background: #f8fafc; color: #64748b; font-size: 14px; line-height: 1.8; overflow-wrap: anywhere; }
+.intent-output-list { padding-right: 4px; }
+.intent-output-list > .intent-warning { margin-top: 0; }
+.intent-output { min-width: 0; padding: 14px; margin-bottom: 12px; border: 1px solid #e2e8f0; border-radius: 8px; background: #fff; scroll-margin-block: 12px; }
+.intent-output-heading { justify-content: space-between; color: #64748b; font-size: 13px; }
+.intent-output-heading > label { display: flex; align-items: flex-start; gap: 8px; max-width: 100%; color: #1f2937; font-size: 14px; line-height: 1.7; overflow-wrap: anywhere; }
+.intent-output-heading > span { flex: none; font-size: 12px; }
+.intent-panel .intent-reason { margin: 8px 0 12px; }
+.intent-part { padding-top: 12px; margin-top: 12px; border-top: 1px solid #e2e8f0; }
+.intent-part-label { justify-content: space-between; color: #475569; font-size: 13px; }
+.intent-part-label > b { font-weight: 600; }
+.intent-boundaries { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 10px; margin: 9px 0; }
+.intent-part-editor { margin-top: 8px; color: #64748b; font-size: 13px; }
+.intent-part-editor summary { cursor: pointer; padding: 5px 0; }
+.intent-panel .intent-quote { margin-top: 7px; color: #475569; font-size: 14px; line-height: 1.8; overflow-wrap: anywhere; }
+.intent-remove { display: block; margin: 4px 0 7px auto; }
+.intent-evidence { margin: 10px 0; color: #475569; font-size: 13px; }
+.intent-evidence > button { display: block; width: 100%; min-width: 0; padding: 9px 10px; margin: 6px 0; border: 1px solid #edf1f5; border-radius: 5px; background: #f8fafc; color: #475569; text-align: left; font-size: 14px; line-height: 1.8; overflow-wrap: anywhere; }
+.intent-evidence > button:hover { background: #f1f5f9; }
+.intent-evidence > button > span { display: block; color: #64748b; font-size: 12px; }
+.intent-excluded { padding: 9px 12px; margin: 10px 0; border-radius: 6px; background: #fff8ed; color: #8b632f; font-size: 13px; }
+.intent-excluded > div { margin-top: 8px; }
+.intent-excluded small { display: block; margin: 5px 0; font-size: 13px; line-height: 1.7; overflow-wrap: anywhere; }
+.intent-excluded .text-button { text-align: left; }
+.intent-save-row { position: relative; z-index: 2; flex: none; max-height: 42%; overflow-y: auto; overscroll-behavior: contain; padding: 12px 16px; border-top: 1px solid #e2e8f0; background: #fff; color: #475569; font-size: 13px; }
+.intent-save-controls { justify-content: space-between; }
+.intent-save-controls > span { flex: 1 1 160px; font-size: 13px; line-height: 1.7; overflow-wrap: anywhere; }
+.intent-panel .intent-validation { margin-bottom: 8px; color: #9a4f32; font-size: 13px; line-height: 1.7; overflow-wrap: anywhere; }
+.intent-panel .actions { display: flex; flex-wrap: wrap; min-width: 0; gap: 8px; margin: 0; }
+.intent-delivery-heading { justify-content: space-between; margin-bottom: 14px; }
+.intent-preview { padding: 12px; margin-bottom: 16px; border: 1px solid #e2e8f0; border-radius: 8px; background: #f8fafc; }
+.intent-preview-heading { justify-content: space-between; color: #334155; font-size: 14px; }
+.intent-preview > .intent-source { max-height: 280px; margin-bottom: 0; }
+.intent-exports { min-width: 0; }
+.intent-batch { min-width: 0; padding: 14px; margin-top: 12px; border: 1px solid #e2e8f0; border-radius: 8px; color: #64748b; font-size: 13px; line-height: 1.7; overflow-wrap: anywhere; }
+.intent-batch:first-child { margin-top: 0; }
+.intent-export-clip { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; min-width: 0; padding: 12px 0 0; margin-top: 12px; border-top: 1px solid #e2e8f0; }
+.intent-export-clip > strong { min-width: 0; color: #334155; font-size: 14px; overflow-wrap: anywhere; }
+.intent-export-clip > span { color: #64748b; font-size: 12px; }
+.intent-export-clip > .actions { margin-left: auto; }
+.intent-export-clip :deep(.failure-diagnostic) { flex-basis: 100%; }
+.caption-batch-actions { margin: 10px 0; }
+.caption-batch-actions > small { flex-basis: 100%; color: #64748b; font-size: 13px; line-height: 1.7; overflow-wrap: anywhere; }
+.intent-history-backdrop { position: absolute; inset: 0; z-index: 10; background: #0f172a2b; }
+.intent-history { position: absolute; top: 54px; right: 16px; z-index: 11; display: flex; flex-direction: column; width: min(380px, calc(100% - 32px)); min-width: 0; max-height: calc(100% - 70px); padding: 14px; border: 1px solid #dce4ed; border-radius: 9px; background: #fff; box-shadow: 0 12px 36px #0f172a20; }
+.intent-history > .intent-subheading, .intent-history > .help { flex: none; }
+.intent-request-list { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding-right: 4px; scrollbar-gutter: stable; scrollbar-width: thin; }
+.intent-request, .intent-request-list > button { display: block; width: 100%; min-width: 0; padding: 11px; margin-bottom: 8px; border: 1px solid #e2e8f0; border-radius: 6px; background: #fff; text-align: left; }
+.intent-request:hover, .intent-request-list > button:hover { background: #f8fafc; }
+.intent-request.selected, .intent-request.selected:hover, .intent-request-list > button.selected, .intent-request-list > button.selected:hover { border-color: #efc7b7; background: #fff5ef; }
+.intent-request-list > button > strong { display: -webkit-box; overflow: hidden; -webkit-line-clamp: 3; -webkit-box-orient: vertical; color: #334155; font-size: 14px; font-weight: 500; line-height: 1.7; overflow-wrap: anywhere; }
+.intent-request-list > button > span { display: block; margin-top: 5px; color: #64748b; font-size: 12px; line-height: 1.6; }
+.intent-panel :deep(.text-recovery) { color: #475569; background: #f8fafc; border-color: #cbd5e1; }
+.intent-panel :deep(.failure-diagnostic p) { font-size: 13px; }
+.intent-panel :deep(.failure-diagnostic code) { font-size: 12px; }
+@container intent (max-width: 900px) {
+  .intent-review-view { overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; }
+  .intent-review-layout { display: block; height: auto; }
+  .intent-context, .intent-output-list { overflow: visible; padding-right: 0; scrollbar-gutter: auto; }
+  .intent-context { margin-bottom: 16px; }
+  .intent-source-details > summary { display: flex; align-items: center; justify-content: space-between; padding: 10px 12px; border: 1px solid #e2e8f0; border-radius: 6px; background: #f8fafc; color: #475569; font-size: 13px; list-style: none; cursor: pointer; }
+  .intent-source-details > summary::-webkit-details-marker { display: none; }
+  .intent-source-details[open] > summary { margin-bottom: 10px; }
+  .intent-source-details > .intent-source { max-height: 200px; }
+}
+@container intent (max-width: 600px) {
+  .intent-toolbar { padding: 10px 12px; gap: 8px; }
+  .intent-toolbar h2 .status { display: none; }
+  .intent-toolbar-actions { gap: 5px; }
+  .intent-toolbar-actions .secondary, .intent-toolbar-actions .text-button { padding-inline: 8px; font-size: 12px; }
+  .intent-view-tabs { gap: 0; padding-inline: 12px; }
+  .intent-view-tabs > button { flex: 1; padding-inline: 2px; font-size: 13px; }
+  .intent-feedback { padding-inline: 12px; }
+  .intent-compose-view, .intent-review-view, .intent-delivery-view { padding: 16px 12px; }
+  .intent-compose-title > p { font-size: 13px; }
+  .intent-panel textarea { min-height: 100px; }
+  .intent-create-row > span { flex-basis: 100%; order: 2; }
+  .intent-create-row > button { margin-left: auto; }
+  .intent-boundaries { grid-template-columns: minmax(0, 1fr); }
+  .intent-output, .intent-batch { padding: 12px; }
+  .intent-save-row { padding: 10px 12px; }
+  .intent-save-controls { gap: 7px; }
+  .intent-save-controls > span, .intent-save-controls > .actions { flex-basis: 100%; }
+  .intent-save-controls > .actions > button { flex: 1 1 108px; }
+  .intent-export-clip > .actions { width: 100%; margin-left: 0; }
+  .intent-preview { padding: 10px; }
+  .intent-history { right: 12px; width: calc(100% - 24px); padding: 12px; }
+}
+@media (max-height: 650px) {
+  .intent-toolbar { min-height: 46px; padding-block: 7px; }
+  .intent-view-tabs > button { min-height: 38px; padding-block: 8px 6px; }
+  .intent-feedback { max-height: 62px; }
+  .intent-source-details > .intent-source { max-height: 155px; }
+  .intent-save-row { max-height: 40%; padding-block: 8px; }
+}
+@media (max-height: 440px) {
+  .intent-toolbar { flex-wrap: nowrap; }
+  .intent-save-row { max-height: 34%; }
+  .intent-compose-view, .intent-review-view, .intent-delivery-view { padding-block: 10px; }
+}
