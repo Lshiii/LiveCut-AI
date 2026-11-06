@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import math
 import os
 import shutil
 import sys
@@ -81,6 +82,8 @@ def main(argv: list[str] | None = None) -> int:
     worker.add_argument("--stage-type", choices=("MEDIA", "ASR", "SEGMENT", "TIMELINE", "EXPORT_CLIP"),
                         help="Only claim this stage type; useful for a media-only smoke check")
     worker.add_argument("--poll-seconds", type=float, default=3)
+    worker.add_argument("--registration-wait-seconds", default=45, metavar="SECONDS",
+                        help="Wait up to 0..3600 seconds for an existing worker session; 0 fails immediately")
     worker.add_argument("--ffprobe", default=os.environ.get("LIVECUT_FFPROBE_PATH", "ffprobe"))
     worker.add_argument("--ffmpeg", default=os.environ.get("LIVECUT_FFMPEG_PATH", "ffmpeg"))
     asr = sub.add_parser("transcribe", help="Run or resume real file ASR; never silently mock")
@@ -149,6 +152,12 @@ def main(argv: list[str] | None = None) -> int:
             from .worker import AnalysisStageExecutor, StageWorker
             from .worker_client import WorkerClient
 
+            try:
+                registration_wait_seconds = float(args.registration_wait_seconds)
+            except (TypeError, ValueError):
+                raise WorkerError("INVALID_REGISTRATION_WAIT_CONFIGURATION") from None
+            if not math.isfinite(registration_wait_seconds) or not 0 <= registration_wait_seconds <= 3600:
+                raise WorkerError("INVALID_REGISTRATION_WAIT_CONFIGURATION")
             if args.reuse_asr_job and (not args.once or args.stage_type != "ASR" or not args.job_id):
                 raise WorkerError("INVALID_ASR_REUSE_CONFIGURATION")
             worker_key = os.environ.get("LIVECUT_WORKER_API_KEY") or os.environ.get("LIVECUT_WORKER_KEY", "")
@@ -160,7 +169,9 @@ def main(argv: list[str] | None = None) -> int:
                                                  ffmpeg_path=args.ffmpeg, ffprobe_path=args.ffprobe,
                                                  asr_reuse_source=source)
                 target = {"target_job_id": args.job_id} if args.job_id is not None else {}
-                runner = StageWorker(client, args.storage_root, args.journal_dir, args.worker_id, executor, **target)
+                runner = StageWorker(client, args.storage_root, args.journal_dir, args.worker_id, executor,
+                                     registration_wait_seconds=registration_wait_seconds,
+                                     lifecycle_observer=_emit, **target)
                 if args.once:
                     status = runner.run_once(stage_type=args.stage_type)
                     _emit({"status": status, "worker_id": args.worker_id})

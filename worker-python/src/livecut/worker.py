@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 import tempfile
@@ -315,6 +316,8 @@ class StageWorker:
         worker_id: str, executor: StageExecutor, *, heartbeat_seconds: float = 10,
         stop: threading.Event | None = None, target_job_id: str | None = None,
         registry_enabled: bool = True, worker_heartbeat_seconds: float = 10,
+        registration_wait_seconds: float = 45,
+        lifecycle_observer: Callable[[dict], None] | None = None,
     ) -> None:
         self.client, self.storage_root = client, storage_root.resolve()
         self.journal_dir, self.worker_id, self.executor = journal_dir.resolve(), _identifier(worker_id), executor
@@ -325,6 +328,12 @@ class StageWorker:
             raise WorkerError("INVALID_WORKER_HEARTBEAT_INTERVAL")
         self.registry_enabled = registry_enabled
         self.worker_heartbeat_seconds = worker_heartbeat_seconds
+        if (type(registration_wait_seconds) not in (int, float)
+                or not 0 <= registration_wait_seconds <= 3600
+                or not math.isfinite(registration_wait_seconds)):
+            raise WorkerError("INVALID_REGISTRATION_WAIT_CONFIGURATION")
+        self.registration_wait_seconds = registration_wait_seconds
+        self._lifecycle_observer = lifecycle_observer
         self.session_id: str | None = None
         self._presence_error: WorkerClientError | None = None
         self._presence_deadline: float | None = None
@@ -393,21 +402,75 @@ class StageWorker:
                 self.stop.set()
                 return
 
+    def _observe_lifecycle(self, status: str, **fields: float) -> None:
+        if self._lifecycle_observer is not None:
+            self._lifecycle_observer({"status": status, "worker_id": self.worker_id, **fields})
+
+    def _registration_guard(self) -> None:
+        if self.stop.is_set():
+            raise WorkerClientError("WORKER_STOPPED")
+
+    def _register_with_wait(self, session_id: str, capabilities: list[str],
+                            target: dict) -> tuple[dict, float, float | None] | None:
+        """Wait for an old owner to leave, without changing its session or lease."""
+        started = self._monotonic()
+        deadline = started + self.registration_wait_seconds
+        conflict: WorkerClientError | None = None
+        while not self.stop.is_set():
+            request_started = self._monotonic()
+            remaining = deadline - request_started
+            if conflict is not None and remaining <= 0:
+                raise conflict
+            options = dict(target)
+            options["request_guard"] = self._registration_guard
+            if self.registration_wait_seconds > 0:
+                # Each attempt has its own timeout and presence start time. A
+                # successful retry must not inherit the first attempt's age.
+                if remaining <= 0:
+                    raise WorkerClientError("WORKER_SESSION_CONFLICT")
+                options["timeout_seconds"] = remaining
+            try:
+                receipt = self.client.register_worker(
+                    self.worker_id, session_id, capabilities, **options)
+                return receipt, request_started, deadline if self.registration_wait_seconds else None
+            except WorkerClientError as exc:
+                if exc.code == "WORKER_STOPPED" and self.stop.is_set():
+                    return None
+                if exc.code != "WORKER_SESSION_CONFLICT" or self.registration_wait_seconds == 0:
+                    raise
+                conflict = exc
+                now = self._monotonic()
+                remaining = deadline - now
+                if remaining <= 0:
+                    raise
+                self._observe_lifecycle("registration-wait", elapsed_seconds=now - started,
+                                        remaining_seconds=remaining)
+                remaining = deadline - self._monotonic()
+                if remaining <= 0:
+                    raise
+                if self.stop.wait(min(1, remaining)):
+                    return None
+        return None
+
     @contextmanager
-    def _registered(self, stage_type: str | None) -> Iterator[None]:
+    def _registered(self, stage_type: str | None) -> Iterator[bool]:
         if not self.registry_enabled:
-            yield
+            yield True
             return
         # Never advertise capabilities we will not poll for. This process has
         # exactly one computation slot, independent of its heartbeat threads.
         capabilities = [stage_type] if stage_type is not None else list(STAGES)
         if any(value not in STAGES for value in capabilities):
             raise WorkerError("INVALID_STAGE_TYPE")
-        self.session_id = str(uuid4())
+        session_id = str(uuid4())
         self._presence_error = None
         target = {"target_job_id": self.target_job_id} if self.target_job_id is not None else {}
-        started = self._monotonic()
-        receipt = self.client.register_worker(self.worker_id, self.session_id, capabilities, **target)
+        registration = self._register_with_wait(session_id, capabilities, target)
+        if registration is None:
+            yield False
+            return
+        receipt, started, registration_deadline = registration
+        self.session_id = session_id
         with self._presence_lock:
             self._presence_deadline = started + receipt["heartbeat_timeout_seconds"]
         finished = threading.Event()
@@ -415,8 +478,17 @@ class StageWorker:
         thread = threading.Thread(target=self._worker_heartbeat, args=(finished, interval), daemon=True)
         thread.start()
         try:
+            # A custom transport can return a valid receipt after its timeout.
+            # We own this session and must unregister it, but cannot begin work.
+            if (registration_deadline is not None
+                    and self._monotonic() >= registration_deadline):
+                raise WorkerClientError("JAVA_UNAVAILABLE", retryable=True)
             self._check_presence()
-            yield
+            if self.stop.is_set():
+                yield False
+            else:
+                self._observe_lifecycle("registered")
+                yield True
             if self._presence_error is not None:
                 raise self._presence_error
         except WorkerError as exc:
@@ -480,7 +552,9 @@ class StageWorker:
                 return "callback_replayed"
             if self.stop.is_set():
                 return "stopped"
-            with self._registered(stage_type):
+            with self._registered(stage_type) as registered:
+                if not registered:
+                    return "stopped"
                 return self._run_once(stage_type=stage_type)
 
     def _next_claim(self, stage_type: str | None) -> tuple[dict, dict] | str:
@@ -668,7 +742,9 @@ class StageWorker:
             self._pending_callback()
             if self.stop.is_set():
                 return
-            with self._registered(stage_type):
+            with self._registered(stage_type) as registered:
+                if not registered:
+                    return
                 while not self.stop.is_set():
                     try:
                         status = self._run_once(stage_type=stage_type)

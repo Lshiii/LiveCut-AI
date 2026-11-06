@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import re
+import time
 from datetime import datetime
+from typing import Callable
 from urllib.parse import urlsplit
 from uuid import UUID
 
 import httpx
+
+from .text_resilience import DeadlineHTTPTransport, TextRecoveryError
 
 
 class WorkerClientError(Exception):
@@ -33,7 +37,8 @@ class WorkerClient:
         self._timeout_seconds = timeout_seconds
         self._client = httpx.Client(
             headers={"X-Worker-Key": worker_key}, timeout=timeout_seconds,
-            transport=transport, follow_redirects=False, trust_env=False,
+            transport=transport if transport is not None else DeadlineHTTPTransport(trust_env=False),
+            follow_redirects=False, trust_env=False,
         )
 
     def close(self) -> None:
@@ -44,6 +49,8 @@ class WorkerClient:
             response = self._client.request(method, self._base_url + path, **kwargs)
         except httpx.RequestError:
             raise WorkerClientError("JAVA_UNAVAILABLE", retryable=True) from None
+        except TextRecoveryError:
+            raise WorkerClientError("INVALID_JAVA_RESPONSE", retryable=True) from None
         if not 200 <= response.status_code < 300:
             code = {401: "WORKER_UNAUTHORIZED", 403: "WORKER_FORBIDDEN",
                     409: "STALE_ATTEMPT"}.get(response.status_code, "JAVA_HTTP_ERROR")
@@ -112,8 +119,11 @@ class WorkerClient:
         return worker_id
 
     def _worker_receipt(self, path: str, payload: dict, outcome: str,
-                        *, timeout_seconds: float | None = None) -> dict:
+                        *, timeout_seconds: float | None = None,
+                        extensions: dict | None = None) -> dict:
         options = {} if timeout_seconds is None else {"timeout": min(self._timeout_seconds, timeout_seconds)}
+        if extensions is not None:
+            options["extensions"] = extensions
         response = self._request("POST", path, json=payload, **options)
         ttl = response.get("heartbeat_timeout_seconds")
         try:
@@ -129,7 +139,13 @@ class WorkerClient:
         return response
 
     def register_worker(self, worker_id: str, session_id: str, stage_types: list[str],
-                        *, target_job_id: str | None = None) -> dict:
+                        *, target_job_id: str | None = None,
+                        timeout_seconds: float | None = None,
+                        request_guard: Callable[[], None] | None = None) -> dict:
+        if (timeout_seconds is not None
+                and (type(timeout_seconds) not in (int, float)
+                     or not 0 < timeout_seconds <= 3600)):
+            raise WorkerClientError("INVALID_WORKER_REGISTRATION_TIMEOUT")
         allowed = {"MEDIA", "ASR", "SEGMENT", "TIMELINE", "EXPORT_CLIP"}
         if (not isinstance(stage_types, list) or not stage_types
                 or any(not isinstance(value, str) or value not in allowed for value in stage_types)
@@ -139,7 +155,13 @@ class WorkerClient:
                    "session_id": self._session_id(session_id), "stage_types": stage_types, "slots": 1}
         if target_job_id is not None:
             payload["target_job_id"] = self._job_id(target_job_id)
-        return self._worker_receipt("/internal/workers/register", payload, "REGISTERED")
+        timeout = self._timeout_seconds if timeout_seconds is None else min(
+            self._timeout_seconds, timeout_seconds)
+        extensions = {"livecut_deadline_at": time.monotonic() + timeout}
+        if request_guard is not None:
+            extensions["livecut_guard"] = request_guard
+        return self._worker_receipt("/internal/workers/register", payload, "REGISTERED",
+                                    timeout_seconds=timeout_seconds, extensions=extensions)
 
     def heartbeat_worker(self, worker_id: str, session_id: str,
                          *, timeout_seconds: float | None = None) -> dict:

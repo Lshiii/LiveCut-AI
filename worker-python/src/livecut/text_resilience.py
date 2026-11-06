@@ -157,10 +157,13 @@ class DeadlineHTTPTransport(httpx.BaseTransport):
     buffered. DNS resolution retains the operating system's resolver behavior.
     Requests without a deadline retain the legacy HTTPX transport (notably ASR).
     """
-    def __init__(self):
-        self.legacy = httpx.HTTPTransport(retries=0)
+    def __init__(self, *, trust_env: bool = True):
+        self.legacy = httpx.HTTPTransport(retries=0, trust_env=trust_env)
+        # Keep the model transport's existing default SSL context. Internal
+        # Worker calls explicitly retain HTTPX's verify=True, trust_env=False.
+        options = {} if trust_env else {"ssl_context": httpx.create_ssl_context(trust_env=False)}
         self.pool = httpcore.ConnectionPool(network_backend=_DeadlineBackend(), retries=0,
-            max_connections=2, max_keepalive_connections=0)
+            max_connections=2, max_keepalive_connections=0, **options)
 
     def close(self):
         self.pool.close()

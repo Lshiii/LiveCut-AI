@@ -32,7 +32,8 @@ class PresenceClient(FakeClient):
         return {"worker_id": worker_id, "session_id": session_id, "outcome": outcome,
                 "heartbeat_timeout_seconds": 35, "last_seen_at": datetime.now(timezone.utc).isoformat()}
 
-    def register_worker(self, worker_id, session_id, capabilities, **kwargs):
+    def register_worker(self, worker_id, session_id, capabilities, *, timeout_seconds=None,
+                        request_guard=None, **kwargs):
         self.registrations.append((worker_id, session_id, capabilities, kwargs))
         return self.receipt(worker_id, session_id, "REGISTERED")
 
@@ -216,7 +217,7 @@ def test_registration_failure_fails_closed_before_ready_or_computation(tmp_path)
         raise WorkerClientError('WORKER_SESSION_CONFLICT')
     client.register_worker = refuse
     with pytest.raises(WorkerClientError, match='WORKER_SESSION_CONFLICT'):
-        worker(tmp_path, client, calls).run_once()
+        worker(tmp_path, client, calls, registration_wait_seconds=0).run_once()
     assert not client.ready_calls and not client.claims and not calls
 
 
