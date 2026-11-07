@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { api, ApiError, post, type ExportClip, type ExportJob, type Page } from './api'
 import FailureDiagnostic from './FailureDiagnostic.vue'
 import { downloadJson } from './download'
@@ -20,6 +20,8 @@ const selectedIds = ref<string[]>([]), batches = ref<ExportJob[]>([]), selectedB
 const pending = ref(''), error = ref(''), refreshError = ref(''), notice = ref(''), loadingRevision = ref(false)
 const streamMode = ref<StreamMode>('idle')
 const previewPlayer = ref<HTMLVideoElement | null>(null)
+const previewRegion = ref<HTMLElement | null>(null)
+let previewTrigger: HTMLButtonElement | null = null
 const captionTarget = ref<{ exportId: string; clipId: string; contentUrl: string } | null>(null)
 const captionEditor = ref<{ dirty: boolean; pending: boolean } | null>(null)
 const packageBusy = ref(false), packageUrl = ref('')
@@ -72,6 +74,21 @@ function errorMessage(value: unknown) {
   return messages[code] ?? `导出操作未完成：${code}`
 }
 function fail(value: unknown) { error.value = errorMessage(value) }
+function previewActive() { return !stopped && props.active !== false && !captionTarget.value }
+async function openPreview(clip: ExportClip, event: MouseEvent) {
+  if (!previewActive() || clip.status !== 'SUCCEEDED' || !clip.content_url) return
+  const batchId = currentBatch.value?.id, epoch = resourceEpoch
+  previewTrigger = event.currentTarget instanceof HTMLButtonElement ? event.currentTarget : null
+  previewPlayer.value?.pause(); previewId.value = clip.id
+  await nextTick()
+  if (!previewActive() || epoch !== resourceEpoch || currentBatch.value?.id !== batchId || previewId.value !== clip.id) return
+  previewRegion.value?.focus({ preventScroll: true })
+  previewRegion.value?.scrollIntoView({ block: 'start' })
+}
+function closePreview() {
+  previewPlayer.value?.pause(); previewId.value = ''
+  if (props.active !== false && previewTrigger?.isConnected) previewTrigger.focus()
+}
 function openCaptions(clip: ExportClip) {
   if (!currentBatch.value || clip.status !== 'SUCCEEDED' || !clip.content_url || pending.value || captionEditor.value?.pending) return
   if (captionEditor.value?.dirty) { error.value = '字幕有未保存修改，请先保存或放弃字幕修改。'; return }
@@ -210,8 +227,8 @@ onBeforeUnmount(() => { stopped = true; previewPlayer.value?.pause(); resourceEp
           <p class="package-note">素材包包含原 MP4 与确认字幕，需本批全部完成并确认字幕。</p>
         </div>
         <div class="export-clips-heading"><h4>成片列表</h4><span>每段可独立预览、校对字幕和下载</span></div>
-        <div v-for="clip in currentBatch.clips" :key="clip.id" class="export-clip"><div><b>{{ clip.title || clip.product_name }}</b><p>{{ time(clip.start_ms) }} → {{ time(clip.end_ms) }} <span v-if="clip.attempt">· 第 {{ clip.attempt }} 次执行</span></p><FailureDiagnostic :diagnostic="clip.diagnostic" :error-code="clip.error_code" :attempt="clip.attempt" /></div><span class="status" :class="clip.status.toLowerCase()">{{ names[clip.status] ?? clip.status }}</span><small v-if="clip.size_bytes != null">{{ (clip.size_bytes / 1024 / 1024).toFixed(2) }} MB</small><div class="clip-actions"><template v-if="clip.status === 'SUCCEEDED' && clip.content_url"><button class="secondary" @click="previewId = clip.id">预览</button><button class="secondary" :disabled="!!pending" @click="openCaptions(clip)">校对字幕</button><a v-if="clip.download_url" class="secondary" :href="clip.download_url" target="_blank" rel="noopener">下载 MP4 ↓</a></template><button v-if="clip.status === 'FAILED'" class="secondary" :disabled="!!pending" @click="retry(clip)">重试此片段</button></div></div>
-        <div v-if="preview?.content_url" class="export-preview"><div><b>{{ preview.title || preview.product_name }} · 成片预览</b><button class="text-button" @click="previewId = ''">关闭预览</button></div><video ref="previewPlayer" :key="preview.id" :src="preview.content_url" controls preload="metadata" playsinline @play="guardPlayback"></video></div>
+        <div v-if="preview?.content_url" ref="previewRegion" class="export-preview" tabindex="-1" role="region" aria-label="成片预览"><div><b>{{ preview.title || preview.product_name }} · 成片预览</b><button class="text-button" @click="closePreview">关闭预览</button></div><video ref="previewPlayer" :key="preview.id" :src="preview.content_url" controls preload="metadata" playsinline @play="guardPlayback"></video></div>
+        <div v-for="clip in currentBatch.clips" :key="clip.id" class="export-clip"><div><b>{{ clip.title || clip.product_name }}</b><p>{{ time(clip.start_ms) }} → {{ time(clip.end_ms) }} <span v-if="clip.attempt">· 第 {{ clip.attempt }} 次执行</span></p><FailureDiagnostic :diagnostic="clip.diagnostic" :error-code="clip.error_code" :attempt="clip.attempt" /></div><span class="status" :class="clip.status.toLowerCase()">{{ names[clip.status] ?? clip.status }}</span><small v-if="clip.size_bytes != null">{{ (clip.size_bytes / 1024 / 1024).toFixed(2) }} MB</small><div class="clip-actions"><template v-if="clip.status === 'SUCCEEDED' && clip.content_url"><button class="secondary" @click="openPreview(clip, $event)">预览</button><button class="secondary" :disabled="!!pending" @click="openCaptions(clip)">校对字幕</button><a v-if="clip.download_url" class="secondary" :href="clip.download_url" target="_blank" rel="noopener">下载 MP4 ↓</a></template><button v-if="clip.status === 'FAILED'" class="secondary" :disabled="!!pending" @click="retry(clip)">重试此片段</button></div></div>
       </template>
     </div>
   <CaptionPanel v-if="captionTarget" :key="`${captionTarget.exportId}:${captionTarget.clipId}`" ref="captionEditor" :export-id="captionTarget.exportId" :clip-id="captionTarget.clipId" :content-url="captionTarget.contentUrl" :active="props.active !== false" @close="captionTarget = null" />
@@ -286,10 +303,10 @@ onBeforeUnmount(() => { stopped = true; previewPlayer.value?.pause(); resourceEp
 .clip-actions > a.secondary:hover { border-color: #cf633d; background: #cf633d; }
 .export-clip :deep(.failure-diagnostic) { background: #fff7ed; border-color: #f0b693; color: #64748b; }
 .export-clip :deep(.failure-diagnostic p), .export-clip :deep(.failure-details), .export-clip :deep(.failure-title > span), .export-clip :deep(.failure-diagnostic code) { color: #64748b; font-size: 14px; line-height: 1.7; }
-.export-preview { min-width: 0; margin-top: 18px; border: 1px solid #e2e8f0; border-radius: 7px; overflow: hidden; }
+.export-preview { min-width: 0; margin-top: 18px; border: 1px solid #e2e8f0; border-radius: 7px; overflow: hidden; scroll-margin-block: 12px; }
 .export-preview > div { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 14px; padding: 12px 14px; background: #f8fafc; color: #182230; font-size: 14px; }
 .export-preview b { min-width: 0; font-size: 16px; font-weight: 600; overflow-wrap: anywhere; }
-.export-preview video { display: block; width: 100%; max-height: min(420px, 60dvh); background: #0f172a; object-fit: contain; }
+.export-preview video { display: block; width: 100%; aspect-ratio: 16 / 9; max-height: min(420px, 60dvh); background: #0f172a; object-fit: contain; }
 @media (max-width: 850px) {
   .export-clip { grid-template-columns: minmax(0, 1fr) auto auto; }
   .clip-actions { grid-column: 1 / -1; }
