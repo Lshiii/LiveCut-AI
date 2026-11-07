@@ -5,14 +5,16 @@ import FailureDiagnostic from './FailureDiagnostic.vue'
 import TextRequestProgress from './TextRequestProgress.vue'
 import { canPrefillClipInstruction } from './videoAgent'
 import CaptionPanel from './CaptionPanel.vue'
+import TranscriptRangePicker from './TranscriptRangePicker.vue'
 import { CaptionBatchError, prepareCaptionBatch } from './captions'
 import { newestSnapshot, parseExportSnapshot, SnapshotError } from './snapshotStream'
 import { topicTime } from './topics'
 import { intentPreviewParts } from './intentPreviewParts'
 import { SequencePreview, type SequencePreviewPart, type SequencePreviewState } from './sequencePreview'
-import { editIntentBoundary, intentCanCancel, intentCanConfirm, intentCanExport, intentCanResume, intentOutputValidation, intentPayload, intentResumeReceipt,
+import { validateTranscriptRange } from './transcriptRange'
+import { intentCanCancel, intentCanConfirm, intentCanExport, intentCanResume, intentOutputValidation, intentPayload, intentResumeReceipt,
   IntentReadScope, IntentResponseError, newestIntentSnapshot, parseIntentSnapshot, refreshIntentEvidence,
-  parseResumedIntentSnapshot, type IntentOutput, type IntentPart, type IntentResumeReceipt, type IntentSnapshot } from './intentClips'
+  parseResumedIntentSnapshot, type IntentOutput, type IntentResumeReceipt, type IntentSnapshot, type IntentUtterance } from './intentClips'
 
 const props = defineProps<{ jobId: string; videoUrl: string; active?: boolean }>()
 const instruction = ref(''), maxCalls = ref(6), requests = ref<IntentSnapshot[]>([])
@@ -24,6 +26,16 @@ const instructionInput = ref<HTMLTextAreaElement | null>(null)
 const exportPlayer = ref<HTMLVideoElement | null>(null)
 const captionTarget = ref<{ exportId: string; clipId: string; contentUrl: string } | null>(null)
 const captionEditor = ref<{ dirty: boolean; pending: boolean } | null>(null)
+interface RangePickerTarget {
+  token: number; requestId: string; selection: number; draftRevision: number | null; snapshotRevision: number
+  planHash: string | null; videoUrl: string; videoHash: string; transcriptHash: string; durationMs: number
+  outputId: string; partIndex: number; signature: string; output: IntentOutput; utterances: IntentUtterance[]
+  initialField: 'start' | 'end'; initialTimeMs?: number
+}
+interface RangeSelection { startId: string; endId: string; preview: boolean }
+const rangePickerTarget = ref<RangePickerTarget | null>(null), rangePickerFailed = ref(false)
+const rangePickerEditor = ref<{ dirty: boolean; pending: boolean } | null>(null)
+let rangePickerVersion = 0, rangePickerOpener: HTMLElement | null = null
 const packageBusyId = ref(''), packageUrls = ref<Record<string, string>>({})
 type IntentView = 'compose' | 'review' | 'deliveries'
 const intentView = ref<IntentView>('compose'), historyOpen = ref(false)
@@ -52,11 +64,11 @@ let pendingCreate: { input: string; key: string } | null = null
 const pendingResumes = new Map<string, IntentResumeReceipt>()
 const pending = computed(() => !!action.value)
 const planDirty = computed(() => !!snapshot.value?.plan && JSON.stringify(intentPayload(outputs.value)) !== baseline.value)
-const dirty = computed(() => planDirty.value || !!instruction.value.trim())
+const dirty = computed(() => planDirty.value || !!instruction.value.trim() || !!rangePickerEditor.value?.dirty)
 const validation = computed(() => snapshot.value?.plan
   ? intentOutputValidation(outputs.value, snapshot.value.utterances, snapshot.value.source.duration_ms, snapshot.value.plan.goals) : '')
-const canConfirm = computed(() => !instruction.value.trim() && intentCanConfirm(snapshot.value, outputs.value, planDirty.value, pending.value))
-const canExport = computed(() => !instruction.value.trim() && intentCanExport(snapshot.value, planDirty.value, pending.value))
+const canConfirm = computed(() => !rangePickerTarget.value && !instruction.value.trim() && intentCanConfirm(snapshot.value, outputs.value, planDirty.value, pending.value))
+const canExport = computed(() => !rangePickerTarget.value && !instruction.value.trim() && intentCanExport(snapshot.value, planDirty.value, pending.value))
 const canCancel = computed(() => intentCanCancel(snapshot.value, planDirty.value, pending.value))
 const canResume = computed(() => intentCanResume(snapshot.value, dirty.value, pending.value))
 const selectedCount = computed(() => outputs.value.filter(value => value.enabled).length)
@@ -64,7 +76,7 @@ const unresolved = computed(() => outputs.value.filter(value => value.status !==
 const confirmed = computed(() => !!snapshot.value && snapshot.value.confirmed_revisions.includes(snapshot.value.revision))
 const completedClips = computed(() => batches.value.reduce((count, batch) => count + batch.clips.filter(clip => clip.status === 'SUCCEEDED').length, 0))
 const primaryAction = computed(() => planDirty.value
-  ? { label: action.value === 'save' ? '正在保存…' : '保存方案', enabled: !pending.value && !validation.value, run: save }
+  ? { label: action.value === 'save' ? '正在保存…' : '保存方案', enabled: !rangePickerTarget.value && !pending.value && !validation.value, run: save }
   : confirmed.value
     ? { label: action.value === 'export' ? '正在创建…' : '生成独立 MP4', enabled: canExport.value, run: exportPlan }
     : { label: action.value === 'confirm' ? '正在确认…' : '确认所选目标', enabled: canConfirm.value, run: confirm })
@@ -73,12 +85,22 @@ const sequenceOptions = computed(() => new Map(outputs.value.map(output => [outp
   parts: output.parts.map((_, index) => snapshot.value ? intentPreviewParts(output, snapshot.value.utterances, snapshot.value.source.duration_ms, index) : null),
 }])))
 const outputPartsSignature = computed(() => JSON.stringify(outputs.value.map(output => ({ id: output.output_id, status: output.status, parts: output.parts }))))
+const rangePickerStale = computed(() => rangePickerFailed.value || !!rangePickerTarget.value && !rangeContextCurrent(rangePickerTarget.value))
+const rangePickerCloseHandler = computed(() => {
+  const token = rangePickerTarget.value?.token
+  return () => { if (rangePickerTarget.value?.token === token) closeRangePicker() }
+})
+const rangePickerApplyHandler = computed(() => {
+  const token = rangePickerTarget.value?.token
+  return (value: RangeSelection) => { if (token !== undefined) applyRangeSelection(token, value) }
+})
 const names: Record<string, string> = { QUEUED: '等待执行', RUNNING: '正在查找', PLAN_READY: '候选已生成', FAILED: '执行失败', CANCELLED: '已取消',
   FOUND: '已找到证据', NOT_FOUND: '未找到', NEEDS_REVIEW: '需进一步核对', READY: '等待领取', BLOCKED: '等待前序',
   RETRY_WAIT: '等待重试', SUCCEEDED: '已完成', PARTIAL_FAILED: '部分失败', SKIPPED: '已跳过' }
 defineExpose({ dirty: computed(() => dirty.value || !!captionEditor.value?.dirty), pending: computed(() => pending.value || !!captionEditor.value?.pending), prefillInstruction })
 function prefillInstruction(value: string): boolean {
   if (!canPrefillClipInstruction(value, dirty.value || !!captionEditor.value?.dirty, pending.value || !!captionEditor.value?.pending)) return false
+  closeRangePicker(false)
   instruction.value = value.trim(); error.value = ''; notice.value = '已填入视频助手的建议。请核对要求，再点击查找片段。'
   closeHistory(false); setView('compose')
   const version = ++focusVersion
@@ -128,6 +150,7 @@ function accept(value: IntentSnapshot, force = false) {
 }
 function canChangeRequest() {
   if (captionEditor.value?.dirty || captionEditor.value?.pending) { error.value = '请先保存或放弃字幕修改，等待提交完成后再切换剪辑请求。'; return false }
+  if (rangePickerTarget.value) { error.value = '请先应用或取消当前原句选择，再切换剪辑请求。'; return false }
   if (pending.value) { error.value = '当前操作正在提交，请稍后切换请求。'; return false }
   if (dirty.value) { error.value = '本页有尚未提交的输入或方案修改，请先提交、保存或放弃本页修改。'; return false }
   return true
@@ -192,7 +215,7 @@ async function poll() {
 function validOperation(requestId: string, version: number) { return !stopped && selectedId.value === requestId && version === selectionVersion }
 async function create() {
   const query = instruction.value.trim()
-  if (pending.value || !query) return
+  if (pending.value || rangePickerTarget.value || !query) return
   if ([...query].length > 2000) { error.value = '剪辑要求最多 2000 字。'; return }
   if (!Number.isInteger(maxCalls.value) || maxCalls.value < 1 || maxCalls.value > 24) { error.value = '模型请求上限须为 1～24 的整数。'; return }
   if (planDirty.value) { error.value = '请先保存或放弃当前方案修改，再创建其他请求。'; return }
@@ -266,7 +289,7 @@ async function resumeRequest() {
   finally { if (!stopped && version === selectionVersion) action.value = '' }
 }
 async function save() {
-  if (!snapshot.value?.plan || pending.value || !planDirty.value || validation.value || draftRevision.value === null) return
+  if (!snapshot.value?.plan || pending.value || rangePickerTarget.value || !planDirty.value || validation.value || draftRevision.value === null) return
   const id = selectedId.value, version = selectionVersion, revision = draftRevision.value
   const body = { base_revision: revision, ...intentPayload(outputs.value) }
   action.value = 'save'; error.value = ''; notice.value = ''; scope.invalidate()
@@ -309,11 +332,9 @@ async function exportPlan() {
 }
 function discard() {
   if (pending.value) return
+  closeRangePicker(false)
   instruction.value = ''; error.value = ''; notice.value = ''
   if (snapshot.value) accept(snapshot.value, true)
-}
-function editBoundary(output: IntentOutput, index: number, field: 'start_utterance_id' | 'end_utterance_id', event: Event) {
-  editIntentBoundary(output, index, field, (event.target as HTMLInputElement).value, snapshot.value?.utterances ?? [])
 }
 function addPart(output: IntentOutput) {
   if (pending.value || output.parts.length >= 12) return
@@ -323,6 +344,59 @@ function removePart(output: IntentOutput, index: number) { output.parts.splice(i
 function unexclude(output: IntentOutput, index: number) { output.excluded.splice(index, 1) }
 function sourceText(id: string) { return snapshot.value?.utterances.find(value => value.utterance_id === id)?.text ?? '原句不可用' }
 function sourceTime(id: string) { return snapshot.value?.utterances.find(value => value.utterance_id === id)?.start_ms ?? -1 }
+function rangeSignature(output: IntentOutput) { return JSON.stringify({ id: output.output_id, status: output.status, parts: output.parts, excluded: output.excluded }) }
+function rangeContextCurrent(target: RangePickerTarget) {
+  const value = snapshot.value, output = outputs.value.find(output => output.output_id === target.outputId)
+  return validOperation(target.requestId, target.selection) && !!value?.plan && value.id === target.requestId
+    && draftRevision.value === target.draftRevision && value.revision === target.snapshotRevision && value.plan_hash === target.planHash
+    && props.videoUrl === target.videoUrl && value.source.video_sha256 === target.videoHash
+    && value.source.transcript_hash === target.transcriptHash && value.source.duration_ms === target.durationMs
+    && !!output?.parts[target.partIndex] && rangeSignature(output) === target.signature
+}
+function openRangePicker(output: IntentOutput, partIndex: number, initialField: 'start' | 'end', event: Event) {
+  const value = snapshot.value
+  if (!value?.plan || pending.value || rangePickerTarget.value || !mediaActive('review') || !output.parts[partIndex] || output.status === 'NOT_FOUND') return
+  const initialTimeMs = sourcePlayer.value && sourcePlayer.value.currentTime > 0 ? sourcePlayer.value.currentTime * 1000 : undefined
+  pauseMedia(); error.value = ''; rangePickerFailed.value = false
+  rangePickerOpener = event.currentTarget instanceof HTMLElement ? event.currentTarget : null
+  rangePickerTarget.value = {
+    token: ++rangePickerVersion, requestId: selectedId.value, selection: selectionVersion,
+    draftRevision: draftRevision.value, snapshotRevision: value.revision, planHash: value.plan_hash,
+    videoUrl: props.videoUrl, videoHash: value.source.video_sha256, transcriptHash: value.source.transcript_hash, durationMs: value.source.duration_ms,
+    outputId: output.output_id, partIndex, signature: rangeSignature(output), output: intentPayload([output]).outputs[0]!,
+    utterances: value.utterances.map(utterance => ({ ...utterance })), initialField, initialTimeMs,
+  }
+}
+function closeRangePicker(restoreFocus = true) {
+  const opener = rangePickerOpener, version = ++rangePickerVersion
+  rangePickerTarget.value = null; rangePickerOpener = null; rangePickerFailed.value = false
+  if (restoreFocus) void nextTick(() => {
+    if (version === rangePickerVersion && !rangePickerTarget.value && mediaActive('review') && opener?.isConnected) opener.focus()
+  })
+}
+async function applyRangeSelection(token: number, selection: RangeSelection) {
+  const target = rangePickerTarget.value
+  if (!target || target.token !== token || pending.value || !mediaActive('review', true)) return
+  if (!rangeContextCurrent(target)) { rangePickerFailed.value = true; return }
+  const output = outputs.value.find(output => output.output_id === target.outputId)!
+  const result = validateTranscriptRange(output, target.partIndex, selection.startId, selection.endId, snapshot.value!.utterances, target.durationMs)
+  if (!result.part || result.error) { error.value = result.error; return }
+  const previous = output.parts[target.partIndex]!, part = result.part
+  const changed = previous.start_utterance_id !== part.start_utterance_id || previous.end_utterance_id !== part.end_utterance_id
+    || previous.start_ms !== part.start_ms || previous.end_ms !== part.end_ms
+  pauseMedia()
+  if (changed) { output.parts.splice(target.partIndex, 1, part); refreshIntentEvidence(output, snapshot.value!.utterances) }
+  const signature = rangeSignature(output), navigation = navigationVersion
+  closeRangePicker(!selection.preview)
+  notice.value = changed ? '区间已应用到本页草稿。核对后请保存方案，再确认生成。' : '所选区间未变化。'
+  if (!selection.preview) return
+  await nextTick()
+  const current = outputs.value.find(output => output.output_id === target.outputId)
+  if (validOperation(target.requestId, target.selection) && navigationVersion === navigation && !rangePickerTarget.value
+    && props.videoUrl === target.videoUrl && snapshot.value?.revision === target.snapshotRevision && draftRevision.value === target.draftRevision
+    && snapshot.value?.source.video_sha256 === target.videoHash && snapshot.value?.source.transcript_hash === target.transcriptHash
+    && snapshot.value?.source.duration_ms === target.durationMs && mediaActive('review') && current && rangeSignature(current) === signature) await previewSequence(current, target.partIndex)
+}
 function sequenceId(output: IntentOutput, partIndex?: number) { return partIndex === undefined ? `goal:${output.output_id}` : `part:${output.output_id}:${partIndex}` }
 function sequenceSelected(output: IntentOutput, partIndex?: number) {
   const id = sequenceId(output, partIndex)
@@ -411,7 +485,7 @@ function duration(output: IntentOutput) { return output.parts.reduce((sum, part)
 function date(value: string) { return new Date(value).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) }
 function unload(event: BeforeUnloadEvent) { if (dirty.value || pending.value) { event.preventDefault(); event.returnValue = '' } }
 function pauseMedia() { stopSequencePreview(); sourcePlayer.value?.pause(); exportPlayer.value?.pause() }
-function mediaActive(view: IntentView) { return props.active !== false && !stopped && !(captionTarget.value && intentView.value === 'deliveries') && !historyOpen.value && intentView.value === view }
+function mediaActive(view: IntentView, allowRangePicker = false) { return props.active !== false && !stopped && (allowRangePicker || !rangePickerTarget.value) && !(captionTarget.value && intentView.value === 'deliveries') && !historyOpen.value && intentView.value === view }
 function guardPlayback(event: Event) {
   const player = event.currentTarget as HTMLVideoElement
   if (!(player === sourcePlayer.value && sourceContextOpen.value && mediaActive('review')) && !(player === exportPlayer.value && mediaActive('deliveries'))) player.pause()
@@ -495,7 +569,7 @@ onMounted(() => {
   })
   if (intentPanel.value) contextObserver.observe(intentPanel.value)
 })
-onBeforeUnmount(() => { stopped = true; selectionVersion++; focusVersion++; pauseMedia(); contextObserver?.disconnect(); scope.dispose(); window.clearTimeout(timer); window.removeEventListener('beforeunload', unload); document.removeEventListener('visibilitychange', updatePreviewVisibility) })
+onBeforeUnmount(() => { stopped = true; selectionVersion++; focusVersion++; closeRangePicker(false); pauseMedia(); contextObserver?.disconnect(); scope.dispose(); window.clearTimeout(timer); window.removeEventListener('beforeunload', unload); document.removeEventListener('visibilitychange', updatePreviewVisibility) })
 </script>
 
 <template>
@@ -545,19 +619,17 @@ onBeforeUnmount(() => { stopped = true; selectionVersion++; focusVersion++; paus
               <p v-if="!snapshot.plan" class="intent-empty">{{ snapshot.status === 'FAILED' ? '本次查找未完成。请查看执行原因，原视频和原话题结果仍保留。' : snapshot.status === 'CANCELLED' ? '本次请求已取消。' : snapshot.status === 'RUNNING' ? '正在查找候选片段，执行进度会自动更新。' : '正在等待执行服务生成候选方案。' }}</p>
               <template v-else>
           <p v-if="unresolved" class="intent-warning">有 {{ unresolved }} 个目标未找到充分证据，不能勾选导出。你可以只确认已经核对的目标，或另建更明确的请求。</p>
-          <datalist :id="`intent-utterances-${jobId}`"><option v-for="utterance in snapshot.utterances" :key="utterance.utterance_id" :value="utterance.utterance_id">{{ topicTime(utterance.start_ms) }} {{ utterance.text.slice(0, 60) }}</option></datalist>
           <article v-for="(output, index) in outputs" :key="output.output_id" class="intent-output">
             <div class="intent-output-heading"><label><input v-model="output.enabled" type="checkbox" :disabled="pending || output.status !== 'FOUND'" :aria-label="`选择剪辑目标 ${goal(output)}`">目标 {{ index + 1 }}：{{ goal(output) }}</label><div class="intent-output-actions"><span>{{ names[output.status] }}</span><button class="secondary" :disabled="!canPreviewSequence(output)" :aria-label="`${sequenceSelected(output) ? '停止预览' : '预览'}目标 ${index + 1} 全部区间`" @click="previewSequence(output)">{{ sequenceSelected(output) ? '停止预览' : '预览全部区间' }}</button></div></div>
             <p class="intent-reason">{{ output.reason }}</p>
             <label class="intent-title-label">成片标题<input v-model="output.title" maxlength="120" :disabled="pending" :aria-label="`剪辑标题 ${index + 1}`"></label>
             <div v-for="(part, partIndex) in output.parts" :key="partIndex" class="intent-part">
               <div class="intent-part-label"><b>保留第 {{ partIndex + 1 }} 段</b><div class="intent-part-actions"><button class="text-button" :disabled="!canPreviewSequence(output, partIndex)" :aria-label="`${sequenceSelected(output, partIndex) ? '停止预览' : '预览'}目标 ${index + 1} 第 ${partIndex + 1} 段`" @click="previewSequence(output, partIndex)">{{ sequenceSelected(output, partIndex) ? '停止本段' : '预览本段' }}</button><button class="text-button" :disabled="pending" @click="locate(part.start_utterance_id)">定位原视频 ↗</button></div></div>
-              <details class="intent-part-editor"><summary>调整起止原句</summary><div class="intent-boundaries"><label>起始原句<input :value="part.start_utterance_id" :list="`intent-utterances-${jobId}`" :disabled="pending" :aria-label="`目标 ${index + 1} 第 ${partIndex + 1} 段起始原句`" @input="editBoundary(output, partIndex, 'start_utterance_id', $event)"></label><label>结束原句<input :value="part.end_utterance_id" :list="`intent-utterances-${jobId}`" :disabled="pending" :aria-label="`目标 ${index + 1} 第 ${partIndex + 1} 段结束原句`" @input="editBoundary(output, partIndex, 'end_utterance_id', $event)"></label></div></details>
-              <p class="help">{{ topicTime(part.start_ms) }} → {{ topicTime(part.end_ms) }}</p><p class="intent-quote">{{ sourceText(part.start_utterance_id) }}<template v-if="part.end_utterance_id !== part.start_utterance_id"> … {{ sourceText(part.end_utterance_id) }}</template></p>
+              <div class="intent-boundaries"><button class="intent-boundary-button" :disabled="pending || output.status === 'NOT_FOUND'" :aria-label="`调整目标 ${index + 1} 第 ${partIndex + 1} 段起始原句`" @click="openRangePicker(output, partIndex, 'start', $event)"><span>开始 <strong>{{ part.start_ms >= 0 ? topicTime(part.start_ms) : '未选择' }}</strong><small>调整 ↗</small></span><p>{{ part.start_utterance_id ? sourceText(part.start_utterance_id) : '选择要保留的第一句' }}</p></button><button class="intent-boundary-button" :disabled="pending || output.status === 'NOT_FOUND'" :aria-label="`调整目标 ${index + 1} 第 ${partIndex + 1} 段结束原句`" @click="openRangePicker(output, partIndex, 'end', $event)"><span>结束 <strong>{{ part.end_ms >= 0 ? topicTime(part.end_ms) : '未选择' }}</strong><small>调整 ↗</small></span><p>{{ part.end_utterance_id ? sourceText(part.end_utterance_id) : '选择要保留的最后一句' }}</p></button></div>
               <button class="text-button intent-remove" :disabled="pending" @click="removePart(output, partIndex)">移除此段</button>
             </div>
             <button v-if="output.status !== 'NOT_FOUND' && output.parts.length < 12" class="text-button" :disabled="pending" @click="addPart(output)">＋ 增加保留区间</button>
-            <details v-if="output.evidence_utterance_ids.length" class="intent-evidence"><summary>依据原句 {{ output.evidence_utterance_ids.length }} 条</summary><button v-for="id in output.evidence_utterance_ids" :key="id" @click="locate(id)"><span>{{ topicTime(sourceTime(id)) }} · {{ id }}</span>{{ sourceText(id) }}</button></details>
+            <details v-if="output.evidence_utterance_ids.length" class="intent-evidence"><summary>依据原句 {{ output.evidence_utterance_ids.length }} 条</summary><button v-for="id in output.evidence_utterance_ids" :key="id" @click="locate(id)"><span>{{ topicTime(sourceTime(id)) }}</span>{{ sourceText(id) }}</button></details>
             <details v-if="output.excluded.length" class="intent-excluded"><summary>排除内容 {{ output.excluded.length }} 条</summary><div v-for="(excluded, excludeIndex) in output.excluded" :key="excluded.utterance_id"><button class="text-button" @click="locate(excluded.utterance_id)">{{ topicTime(sourceTime(excluded.utterance_id)) }} {{ sourceText(excluded.utterance_id) }}</button><small>{{ excluded.reason }}</small><button class="text-button" :disabled="pending" @click="unexclude(output, excludeIndex)">取消排除</button></div></details>
             <p class="help">{{ output.parts.length }} 个连续区间 · 预计保留 {{ topicTime(duration(output)) }} · 导出时合成一个文件</p>
           </article>
@@ -578,6 +650,7 @@ onBeforeUnmount(() => { stopped = true; selectionVersion++; focusVersion++; paus
     <div v-if="historyOpen" class="intent-history-backdrop" aria-hidden="true" @click="closeHistory()"></div>
     <aside v-show="historyOpen" ref="historyPanel" :id="`intent-history-${jobId}`" class="intent-history" role="dialog" aria-modal="true" aria-label="剪辑请求列表" @keydown="historyKey"><div class="intent-subheading"><h3>历史请求 {{ requests.length }}</h3><button class="text-button" @click="closeHistory()">关闭历史请求</button></div><p v-if="loading" class="help">正在读取请求…</p><p v-else-if="!requests.length" class="help">还没有剪辑请求。填写要求即可开始。</p><div class="intent-request-list"><button v-for="request in requests" :key="request.id" class="intent-request" :class="{ selected: selectedId === request.id }" :aria-pressed="selectedId === request.id" :disabled="pending" @click="selectRequest(request.id)"><strong>{{ request.instruction }}</strong><span>{{ names[request.status] }} · {{ date(request.created_at) }}</span></button></div></aside>
     <CaptionPanel v-if="captionTarget" :key="`${captionTarget.exportId}:${captionTarget.clipId}`" ref="captionEditor" :export-id="captionTarget.exportId" :clip-id="captionTarget.clipId" :content-url="captionTarget.contentUrl" :active="props.active !== false && intentView === 'deliveries' && !historyOpen" @close="captionTarget = null" />
+    <TranscriptRangePicker v-if="rangePickerTarget" :key="rangePickerTarget.token" ref="rangePickerEditor" :output="rangePickerTarget.output" :part-index="rangePickerTarget.partIndex" :utterances="rangePickerTarget.utterances" :duration-ms="rangePickerTarget.durationMs" :initial-field="rangePickerTarget.initialField" :initial-time-ms="rangePickerTarget.initialTimeMs" :active="props.active !== false && intentView === 'review' && !historyOpen" :stale="rangePickerStale" @close="rangePickerCloseHandler" @apply="rangePickerApplyHandler" />
   </section>
 </template>
 
