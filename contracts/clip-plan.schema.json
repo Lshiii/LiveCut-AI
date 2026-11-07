@@ -1,0 +1,90 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:livecut:clip-plan:1.0",
+  "title": "Independent transcript-anchored intent clip plan",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "request_id", "job_id", "video_id", "source_hash", "transcript_hash", "duration_ms", "instruction", "goals", "constraints", "outputs", "provenance"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "request_id": {"type": "string", "format": "uuid"},
+    "job_id": {"type": "string", "format": "uuid"},
+    "video_id": {"type": "string", "format": "uuid"},
+    "source_hash": {"$ref": "#/$defs/hash"},
+    "transcript_hash": {"$ref": "#/$defs/hash"},
+    "duration_ms": {"type": "integer", "minimum": 1},
+    "instruction": {"type": "string", "minLength": 1, "maxLength": 2000},
+    "goals": {
+      "type": "array", "minItems": 1, "maxItems": 6,
+      "items": {
+        "type": "object", "additionalProperties": false, "required": ["goal_id", "description"],
+        "properties": {"goal_id": {"$ref": "#/$defs/goalId"}, "description": {"type": "string", "minLength": 1, "maxLength": 300}}
+      }
+    },
+    "constraints": {
+      "type": "object", "additionalProperties": false, "required": ["keep_explanation_complete", "exclude"],
+      "properties": {
+        "keep_explanation_complete": {"type": "boolean"},
+        "exclude": {"type": "array", "maxItems": 8, "uniqueItems": true, "items": {"type": "string", "minLength": 1, "maxLength": 120}}
+      }
+    },
+    "outputs": {"type": "array", "minItems": 1, "maxItems": 6, "items": {"$ref": "#/$defs/output"}},
+    "provenance": {
+      "type": "object", "additionalProperties": false, "required": ["text_model_id", "prompt_version", "retrieval_mode", "index_hash"],
+      "properties": {
+        "text_model_id": {"type": "string", "minLength": 1, "maxLength": 128},
+        "prompt_version": {"enum": ["intent-clips-v1", "anchor-clips-v1"]},
+        "retrieval_mode": {"enum": ["bm25", "bm25_dense_rrf", "anchor_context"]},
+        "index_hash": {"$ref": "#/$defs/hash"}
+      },
+      "allOf": [
+        {"if": {"properties": {"prompt_version": {"const": "anchor-clips-v1"}}}, "then": {"properties": {"retrieval_mode": {"const": "anchor_context"}}}},
+        {"if": {"properties": {"prompt_version": {"const": "intent-clips-v1"}}}, "then": {"properties": {"retrieval_mode": {"enum": ["bm25", "bm25_dense_rrf"]}}}}
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"provenance": {"properties": {"prompt_version": {"const": "anchor-clips-v1"}}}}},
+      "then": {"properties": {
+        "goals": {"maxItems": 1, "items": {"properties": {"goal_id": {"const": "answer-source"}}}},
+        "outputs": {"maxItems": 1, "items": {"properties": {"goal_id": {"const": "answer-source"}}}},
+        "constraints": {"properties": {"keep_explanation_complete": {"const": true}, "exclude": {"maxItems": 0}}}
+      }}
+    }
+  ],
+  "$defs": {
+    "hash": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$"},
+    "goalId": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$"},
+    "part": {
+      "type": "object", "additionalProperties": false,
+      "required": ["start_utterance_id", "end_utterance_id", "start_ms", "end_ms"],
+      "properties": {
+        "start_utterance_id": {"$ref": "#/$defs/id"}, "end_utterance_id": {"$ref": "#/$defs/id"},
+        "start_ms": {"type": "integer", "minimum": 0}, "end_ms": {"type": "integer", "minimum": 1}
+      }
+    },
+    "output": {
+      "type": "object", "additionalProperties": false,
+      "required": ["output_id", "goal_id", "title", "status", "reason", "enabled", "parts", "excluded", "evidence_utterance_ids"],
+      "properties": {
+        "output_id": {"$ref": "#/$defs/id"}, "goal_id": {"$ref": "#/$defs/goalId"},
+        "title": {"type": "string", "minLength": 1, "maxLength": 120},
+        "status": {"enum": ["FOUND", "NOT_FOUND", "NEEDS_REVIEW"]},
+        "reason": {"type": "string", "minLength": 1, "maxLength": 1000}, "enabled": {"type": "boolean"},
+        "parts": {"type": "array", "maxItems": 12, "items": {"$ref": "#/$defs/part"}},
+        "excluded": {
+          "type": "array", "maxItems": 100,
+          "items": {"type": "object", "additionalProperties": false, "required": ["utterance_id", "reason"], "properties": {"utterance_id": {"$ref": "#/$defs/id"}, "reason": {"type": "string", "minLength": 1, "maxLength": 300}}}
+        },
+        "evidence_utterance_ids": {"type": "array", "maxItems": 200, "uniqueItems": true, "items": {"$ref": "#/$defs/id"}}
+      },
+      "allOf": [
+        {"if": {"properties": {"status": {"const": "FOUND"}}}, "then": {"properties": {"parts": {"minItems": 1}, "evidence_utterance_ids": {"minItems": 1}}}},
+        {"if": {"properties": {"status": {"const": "NOT_FOUND"}}}, "then": {"properties": {"enabled": {"const": false}, "parts": {"maxItems": 0}, "evidence_utterance_ids": {"maxItems": 0}}}},
+        {"if": {"properties": {"status": {"const": "NEEDS_REVIEW"}}}, "then": {"properties": {"enabled": {"const": false}}}}
+      ]
+    }
+  }
+}

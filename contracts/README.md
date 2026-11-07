@@ -1,5 +1,23 @@
 # 视频分析结果契约
 
+## 视频对话 Agent v1.0
+
+[agent-answer.schema.json](./agent-answer.schema.json) 定义独立会话轮次的回答、原句引用、工具轨迹与来源身份。JSON Schema 检查固定结构；Java/Python 另行核验本轮实际观察、唯一源顺序、原文与毫秒时间、工具连续步骤、允许的来源及主模型。VIDEO 必须有原句引用，GENERAL/INSUFFICIENT 可无引用；只有实际调用 search_transcript 才记录检索模式。剪辑建议为纯文本，不能自动改审核或导出。接口、限制与恢复见[视频对话 Agent](../docs/45-视频对话Agent.md)。
+
+## 普通分析的准备产物复用
+
+`POST /api/jobs/{id}/resume-from-asr` 为已完成 MEDIA/ASR 的 topics 任务建立独立新轮次。公开快照的可选 `resumed_from_job_id` 表示来源；私有 `preparation_reuse` 只随认证 claim 下发，结构见 [preparation-reuse.schema.json](./preparation-reuse.schema.json)。Worker 另行核验源与目标身份、manifest、路径和字节哈希，失败不回退付费 ASR。完整状态、预算与并发约束见[执行说明](../docs/40-普通分析复用转写重新执行.md)。
+
+## 按需求剪辑 v1.0
+
+只读分页历史使用 [clip-request-history.schema.json](./clip-request-history.schema.json)，独立于完整请求快照。摘要仅供浏览与刷新，不包含 ASR、方案、回答引用，也不能作为编辑/确认凭证；同任务 keyset 游标、微秒排序及兼容边界见 [轻量分页历史](../docs/60-轻量分页剪辑历史.md)。
+
+回答引用联动剪辑可在创建请求时携带 `source_answer:{turn_id,utterance_ids}`。Java 冻结的公开 `source_answer` 与私有 claim 的 `clip_request.answer_source` 使用 [answer-source.schema.json](./answer-source.schema.json)，旧普通请求为 null。冻结对象只接受同任务成功 VIDEO 回答的原引用，时间由原 ASR 映射；JSON Schema 之外另查 UTF-16 总长、摘要、顺序及完整原句。锚定使用专用 ANCHOR_CLIP/TEXT，`clip_plan` 仍为 v1.0、prompt_version 为 anchor-clips-v1，单目标候选完整保留全部锚句。普通请求仍用 intent-clips-v1 与 SEGMENT。恢复、人工修订及验收边界见 [回答原句联动剪辑](../docs/58-回答原句联动剪辑.md)。
+
+独立请求方案使用 [clip-plan.schema.json](./clip-plan.schema.json)，不覆盖原话题预测与审核修订。每个目标一个输出，包含有序的多个源区间、证据和排除原句。JSON Schema 检查结构；Java 与 Python 另行核验来源哈希、目标完整覆盖、语句存在与顺序、时间映射、区间不重叠和排除证据互斥。自动方案所有输出初始不勾选，只有 FOUND 可人工启用；确认版本才能导出。接口及边界见 [按需求检索与剪辑方案](../docs/37-按需求检索与剪辑方案.md)。
+
+请求快照可包含 `resumed_from_request_id`，仅表示继续操作创建的新请求与旧请求的关系，不反写剪辑方案的 request_id。取消和继续的状态、幂等、来源核验及计费边界见[协议](../docs/39-剪辑请求取消与继续.md)。旧快照缺少该字段仍合法。
+
 ## 执行器状态与领取协议
 
 执行器注册、独立心跳、停机、带会话的领取及公开容量快照见 [执行器感知与资源调度](../docs/36-执行器感知与资源调度.md)。该协议补充执行控制，不修改历史分析结果、人工修订或导出契约。
@@ -43,6 +61,16 @@ uv run pytest worker-python/tests/test_contracts.py worker-python/tests/test_inp
 
 ## 独立定位参考
 
+`caption-review.schema.json` 定义独立成片字幕修订：绑定导出/成片/转写 hash 和冻结 parts，时间为成片相对毫秒；不可变 partial 标记与明确 reviewed 状态推导 requires_review。保存只接收 id/start_ms/end_ms/text/reviewed，确认后才能交付。格式、下载和素材包协议见 [字幕校对与素材包](../docs/47-字幕校对与素材包.md)。该字幕为句级源 EDL 映射，不代表词级或实测接缝 PTS。
+
 `localization-annotation.schema.json` 定义无 SKU 的离线参考标注，要求实际源 SHA256、时长、原场次、明确的标注范围和来源声明。`fixtures/localization-annotation.synthetic.json` 仅用于合成手算验证；旧 `annotation.example.json` 的空模板仍不代表背景。
 
 `livecut evaluate-localization` 对未经人工修改的 DRAFT 预测做来源绑定及一对一定位评测；没有参考时使用 `livecut audit-localization`，不会输出质量分数。完整命令和部分标注口径见 [离线定位评测](../docs/23-离线定位评测与证据审计.md)。
+
+## 确认字幕烧录输入 v1
+
+[caption-render-spec.schema.json](./caption-render-spec.schema.json) 定义独立派生 EXPORT_CLIP 的小型冻结输入，包含已验证 clean MP4、确认字幕修订与 cues 文件、固定字体、样式和输出几何。canonical hash 绑定 claim、checkpoint 与新 captioned_export manifest；旧 reviewed_export 分支继续保持。本文 Schema 检查结构，三端另核验来源/相对 key/真实字节哈希、时序、非重叠、允许的固定参数与租约。API、进度及验收见 [带字幕成片](../docs/49-带字幕成片导出.md)。
+
+字幕渲染专用 [cues 文件](./caption-render-cues.schema.json) 与 [公共快照](./caption-render.schema.json) 分别约束纯文本输入和独立状态；示例 fixtures/caption-render.example.json 完全合成。UTF-16/UTF-8字节限制、半开区间非重叠、URL与本记录ID绑定及进度不回退仍需业务校验。
+
+`PORTRAIT_BLUR_720` 为固定 720×1280 的[竖屏柔化背景](../docs/50-竖屏柔化背景.md)扩展；新枚举进入原有冻结哈希，旧普通竖屏保持补黑。新旧 Worker 需要协调发布。

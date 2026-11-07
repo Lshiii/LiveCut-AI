@@ -1,0 +1,47 @@
+package io.livecut.clips;
+
+import java.time.Instant;
+import java.util.List;
+import java.util.Map;
+import com.fasterxml.jackson.annotation.JsonProperty;
+import com.fasterxml.jackson.annotation.JsonInclude;
+import tools.jackson.databind.JsonNode;
+
+public final class ClipRequestModels {
+    private ClipRequestModels() {}
+    public record CreateRequest(String instruction, @JsonProperty("max_text_calls") Integer maxTextCalls,
+            @JsonProperty("source_answer") JsonNode sourceAnswer) {
+        public CreateRequest(String instruction,Integer maxTextCalls){this(instruction,maxTextCalls,null);}
+    }
+    public record ResumeRequest(@JsonProperty("max_text_calls") Integer maxTextCalls) {}
+    public record Budget(@JsonProperty("max_text_calls") int maxTextCalls,
+                         @JsonProperty("text_calls_reserved") int textCallsReserved) {}
+    public record Source(@JsonProperty("video_sha256") String videoSha256,
+                         @JsonProperty("transcript_hash") String transcriptHash,
+                         @JsonProperty("duration_ms") long durationMs) {}
+    public record Stage(String id, @JsonProperty("stage_type") String stageType, String status,
+                        int attempt, @JsonProperty("error_code") String errorCode, Map<String,Object> diagnostic,
+                        @JsonProperty("text_progress") @JsonInclude(JsonInclude.Include.NON_NULL) Map<String,Object> textProgress) {
+        public Stage(String id,String stageType,String status,int attempt,String errorCode,Map<String,Object> diagnostic){this(id,stageType,status,attempt,errorCode,diagnostic,null);}
+    }
+    public record Snapshot(String id,@JsonProperty("job_id") String jobId,
+        @JsonProperty("video_id") String videoId,String instruction,String status,
+        @JsonProperty("state_version") long stateVersion,@JsonProperty("created_at") Instant createdAt,
+        @JsonProperty("updated_at") Instant updatedAt,Budget budget,Stage stage,Source source,long revision,
+        @JsonProperty("plan_hash") String planHash,@JsonProperty("confirmed_revisions") List<Long> confirmedRevisions,
+        JsonNode plan,JsonNode utterances,
+        @JsonProperty("resumed_from_request_id") @JsonInclude(JsonInclude.Include.NON_NULL) String resumedFromRequestId,
+        @JsonProperty("source_answer") JsonNode sourceAnswer) {}
+    public record Page(List<Snapshot> items) {}
+    /** Metadata only: this is neither an editable plan nor proof of its frozen source. */
+    public record HistoryItem(String id,@JsonProperty("job_id") String jobId,
+        @JsonProperty("video_id") String videoId,String instruction,String status,
+        @JsonProperty("state_version") long stateVersion,@JsonProperty("created_at") Instant createdAt,
+        @JsonProperty("updated_at") Instant updatedAt,Budget budget,Source source,long revision,
+        @JsonProperty("plan_hash") String planHash,@JsonProperty("source_mode") String sourceMode) {}
+    public record HistoryPage(@JsonProperty("schema_version") String schemaVersion,
+        @JsonProperty("job_id") String jobId,List<HistoryItem> items,int limit,
+        @JsonProperty("next_cursor") String nextCursor,@JsonProperty("active_count") long activeCount) {
+        public HistoryPage { items=List.copyOf(items); }
+    }
+}

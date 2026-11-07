@@ -4,8 +4,12 @@ param(
     [string]$WorkerId = 'worker-local',
     [string]$JobId = '',
     [string]$ReuseAsrJob = '',
-    [ValidateSet('', 'MEDIA', 'ASR', 'SEGMENT', 'TIMELINE', 'EXPORT_CLIP')]
+    [ValidateSet('', 'MEDIA', 'ASR', 'SEGMENT', 'TIMELINE', 'EXPORT_CLIP', 'CAPTION_PROOFREAD', 'ANCHOR_CLIP')]
     [string]$StageType = '',
+    [ValidateScript({ -not [double]::IsNaN($_) -and -not [double]::IsInfinity($_) -and $_ -ge 0 -and $_ -le 3600 })]
+    [double]$RegistrationWaitSeconds = 45,
+    [ValidateScript({ -not [double]::IsNaN($_) -and -not [double]::IsInfinity($_) -and $_ -ge 0 -and $_ -le 3600 })]
+    [double]$ReconnectWaitSeconds = 180,
     [switch]$Once
 )
 $ErrorActionPreference = 'Stop'
@@ -29,7 +33,9 @@ try {
     if (-not [IO.Path]::IsPathRooted($storage)) { $storage = [IO.Path]::GetFullPath((Join-Path (Join-Path $repoRoot 'backend-java') $storage)) }
     $launchArgs = @('run', '--extra', 'ocr', 'livecut', 'worker', '--java-url', $JavaUrl,
         '--worker-id', $WorkerId, '--storage-root', $storage,
-        '--journal-dir', (Join-Path $repoRoot "data/worker-journals/$WorkerId"))
+        '--journal-dir', (Join-Path $repoRoot "data/worker-journals/$WorkerId"),
+        '--registration-wait-seconds', $RegistrationWaitSeconds.ToString([Globalization.CultureInfo]::InvariantCulture),
+        '--reconnect-wait-seconds', $ReconnectWaitSeconds.ToString([Globalization.CultureInfo]::InvariantCulture))
     if ($WorkerId -notmatch '^[A-Za-z0-9_-]{1,100}$') { throw 'Invalid worker identifier.' }
     if ($StageType) { $launchArgs += @('--stage-type', $StageType) }
     if ($JobId) { $launchArgs += @('--job-id', $JobId) }

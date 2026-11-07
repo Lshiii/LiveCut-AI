@@ -13,19 +13,20 @@ interface Review {
   products: Product[]; segments: Segment[]; utterances: Utterance[]
   predictions: { id: string; content_kind: string; identity_status: string; review_reasons: string[]; audio_evidence_utterance_ids: string[] }[]
 }
-const props = defineProps<{ jobId: string; videoUrl: string }>()
+const props = defineProps<{ jobId: string; videoUrl: string; active?: boolean }>()
 const review = ref<Review | null>(null), products = ref<Product[]>([]), segments = ref<Segment[]>([])
 const baseline = ref(''), pending = ref(false), error = ref(''), notice = ref('')
 const selectedId = ref(''), productFilter = ref(''), player = ref<HTMLVideoElement | null>(null)
 const playhead = ref(0)
 const downloadRevision = ref<number | null>(null)
+const exportEditor = ref<{ dirty: boolean; pending: boolean } | null>(null)
 let loadVersion = 0, stopped = false
 const payload = computed(() => ({
   products: products.value.map(({ id, name }) => ({ id, name })),
   segments: segments.value.map(({ id, start_ms, end_ms, product_id, enabled }) => ({ id, start_ms, end_ms, product_id, enabled })),
 }))
 const dirty = computed(() => !!review.value && JSON.stringify(payload.value) !== baseline.value)
-defineExpose({ dirty, pending })
+defineExpose({ dirty: computed(() => dirty.value || !!exportEditor.value?.dirty), pending: computed(() => pending.value || !!exportEditor.value?.pending) })
 const selected = computed(() => segments.value.find(s => s.id === selectedId.value))
 const visible = computed(() => segments.value.filter(s => !productFilter.value || s.product_id === productFilter.value))
 const evidence = computed(() => review.value?.utterances.filter(u => selected.value && u.end_ms > selected.value.start_ms && u.start_ms < selected.value.end_ms) ?? [])
@@ -118,7 +119,9 @@ function addProduct() { products.value.push({ id: crypto.randomUUID(), name: '�
 function onUnload(event: BeforeUnloadEvent) { if (dirty.value) { event.preventDefault(); event.returnValue = '' } }
 window.addEventListener('beforeunload', onUnload)
 watch(() => props.jobId, () => { review.value = null; void load() }, { immediate: true })
-onBeforeUnmount(() => { stopped = true; loadVersion++; window.removeEventListener('beforeunload', onUnload) })
+function guardPlayback(event: Event) { if (props.active === false || stopped) (event.currentTarget as HTMLVideoElement).pause() }
+watch(() => props.active, value => { if (value === false) player.value?.pause() })
+onBeforeUnmount(() => { stopped = true; loadVersion++; player.value?.pause(); window.removeEventListener('beforeunload', onUnload) })
 </script>
 
 <template>
@@ -133,7 +136,7 @@ onBeforeUnmount(() => { stopped = true; loadVersion++; window.removeEventListene
         <button class="secondary" :disabled="pending || dirty || downloadRevision === null" @click="downloadConfirmed">下载确认版本 JSON</button>
         <span class="help">下载所选确认版本；本页未保存修改不包含在文件中。</span>
       </div>
-      <div class="review-video-layout"><video ref="player" :src="videoUrl" controls preload="metadata" playsinline @timeupdate="playhead = Math.round((($event.target as HTMLVideoElement).currentTime || 0) * 1000)"></video><div class="review-instructions"><span class="eyebrow">MODEL RESULT → YOUR DECISION</span><h3>校对归属，再确认边界。</h3><p>点击片段定位原视频，结合右侧语音证据核对商品。可改名、调整毫秒边界、拆分或补上漏检片段。</p><p>勾选的片段才进入导出候选。未归属商品的片段需先补充归属，或取消勾选。</p><div class="review-count"><b>{{ enabledCount }}</b> 段已勾选 <span v-if="unresolved">· {{ unresolved }} 段待归属</span></div><small>模型原始结果独立保留；人工修改有来源标记。</small></div></div>
+      <div class="review-video-layout"><video ref="player" :src="videoUrl" controls preload="metadata" playsinline @play="guardPlayback" @timeupdate="playhead = Math.round((($event.target as HTMLVideoElement).currentTime || 0) * 1000)"></video><div class="review-instructions"><span class="eyebrow">MODEL RESULT → YOUR DECISION</span><h3>校对归属，再确认边界。</h3><p>点击片段定位原视频，结合右侧语音证据核对商品。可改名、调整毫秒边界、拆分或补上漏检片段。</p><p>勾选的片段才进入导出候选。未归属商品的片段需先补充归属，或取消勾选。</p><div class="review-count"><b>{{ enabledCount }}</b> 段已勾选 <span v-if="unresolved">· {{ unresolved }} 段待归属</span></div><small>模型原始结果独立保留；人工修改有来源标记。</small></div></div>
       <div class="review-timeline" aria-label="商品讲解时间轴"><button v-for="segment in segments" :key="segment.id" :style="{ left: `${segment.start_ms / review.duration_ms * 100}%`, width: `${Math.max(.4, (segment.end_ms - segment.start_ms) / review.duration_ms * 100)}%` }" :class="{ disabled: !segment.enabled, focused: selectedId === segment.id }" :aria-label="`${name(segment.product_id)} ${time(segment.start_ms)} 至 ${time(segment.end_ms)}`" :title="`${name(segment.product_id)} ${time(segment.start_ms)}`" @click="seek(segment)"></button></div>
       <div class="timeline-labels"><span>00:00</span><span>当前 {{ time(playhead) }}</span><span>{{ time(review.duration_ms) }}</span></div>
       <fieldset class="review-fields" :disabled="pending">
@@ -152,7 +155,7 @@ onBeforeUnmount(() => { stopped = true; loadVersion++; window.removeEventListene
       </div>
       </fieldset>
       <div class="review-savebar"><div><b>{{ dirty ? '修改尚未保存' : `当前修订 r${review.revision}` }}</b><small>保存新版本；确认后才允许创建正式导出。</small></div><button class="secondary" :disabled="pending || !dirty" @click="save">{{ pending ? '处理中…' : '保存修订' }}</button><button class="primary" :disabled="pending || dirty || unresolved > 0 || review.status === 'CONFIRMED'" @click="confirm">{{ review.status === 'CONFIRMED' ? '本版已确认' : '确认此版本' }}</button></div>
-      <ExportPanel :key="review.job_id" :job-id="review.job_id" :confirmed-revisions="review.confirmed_revisions" :current-revision="review.revision" :dirty="dirty" />
+      <ExportPanel ref="exportEditor" :key="review.job_id" :job-id="review.job_id" :confirmed-revisions="review.confirmed_revisions" :current-revision="review.revision" :dirty="dirty" :active="props.active" />
     </template>
   </section>
 </template>
@@ -205,4 +208,14 @@ onBeforeUnmount(() => { stopped = true; loadVersion++; window.removeEventListene
 .review-savebar .primary { padding: 10px 15px; }
 @media(max-width:800px) { .review-video-layout { grid-template-columns: 1fr; } .review-video-layout video { height: 280px; } .review-edit-layout { grid-template-columns: 1fr; } .evidence-panel { max-height: 340px; border: 0; border-top: 1px solid #e4eadf; } }
 @media(max-width:450px) { .review-panel .panel-heading { flex-wrap: wrap; } .review-instructions { padding: 22px 18px; } .review-edit-layout > div { padding: 18px 14px; } .segment-inputs { grid-template-columns: 1fr 1fr; } .segment-inputs label:last-child { grid-column: 1 / -1; } .segment-heading > span { display: none; } .review-savebar { flex-wrap: wrap; padding: 18px 14px; } .review-savebar > div { width: 100%; flex-basis: 100%; } .review-tools { flex-wrap: wrap; } }
+.workbench-shell .review-panel { margin: 0; border: 0; border-radius: 0; color: #1f2937; font-size: 14px; }
+.workbench-shell .review-panel h2 { color: #1f2937; font-size: 20px; }
+.workbench-shell .review-panel h3 { color: #334155; }
+.workbench-shell .review-instructions, .workbench-shell .review-instructions p { color: #475569; font-size: 14px; line-height: 1.75; }
+.workbench-shell .segment-heading, .workbench-shell .segment-card input, .workbench-shell .segment-card select { color: #1f2937; font-size: 14px; }
+.workbench-shell .segment-inputs label, .workbench-shell .segment-footer, .workbench-shell .review-tools, .workbench-shell .utterance p { color: #475569; font-size: 13px; }
+.workbench-shell .segment-heading > span, .workbench-shell .utterance span, .workbench-shell .review-savebar small { color: #64748b; font-size: 12px; }
+.workbench-shell .evidence-panel { background: #f8fafc; border-color: #e2e8f0; }
+.workbench-shell .segment-card, .workbench-shell .review-savebar { border-color: #e2e8f0; }
+.workbench-shell .review-savebar b { color: #334155; font-size: 14px; }
 </style>

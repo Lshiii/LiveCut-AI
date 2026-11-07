@@ -19,7 +19,7 @@ import static io.livecut.jobs.WorkerModels.*;
 /** Instance liveness and conservative stage capacity; not a provider-side concurrency guarantee. */
 @Service
 public class WorkerCapacityService {
-    static final List<String> TYPES = List.of("MEDIA", "ASR", "SEGMENT", "TIMELINE", "EXPORT_CLIP");
+    static final List<String> TYPES = List.of("MEDIA", "ASR", "SEGMENT", "TIMELINE", "EXPORT_CLIP", "CAPTION_PROOFREAD","ANCHOR_CLIP");
     private static final ObjectMapper JSON = new ObjectMapper();
     private final JdbcTemplate jdbc;
     private final TransactionTemplate transaction;
@@ -161,7 +161,7 @@ public class WorkerCapacityService {
     private static boolean applies(Instance worker, String job) { return job == null || worker.target() == null || job.equals(worker.target()); }
     private static int busy(String id, List<Occupancy> occupancy) { return (int) occupancy.stream().filter(o -> id.equals(o.worker())).count(); }
     private static int resourceBusy(String name, List<Occupancy> occupancy) { return (int) occupancy.stream().filter(o -> name.equals(resource(o.type()))).count(); }
-    private static String resource(String type) { return switch (type) { case "MEDIA", "EXPORT_CLIP" -> "FFMPEG"; case "ASR" -> "ASR"; case "SEGMENT" -> "TEXT"; default -> null; }; }
+    private static String resource(String type) { return switch (type) { case "MEDIA", "EXPORT_CLIP" -> "FFMPEG"; case "ASR" -> "ASR"; case "SEGMENT", "CAPTION_PROOFREAD","ANCHOR_CLIP" -> "TEXT"; default -> null; }; }
     private List<Occupancy> occupancy(Instant now) {
         return jdbc.query("SELECT worker_id,stage_type FROM job_stage WHERE status='RUNNING' AND lease_until>? AND hard_deadline_at>?", (row, index) -> new Occupancy(row.getString("worker_id"), row.getString("stage_type")), Timestamp.from(now), Timestamp.from(now));
     }

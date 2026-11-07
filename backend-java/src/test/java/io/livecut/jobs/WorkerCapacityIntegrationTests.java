@@ -131,6 +131,24 @@ class WorkerCapacityIntegrationTests {
         assertEquals(1, jdbc.queryForObject("SELECT SUM(attempt) FROM job_stage WHERE job_id IN (?,?)", Integer.class, a.job(), b.job()));
         assertEquals(1, workers.snapshot(null).busySlots());
     }
+    @Test void claimingOneJobDoesNotWaitForUnrelatedJobsStageLocks() throws Exception {
+        Fixture own=fixture("TIMELINE"),foreign=fixture("TIMELINE");Agent worker=agent(List.of("TIMELINE"),1,null);
+        CountDownLatch held=new CountDownLatch(1),release=new CountDownLatch(1);
+        var transaction=new org.springframework.transaction.support.TransactionTemplate(context.getBean(org.springframework.transaction.PlatformTransactionManager.class));
+        transaction.setIsolationLevel(org.springframework.transaction.TransactionDefinition.ISOLATION_READ_COMMITTED);
+        try(var pool=Executors.newFixedThreadPool(2)){
+            var blocker=pool.submit(()->transaction.execute(status->{
+                jdbc.queryForObject("SELECT id FROM job_stage WHERE id=? FOR UPDATE",String.class,foreign.stage());held.countDown();
+                try{if(!release.await(10,TimeUnit.SECONDS))throw new AssertionError("Unrelated stage lock was not released");}catch(InterruptedException e){Thread.currentThread().interrupt();throw new AssertionError(e);}
+                return null;
+            }));
+            try{
+                assertTrue(held.await(3,TimeUnit.SECONDS));
+                var outcome=pool.submit(()->claim(own,worker).outcome());
+                assertEquals("CLAIMED",outcome.get(3,TimeUnit.SECONDS),"A job-scoped claim must never scan-lock another job's stages");
+            }finally{release.countDown();blocker.get(5,TimeUnit.SECONDS);}
+        }
+    }
     @Test void twoWorkersShareOneFfmpegPoolAndCancelReleasesCapacity() throws Exception {
         Fixture a = fixture("MEDIA"), b = fixture("MEDIA"); Agent first = agent(List.of("MEDIA"), 1, null), second = agent(List.of("MEDIA"), 1, null);
         List<String> outcomes = concurrent(() -> claim(a, first).outcome(), () -> claim(b, second).outcome());
@@ -189,7 +207,8 @@ class WorkerCapacityIntegrationTests {
         HttpResponse<String> response = http.send(HttpRequest.newBuilder(URI.create(base + "/api/executors")).GET().build(), HttpResponse.BodyHandlers.ofString());
         assertEquals(200, response.statusCode()); assertEquals("no-store", response.headers().firstValue("Cache-Control").orElseThrow());
         assertFalse(response.body().contains(agent.session())); assertFalse(response.body().contains("session_id")); assertFalse(response.body().contains("run_token"));
-        assertEquals(5, JSON.readTree(response.body()).path("stages").size()); assertEquals(3, JSON.readTree(response.body()).path("resources").size());
+        Set<String> stageTypes=new HashSet<>();JSON.readTree(response.body()).path("stages").forEach(stage->stageTypes.add(stage.path("stage_type").asText()));
+        assertEquals(Set.of("MEDIA","ASR","SEGMENT","TIMELINE","EXPORT_CLIP","CAPTION_PROOFREAD","ANCHOR_CLIP"),stageTypes);assertEquals(3, JSON.readTree(response.body()).path("resources").size());
         HttpResponse<String> accepted = http.send(HttpRequest.newBuilder(URI.create(base + "/internal/workers/heartbeat")).header("Content-Type", "application/json").header("X-Worker-Key", KEY)
             .POST(HttpRequest.BodyPublishers.ofString(JSON.writeValueAsString(session(agent)))).build(), HttpResponse.BodyHandlers.ofString());
         assertEquals(200, accepted.statusCode());

@@ -2,12 +2,19 @@
 
 from __future__ import annotations
 
+import math
 import re
+import threading
+import time
+from contextlib import contextmanager
 from datetime import datetime
+from typing import Callable
 from urllib.parse import urlsplit
 from uuid import UUID
 
 import httpx
+
+from .text_resilience import DeadlineHTTPTransport, TextRecoveryError
 
 
 class WorkerClientError(Exception):
@@ -31,38 +38,104 @@ class WorkerClient:
             raise WorkerClientError("INVALID_WORKER_CONFIGURATION")
         self._base_url = base_url.rstrip("/")
         self._timeout_seconds = timeout_seconds
+        self._request_state = threading.local()
         self._client = httpx.Client(
             headers={"X-Worker-Key": worker_key}, timeout=timeout_seconds,
-            transport=transport, follow_redirects=False, trust_env=False,
+            transport=transport if transport is not None else DeadlineHTTPTransport(trust_env=False),
+            follow_redirects=False, trust_env=False,
         )
 
     def close(self) -> None:
         self._client.close()
 
+    @contextmanager
+    def request_scope(self, *, deadline_at: float | Callable[[], float | None] | None = None,
+                      request_guard: Callable[[], None] | None = None):
+        """Thread-local control-plane bounds; heartbeat threads receive their own scope."""
+        if deadline_at is not None and not callable(deadline_at) and (
+                type(deadline_at) not in (int, float) or not math.isfinite(deadline_at)):
+            raise WorkerClientError("INVALID_WORKER_CONFIGURATION")
+        previous = getattr(self._request_state, "policy", None)
+        self._request_state.policy = (deadline_at, request_guard)
+        try:
+            yield
+        finally:
+            self._request_state.policy = previous
+
     def _request(self, method: str, path: str, **kwargs: object) -> dict:
+        started = time.monotonic()
+        timeout = kwargs.get("timeout", self._timeout_seconds)
+        if type(timeout) not in (int, float) or not math.isfinite(timeout) or timeout <= 0:
+            raise WorkerClientError("INVALID_WORKER_CONFIGURATION")
+        extensions = dict(kwargs.pop("extensions", {}) or {})
+        deadlines = [started + min(timeout, self._timeout_seconds)]
+        guards = []
+        policy = getattr(self._request_state, "policy", None)
+        if policy is not None:
+            scoped = policy[0]() if callable(policy[0]) else policy[0]
+            if scoped is not None:
+                if type(scoped) not in (int, float) or not math.isfinite(scoped):
+                    raise WorkerClientError("INVALID_WORKER_CONFIGURATION")
+                deadlines.append(scoped)
+            if policy[1] is not None:
+                guards.append(policy[1])
+        if "livecut_deadline_at" in extensions:
+            deadlines.append(extensions["livecut_deadline_at"])
+        if extensions.get("livecut_guard") is not None:
+            guards.append(extensions["livecut_guard"])
+        deadline = min(deadlines)
+        remaining = deadline - started
+        # The httpcore connection-pool wait uses HTTPX's timeout extension,
+        # not the bounded socket backend, so clamp that wait as well.
+        kwargs["timeout"] = max(0.0, min(timeout, self._timeout_seconds, remaining))
+
+        def guard() -> None:
+            for check in guards:
+                check()
+            if time.monotonic() >= deadline:
+                raise WorkerClientError("JAVA_UNAVAILABLE", retryable=True)
+
+        extensions.update(livecut_deadline_at=deadline, livecut_guard=guard)
+        kwargs["extensions"] = extensions
+        response = None
         try:
-            response = self._client.request(method, self._base_url + path, **kwargs)
-        except httpx.RequestError:
-            raise WorkerClientError("JAVA_UNAVAILABLE", retryable=True) from None
-        if not 200 <= response.status_code < 300:
-            code = {401: "WORKER_UNAUTHORIZED", 403: "WORKER_FORBIDDEN",
-                    409: "STALE_ATTEMPT"}.get(response.status_code, "JAVA_HTTP_ERROR")
             try:
-                error = response.json()
-                candidate = error.get("error_code", error.get("code"))
-                if isinstance(candidate, str) and re.fullmatch(r"[A-Z][A-Z0-9_]{0,79}", candidate):
-                    code = candidate
-            except (ValueError, AttributeError):
-                pass
-            raise WorkerClientError(code, retryable=response.status_code == 429
-                                    or response.status_code >= 500)
-        try:
-            value = response.json()
-        except ValueError:
-            raise WorkerClientError("INVALID_JAVA_RESPONSE", retryable=True) from None
-        if not isinstance(value, dict):
-            raise WorkerClientError("INVALID_JAVA_RESPONSE", retryable=True)
-        return value
+                guard()
+                response = self._client.request(method, self._base_url + path, **kwargs)
+                guard()
+            except httpx.RequestError:
+                raise WorkerClientError("JAVA_UNAVAILABLE", retryable=True) from None
+            except TextRecoveryError as error:
+                if error.code in {"TEXT_ATTEMPT_TIMEOUT", "TEXT_RETRY_DEADLINE_EXCEEDED"}:
+                    raise WorkerClientError("JAVA_UNAVAILABLE", retryable=True) from None
+                raise WorkerClientError("INVALID_JAVA_RESPONSE", retryable=True) from None
+            if not 200 <= response.status_code < 300:
+                code = {401: "WORKER_UNAUTHORIZED", 403: "WORKER_FORBIDDEN"}.get(
+                    response.status_code, "JAVA_HTTP_ERROR")
+                try:
+                    error = response.json()
+                    candidate = error.get("error_code", error.get("code"))
+                    if (response.status_code not in {401, 403}
+                            and isinstance(candidate, str)
+                            and re.fullmatch(r"[A-Z][A-Z0-9_]{0,79}", candidate)
+                            and (candidate not in {"STALE_ATTEMPT", "LEASE_EXPIRED"}
+                                 or response.status_code == 409)):
+                        code = candidate
+                except (ValueError, AttributeError):
+                    pass
+                raise WorkerClientError(code, retryable=response.status_code == 429
+                                        or response.status_code >= 500)
+            try:
+                value = response.json()
+            except ValueError:
+                raise WorkerClientError("INVALID_JAVA_RESPONSE", retryable=True) from None
+            if not isinstance(value, dict):
+                raise WorkerClientError("INVALID_JAVA_RESPONSE", retryable=True)
+            guard()
+            return value
+        finally:
+            if response is not None:
+                response.close()
 
     @staticmethod
     def _job_id(value: str) -> str:
@@ -112,8 +185,11 @@ class WorkerClient:
         return worker_id
 
     def _worker_receipt(self, path: str, payload: dict, outcome: str,
-                        *, timeout_seconds: float | None = None) -> dict:
+                        *, timeout_seconds: float | None = None,
+                        extensions: dict | None = None) -> dict:
         options = {} if timeout_seconds is None else {"timeout": min(self._timeout_seconds, timeout_seconds)}
+        if extensions is not None:
+            options["extensions"] = extensions
         response = self._request("POST", path, json=payload, **options)
         ttl = response.get("heartbeat_timeout_seconds")
         try:
@@ -129,8 +205,14 @@ class WorkerClient:
         return response
 
     def register_worker(self, worker_id: str, session_id: str, stage_types: list[str],
-                        *, target_job_id: str | None = None) -> dict:
-        allowed = {"MEDIA", "ASR", "SEGMENT", "TIMELINE", "EXPORT_CLIP"}
+                        *, target_job_id: str | None = None,
+                        timeout_seconds: float | None = None,
+                        request_guard: Callable[[], None] | None = None) -> dict:
+        if (timeout_seconds is not None
+                and (type(timeout_seconds) not in (int, float)
+                     or not 0 < timeout_seconds <= 3600)):
+            raise WorkerClientError("INVALID_WORKER_REGISTRATION_TIMEOUT")
+        allowed = {"MEDIA", "ASR", "SEGMENT", "CAPTION_PROOFREAD", "ANCHOR_CLIP", "TIMELINE", "EXPORT_CLIP"}
         if (not isinstance(stage_types, list) or not stage_types
                 or any(not isinstance(value, str) or value not in allowed for value in stage_types)
                 or len(set(stage_types)) != len(stage_types)):
@@ -139,7 +221,13 @@ class WorkerClient:
                    "session_id": self._session_id(session_id), "stage_types": stage_types, "slots": 1}
         if target_job_id is not None:
             payload["target_job_id"] = self._job_id(target_job_id)
-        return self._worker_receipt("/internal/workers/register", payload, "REGISTERED")
+        timeout = self._timeout_seconds if timeout_seconds is None else min(
+            self._timeout_seconds, timeout_seconds)
+        extensions = {"livecut_deadline_at": time.monotonic() + timeout}
+        if request_guard is not None:
+            extensions["livecut_guard"] = request_guard
+        return self._worker_receipt("/internal/workers/register", payload, "REGISTERED",
+                                    timeout_seconds=timeout_seconds, extensions=extensions)
 
     def heartbeat_worker(self, worker_id: str, session_id: str,
                          *, timeout_seconds: float | None = None) -> dict:
@@ -155,7 +243,7 @@ class WorkerClient:
         }, "UNREGISTERED")
 
     def callback(self, action: str, stage_id: str, payload: dict) -> dict:
-        if action not in {"heartbeat", "checkpoint", "complete", "fail"}:
+        if action not in {"heartbeat", "checkpoint", "complete", "fail", "text-progress", "render-progress"}:
             raise WorkerClientError("INVALID_CALLBACK")
         if not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", stage_id):
             raise WorkerClientError("INVALID_STAGE_ID")
@@ -163,6 +251,12 @@ class WorkerClient:
 
     def reserve_call(self, payload: dict) -> dict:
         return self._request("POST", "/internal/model-calls/reserve", json=payload)
+
+    def lookup_call(self, payload: dict) -> dict:
+        return self._request("POST", "/internal/model-calls/lookup", json=payload)
+
+    def caption_proofread_turn(self, turn_id: str) -> dict:
+        return self._request("GET", "/api/caption-proofread-turns/" + self._job_id(turn_id))
 
     def update_call(self, request_id: str, payload: dict) -> dict:
         if not re.fullmatch(r"[a-f0-9]{64}", request_id):

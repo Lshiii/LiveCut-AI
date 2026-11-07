@@ -23,6 +23,8 @@ uv sync --dev --extra ocr
 ./scripts/worker.ps1 -StageType MEDIA -Once
 ```
 
+同名旧会话尚未释放时默认最多等待 45 秒，可用 `-RegistrationWaitSeconds` 或 CLI `--registration-wait-seconds` 调整；0 保留首次冲突退出。Worker 输出按行解析的 JSON 事件，注册成功会先输出 `registered`，`-Once` 的最终结果仍在最后一行。等待、取消和成功确认的边界见[重启注册等待](./42-Worker重启注册等待.md)。
+
 脚本只加载 LIVECUT 配置且不打印其值，退出后恢复进程环境；相对存储路径与 Java 的 backend-java 工作目录解析规则一致。直接 CLI 也可运行：
 
 ```powershell

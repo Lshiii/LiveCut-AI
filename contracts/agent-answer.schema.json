@@ -1,0 +1,93 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://livecut.local/contracts/agent-answer.schema.json",
+  "title": "Source-bound video agent answer",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "session_id", "turn_id", "job_id", "video_id", "source_hash", "transcript_hash", "question", "answer", "answer_scope", "citations", "tool_calls", "provenance", "suggested_clip_instruction"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "session_id": {"$ref": "#/$defs/id"},
+    "turn_id": {"$ref": "#/$defs/id"},
+    "job_id": {"$ref": "#/$defs/id"},
+    "video_id": {"$ref": "#/$defs/id"},
+    "source_hash": {"$ref": "#/$defs/hash"},
+    "transcript_hash": {"$ref": "#/$defs/hash"},
+    "question": {"type": "string", "minLength": 1, "maxLength": 2000, "pattern": "\\S"},
+    "answer": {"type": "string", "minLength": 1, "maxLength": 6000, "pattern": "\\S"},
+    "answer_scope": {"enum": ["VIDEO", "GENERAL", "INSUFFICIENT"]},
+    "suggested_clip_instruction": {"anyOf": [{"type": "null"}, {"type": "string", "minLength": 1, "maxLength": 2000, "pattern": "\\S"}]},
+    "citations": {
+      "type": "array", "maxItems": 24,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["utterance_id", "start_ms", "end_ms", "text"],
+        "properties": {
+          "utterance_id": {"$ref": "#/$defs/id"},
+          "start_ms": {"type": "integer", "minimum": 0},
+          "end_ms": {"type": "integer", "minimum": 1},
+          "text": {"type": "string", "minLength": 1, "maxLength": 100000, "pattern": "\\S"}
+        }
+      }
+    },
+    "tool_calls": {"type": "array", "maxItems": 4, "items": {"$ref": "#/$defs/toolCall"}},
+    "provenance": {
+      "type": "object", "additionalProperties": false,
+      "required": ["text_model_id", "prompt_version", "retrieval_mode"],
+      "properties": {
+        "text_model_id": {"$ref": "#/$defs/id"},
+        "prompt_version": {"const": "video-agent-v1"},
+        "retrieval_mode": {"enum": ["none", "bm25", "bm25_dense_rrf"]}
+      }
+    }
+  },
+  "allOf": [
+    {"if": {"properties": {"answer_scope": {"const": "VIDEO"}}}, "then": {"properties": {"citations": {"minItems": 1}}}},
+    {
+      "if": {"properties": {"tool_calls": {"contains": {"properties": {"tool_name": {"const": "search_transcript"}}, "required": ["tool_name"]}}}},
+      "then": {"properties": {"provenance": {"properties": {"retrieval_mode": {"enum": ["bm25", "bm25_dense_rrf"]}}}}},
+      "else": {"properties": {"provenance": {"properties": {"retrieval_mode": {"const": "none"}}}}}
+    }
+  ],
+  "$defs": {
+    "id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$"},
+    "hash": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "searchArguments": {
+      "type": "object", "additionalProperties": false, "required": ["query", "top_k"],
+      "properties": {
+        "query": {"type": "string", "minLength": 1, "maxLength": 300, "pattern": "\\S"},
+        "top_k": {"type": "integer", "minimum": 1, "maximum": 8}
+      }
+    },
+    "contextArguments": {
+      "type": "object", "additionalProperties": false, "required": ["utterance_id", "before", "after"],
+      "properties": {
+        "utterance_id": {"$ref": "#/$defs/id"},
+        "before": {"type": "integer", "minimum": 0, "maximum": 3},
+        "after": {"type": "integer", "minimum": 0, "maximum": 3}
+      }
+    },
+    "topicsArguments": {
+      "type": "object", "additionalProperties": false, "required": ["offset", "limit"],
+      "properties": {
+        "offset": {"type": "integer", "minimum": 0, "maximum": 20000},
+        "limit": {"type": "integer", "minimum": 1, "maximum": 12}
+      }
+    },
+    "toolCall": {
+      "type": "object", "additionalProperties": false,
+      "required": ["step", "tool_name", "arguments", "result_utterance_ids"],
+      "properties": {
+        "step": {"type": "integer", "minimum": 1, "maximum": 4},
+        "tool_name": {"enum": ["search_transcript", "read_context", "list_topics"]},
+        "arguments": {"type": "object"},
+        "result_utterance_ids": {"type": "array", "maxItems": 200, "uniqueItems": true, "items": {"$ref": "#/$defs/id"}}
+      },
+      "allOf": [
+        {"if": {"properties": {"tool_name": {"const": "search_transcript"}}}, "then": {"properties": {"arguments": {"$ref": "#/$defs/searchArguments"}}}},
+        {"if": {"properties": {"tool_name": {"const": "read_context"}}}, "then": {"properties": {"arguments": {"$ref": "#/$defs/contextArguments"}}}},
+        {"if": {"properties": {"tool_name": {"const": "list_topics"}}}, "then": {"properties": {"arguments": {"$ref": "#/$defs/topicsArguments"}}}}
+      ]
+    }
+  }
+}

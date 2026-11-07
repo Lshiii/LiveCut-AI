@@ -69,16 +69,28 @@ public class ModelCallService {
         return transactions.execute(transaction -> {
             // The same parent lock serializes every reservation and stage write.
             var active = jobs.lockActiveStage(request.stageId(), new JobModels.Credential(request.attempt(), request.runToken()));
-            if (!"ANALYSIS".equals(active.stage().ownerType())) {
+            boolean clipRequest="CLIP_REQUEST".equals(active.stage().ownerType());
+            boolean agentTurn="AGENT_TURN".equals(active.stage().ownerType()),ownedText=clipRequest||agentTurn;
+            String textTable=clipRequest?"clip_request":"agent_turn";
+            if (!"ANALYSIS".equals(active.stage().ownerType())&&!ownedText) {
                 throw error(HttpStatus.CONFLICT, "MODEL_KIND_CONFLICT", "Export stages do not permit provider requests");
             }
             String expectedStage = "TEXT".equals(request.kind()) ? "SEGMENT" : "ASR";
-            if (!expectedStage.equals(active.stage().stageType())) {
+            if(ownedText&&!"TEXT".equals(request.kind()))throw error(HttpStatus.CONFLICT,"MODEL_KIND_CONFLICT","Independent text operations cannot submit new ASR");
+            boolean captionText=agentTurn&&"TEXT".equals(request.kind())&&"CAPTION_PROOFREAD".equals(active.stage().stageType());
+            boolean anchorText=clipRequest&&"TEXT".equals(request.kind())&&"ANCHOR_CLIP".equals(active.stage().stageType());
+            if (!expectedStage.equals(active.stage().stageType())&&!captionText&&!anchorText) {
                 throw error(HttpStatus.CONFLICT, "MODEL_KIND_CONFLICT", "Model operation is not allowed in this stage");
             }
             String configJson = jdbc.queryForObject("SELECT config_json FROM analysis_job WHERE id = ?", String.class, active.jobId());
             String modelField = "TEXT".equals(request.kind()) ? "text_model" : "asr_model";
-            if (!request.modelId().equals(json.readTree(configJson).path(modelField).asText())) {
+            String expectedModel=ownedText?jdbc.queryForObject("SELECT text_model_id FROM "+textTable+" WHERE id=?",String.class,active.stage().ownerId()):json.readTree(configJson).path(modelField).asText();
+            List<String> fallbackModels=List.of();
+            if("TEXT".equals(request.kind())){
+                if(ownedText)fallbackModels=TextExecutionPolicy.storedFallbacks(jdbc.queryForObject("SELECT text_fallback_models_json FROM "+textTable+" WHERE id=?",String.class,active.stage().ownerId()));
+                else {var configured=json.readTree(configJson).path("text_fallback_models");if(configured.isArray())fallbackModels=TextExecutionPolicy.fallbackModels(json.readValue(configured.toString(),List.class));}
+            }
+            if (!request.modelId().equals(expectedModel)&&!fallbackModels.contains(request.modelId())) {
                 throw error(HttpStatus.CONFLICT, "MODEL_CONFIG_CONFLICT", "Model must match the immutable job configuration");
             }
             List<CallRow> byId = find("request_id = ?", request.requestId());
@@ -93,15 +105,32 @@ public class ModelCallService {
             }
             String used = "TEXT".equals(request.kind()) ? "text_calls_reserved" : "asr_calls_reserved";
             String limit = "TEXT".equals(request.kind()) ? "max_text_calls" : "max_asr_submissions";
-            int changed = jdbc.update("UPDATE analysis_job SET " + used + " = " + used
-                    + " + 1, state_version = state_version + 1, updated_at = CURRENT_TIMESTAMP(6) WHERE id = ? AND " + used + " < " + limit, active.jobId());
+            String table=ownedText?textTable:"analysis_job", owner=ownedText?active.stage().ownerId():active.jobId();
+            int changed = jdbc.update("UPDATE "+table+" SET " + used + " = " + used
+                    + " + 1, state_version = state_version + 1, updated_at = CURRENT_TIMESTAMP(6) WHERE id = ? AND " + used + " < " + limit, owner);
             if (changed != 1) {
                 throw error(HttpStatus.CONFLICT, "MODEL_BUDGET_EXHAUSTED", "This job has no remaining model request reservations");
             }
-            jdbc.update("INSERT INTO model_call (request_id, job_id, stage_id, operation_key, input_hash, model_id, kind, status, origin_attempt, origin_token_hash, usage_json) VALUES (?, ?, ?, ?, ?, ?, ?, 'RESERVED', ?, ?, '{}')",
+            jdbc.update("INSERT INTO model_call (request_id, job_id, stage_id, operation_key, input_hash, model_id, kind, status, origin_attempt, origin_token_hash, usage_json,owner_type,owner_id) VALUES (?, ?, ?, ?, ?, ?, ?, 'RESERVED', ?, ?, '{}',?,?)",
                     request.requestId(), active.jobId(), request.stageId(), request.operationKey(), request.inputHash(),
-                    request.modelId(), request.kind(), request.attempt(), tokenHash(request.runToken()));
+                    request.modelId(), request.kind(), request.attempt(), tokenHash(request.runToken()),active.stage().ownerType(),owner);
             return new CallResponse("RESERVED", view(find("request_id = ?", request.requestId()).getFirst()));
+        });
+    }
+
+    /** Recovery can inspect old responses after its time budget without reserving another call. */
+    public CallResponse lookup(ReserveRequest request) {
+        validateReserve(request);
+        return transactions.execute(transaction -> {
+            var active=jobs.lockActiveStage(request.stageId(),new JobModels.Credential(request.attempt(),request.runToken()));
+            if(!Set.of("ANALYSIS","CLIP_REQUEST","AGENT_TURN").contains(active.stage().ownerType())
+                    || !("SEGMENT".equals(active.stage().stageType())||"AGENT_TURN".equals(active.stage().ownerType())&&"CAPTION_PROOFREAD".equals(active.stage().stageType())||"CLIP_REQUEST".equals(active.stage().ownerType())&&"ANCHOR_CLIP".equals(active.stage().stageType())) || !"TEXT".equals(request.kind())) {
+                throw error(HttpStatus.CONFLICT,"MODEL_KIND_CONFLICT","Only active text stages may recover text responses");
+            }
+            List<CallRow> rows=find("request_id = ?",request.requestId());
+            if(rows.isEmpty())return new CallResponse("NOT_FOUND",null);
+            checkSameInput(rows.getFirst(),request);
+            return new CallResponse("EXISTING",view(rows.getFirst()));
         });
     }
 
@@ -115,10 +144,15 @@ public class ModelCallService {
                 throw error(HttpStatus.CONFLICT, "MODEL_CALL_INPUT_CONFLICT", "Model request belongs to a different stage");
             }
             String ownerType = jdbc.queryForObject("SELECT owner_type FROM job_stage WHERE id=?", String.class, hint.stageId());
-            if (!"ANALYSIS".equals(ownerType)) { throw error(HttpStatus.CONFLICT, "MODEL_KIND_CONFLICT", "Export stages do not permit provider requests"); }
+            if (!Set.of("ANALYSIS","CLIP_REQUEST","AGENT_TURN").contains(ownerType)) { throw error(HttpStatus.CONFLICT, "MODEL_KIND_CONFLICT", "Export stages do not permit provider requests"); }
             // Accounting callbacks may arrive after a stage has been reclaimed.
             // Lock in the same job -> stage -> call order without granting stage ownership.
             jdbc.queryForObject("SELECT id FROM analysis_job WHERE id = ? FOR UPDATE", String.class, hint.jobId());
+            if(Set.of("CLIP_REQUEST","AGENT_TURN").contains(ownerType)){
+                String owner=jdbc.queryForObject("SELECT owner_id FROM job_stage WHERE id=?",String.class,hint.stageId());
+                String ownerTable="CLIP_REQUEST".equals(ownerType)?"clip_request":"agent_turn";
+                jdbc.queryForObject("SELECT id FROM "+ownerTable+" WHERE id=? FOR UPDATE",String.class,owner);
+            }
             Map<String, Object> stage = jdbc.queryForMap("SELECT status, attempt, run_token FROM job_stage WHERE id = ? FOR UPDATE", hint.stageId());
             CallRow current = find("request_id = ?", requestId).getFirst();
             boolean dispatchedOwner = current.dispatchAttempt() != null

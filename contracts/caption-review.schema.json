@@ -1,0 +1,260 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://livecut.local/contracts/caption-review.schema.json",
+  "title": "Immutable-source clip caption review v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "export_id",
+    "clip_id",
+    "clip_title",
+    "content_url",
+    "revision",
+    "status",
+    "confirmed_revisions",
+    "content_hash",
+    "source",
+    "cues"
+  ],
+  "properties": {
+    "export_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "clip_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "clip_title": {
+      "type": "string",
+      "minLength": 1
+    },
+    "content_url": {
+      "type": "string",
+      "pattern": "^/api/exports/"
+    },
+    "revision": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "status": {
+      "enum": [
+        "DRAFT",
+        "CONFIRMED"
+      ]
+    },
+    "confirmed_revisions": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "integer",
+        "minimum": 0
+      }
+    },
+    "content_hash": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "snapshot_hash",
+        "clip_sha256",
+        "transcript_hash",
+        "duration_ms",
+        "media_duration_ms",
+        "timing_basis",
+        "parts"
+      ],
+      "properties": {
+        "snapshot_hash": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "clip_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "transcript_hash": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "duration_ms": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "media_duration_ms": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "timing_basis": {
+          "const": "SOURCE_EDL_SENTENCE_MS"
+        },
+        "parts": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 12,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "start_ms",
+              "end_ms"
+            ],
+            "properties": {
+              "start_ms": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "end_ms": {
+                "type": "integer",
+                "minimum": 1
+              }
+            }
+          }
+        }
+      }
+    },
+    "cues": {
+      "type": "array",
+      "maxItems": 10000,
+      "items": {
+        "$ref": "#/$defs/cue"
+      }
+    }
+  },
+  "$defs": {
+    "cue": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "part_index",
+        "source_utterance_id",
+        "source_start_ms",
+        "source_end_ms",
+        "retained_start_ms",
+        "retained_end_ms",
+        "start_ms",
+        "end_ms",
+        "text",
+        "source_text",
+        "boundary_partial",
+        "reviewed",
+        "requires_review"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$"
+        },
+        "part_index": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 11
+        },
+        "source_utterance_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$"
+        },
+        "source_start_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "source_end_ms": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "retained_start_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "retained_end_ms": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "start_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "end_ms": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000
+        },
+        "source_text": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000
+        },
+        "boundary_partial": {
+          "type": "boolean"
+        },
+        "reviewed": {
+          "type": "boolean"
+        },
+        "requires_review": {
+          "type": "boolean"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "boundary_partial": {
+                "const": false
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "requires_review": {
+                "const": false
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "reviewed": {
+                "const": true
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "requires_review": {
+                "const": false
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "boundary_partial": {
+                "const": true
+              },
+              "reviewed": {
+                "const": false
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "requires_review": {
+                "const": true
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

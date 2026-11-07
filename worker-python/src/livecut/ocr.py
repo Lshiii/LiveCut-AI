@@ -45,7 +45,7 @@ def observe_video_ocr(
     model_id = "custom-ocr-engine" if engine is not None else ocr_model_id()
     check = guard or (lambda: None)
     check()
-    binding = {"source_sha256": _hash_file(path), "duration_ms": duration_ms,
+    binding = {"source_sha256": _hash_file(path, guard=guard), "duration_ms": duration_ms,
                "interval_ms": interval_ms, "max_frames": max_frames, "model_id": model_id}
     if sampling_policy == "uniform":
         binding["sampling_policy"] = "uniform"
@@ -99,13 +99,17 @@ def observe_video_ocr(
                         raise VisionError("INVALID_CHECKPOINT", "Uniform OCR checkpoint has an invalid time base") from None
                     if abs(frame["timestamp_ms"] * denominator - frame["source_pts"] * numerator * 1000) > denominator:
                         raise VisionError("INVALID_CHECKPOINT", "Uniform OCR checkpoint frame time does not match its PTS")
-                if _hash_file(target) != state["frames"][index]["sha256"]:
+                if _hash_file(target, guard=guard) != state["frames"][index]["sha256"]:
                     raise VisionError("FRAME_CHANGED", "Cached OCR frame has changed")
                 continue
             if target.is_symlink() or target.resolve() == path:
                 raise VisionError("OUTPUT_CONFLICT", "OCR frames must not overwrite source")
-            timing = (extractor or _extract_frame)(
-                _native_path(path), _native_path(target), requested_ms, ffmpeg_path=ffmpeg_path)
+            if extractor is None and guard is not None:
+                timing = _extract_frame(_native_path(path), _native_path(target), requested_ms,
+                                        ffmpeg_path=ffmpeg_path, guard=guard)
+            else:
+                timing = (extractor or _extract_frame)(
+                    _native_path(path), _native_path(target), requested_ms, ffmpeg_path=ffmpeg_path)
             check()
             if not 0 <= timing["timestamp_ms"] < duration_ms:
                 raise VisionError("INVALID_FRAME_TIME", "OCR frame time is outside video")
@@ -124,9 +128,9 @@ def observe_video_ocr(
                               "observed_text": "\n".join(lines)[:2000],
                               "visibility": "clear" if lines else "not_visible"})
             state["frames"].append({"frame_id": frame_id, "requested_timestamp_ms": requested_ms,
-                                    **timing, "object_key": key, "sha256": _hash_file(target)})
-            _write_json(state_path, state)
+                                    **timing, "object_key": key, "sha256": _hash_file(target, guard=guard)})
+            _write_json(state_path, state, guard=guard)
         check()
-        _write_json(directory / "observations.json", completed)
-        _write_json(directory / "frames.json", state["frames"])
+        _write_json(directory / "observations.json", completed, guard=guard)
+        _write_json(directory / "frames.json", state["frames"], guard=guard)
         return completed

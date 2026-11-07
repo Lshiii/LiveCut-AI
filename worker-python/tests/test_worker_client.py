@@ -82,8 +82,9 @@ def test_worker_cli_once_preserves_stage_filter_and_failure_exit(tmp_path, monke
             observed.append("closed")
 
     class Runner:
-        def __init__(self, *args):
-            pass
+        def __init__(self, *args, **kwargs):
+            assert kwargs["registration_wait_seconds"] == 45
+            assert callable(kwargs["lifecycle_observer"])
 
         def run_once(self, **kwargs):
             observed.append(kwargs)

@@ -1,0 +1,86 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://livecut.local/contracts/caption-proofread.schema.json",
+  "title": "Caption revision bound AI proofreading suggestions",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "session_id", "turn_id", "job_id", "video_id", "source_hash", "transcript_hash", "instruction", "caption_snapshot_hash", "export_id", "clip_id", "caption_revision", "caption_content_hash", "coverage", "suggestions", "tool_calls", "provenance"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "session_id": {"$ref": "#/$defs/id"},
+    "turn_id": {"$ref": "#/$defs/id"},
+    "job_id": {"$ref": "#/$defs/id"},
+    "video_id": {"$ref": "#/$defs/id"},
+    "source_hash": {"$ref": "#/$defs/hash"},
+    "transcript_hash": {"$ref": "#/$defs/hash"},
+    "instruction": {"type": "string", "minLength": 1, "maxLength": 1000, "pattern": "\\S"},
+    "caption_snapshot_hash": {"$ref": "#/$defs/hash"},
+    "export_id": {"$ref": "#/$defs/id"},
+    "clip_id": {"$ref": "#/$defs/id"},
+    "caption_revision": {"type": "integer", "minimum": 0},
+    "caption_content_hash": {"$ref": "#/$defs/hash"},
+    "coverage": {
+      "type": "object", "additionalProperties": false,
+      "required": ["offset", "count", "total_cues", "next_offset", "cue_ids"],
+      "properties": {
+        "offset": {"type": "integer", "minimum": 0, "maximum": 9999},
+        "count": {"type": "integer", "minimum": 1, "maximum": 20},
+        "total_cues": {"type": "integer", "minimum": 1, "maximum": 10000},
+        "next_offset": {"anyOf": [{"type": "null"}, {"type": "integer", "minimum": 1, "maximum": 9999}]},
+        "cue_ids": {"type": "array", "minItems": 1, "maxItems": 20, "uniqueItems": true, "items": {"$ref": "#/$defs/id"}}
+      }
+    },
+    "suggestions": {"type": "array", "maxItems": 20, "items": {"$ref": "#/$defs/suggestion"}},
+    "tool_calls": {"type": "array", "maxItems": 4, "items": {"$ref": "#/$defs/toolCall"}},
+    "provenance": {
+      "type": "object", "additionalProperties": false,
+      "required": ["text_model_id", "prompt_version", "retrieval_mode"],
+      "properties": {
+        "text_model_id": {"$ref": "#/$defs/id"},
+        "prompt_version": {"const": "caption-proofread-v1"},
+        "retrieval_mode": {"enum": ["none", "bm25", "bm25_dense_rrf"]}
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"tool_calls": {"contains": {"properties": {"tool_name": {"const": "search_transcript"}}, "required": ["tool_name"]}}}},
+      "then": {"properties": {"provenance": {"properties": {"retrieval_mode": {"enum": ["bm25", "bm25_dense_rrf"]}}}}},
+      "else": {"properties": {"provenance": {"properties": {"retrieval_mode": {"const": "none"}}}}}
+    }
+  ],
+  "$defs": {
+    "id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$"},
+    "hash": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "suggestion": {
+      "type": "object", "additionalProperties": false,
+      "required": ["cue_id", "before", "after", "decision", "reason", "evidence_utterance_ids"],
+      "properties": {
+        "cue_id": {"$ref": "#/$defs/id"},
+        "before": {"type": "string", "minLength": 1, "maxLength": 2000, "pattern": "\\S"},
+        "after": {"anyOf": [{"type": "null"}, {"type": "string", "minLength": 1, "maxLength": 2000, "pattern": "\\S"}]},
+        "decision": {"enum": ["CORRECTION", "UNCERTAIN"]},
+        "reason": {"type": "string", "minLength": 1, "maxLength": 500, "pattern": "\\S"},
+        "evidence_utterance_ids": {"type": "array", "minItems": 1, "maxItems": 24, "uniqueItems": true, "items": {"$ref": "#/$defs/id"}}
+      },
+      "allOf": [
+        {"if": {"properties": {"decision": {"const": "CORRECTION"}}}, "then": {"properties": {"after": {"type": "string", "minLength": 1, "maxLength": 2000, "pattern": "\\S"}}}},
+        {"if": {"properties": {"decision": {"const": "UNCERTAIN"}}}, "then": {"properties": {"after": {"type": "null"}}}}
+      ]
+    },
+    "toolCall": {
+      "type": "object", "additionalProperties": false,
+      "required": ["step", "tool_name", "arguments", "result_utterance_ids"],
+      "properties": {
+        "step": {"type": "integer", "minimum": 1, "maximum": 4},
+        "tool_name": {"enum": ["search_transcript", "read_context"]},
+        "arguments": {"type": "object"},
+        "result_utterance_ids": {"type": "array", "maxItems": 200, "uniqueItems": true, "items": {"$ref": "#/$defs/id"}}
+      },
+      "allOf": [
+        {"if": {"properties": {"tool_name": {"const": "search_transcript"}}}, "then": {"properties": {"arguments": {"type": "object", "additionalProperties": false, "required": ["query", "top_k"], "properties": {"query": {"type": "string", "minLength": 1, "maxLength": 300, "pattern": "\\S"}, "top_k": {"type": "integer", "minimum": 1, "maximum": 8}}}}}},
+        {"if": {"properties": {"tool_name": {"const": "read_context"}}}, "then": {"properties": {"arguments": {"type": "object", "additionalProperties": false, "required": ["utterance_id", "before", "after"], "properties": {"utterance_id": {"$ref": "#/$defs/id"}, "before": {"type": "integer", "minimum": 0, "maximum": 3}, "after": {"type": "integer", "minimum": 0, "maximum": 3}}}}}}
+      ]
+    }
+  }
+}

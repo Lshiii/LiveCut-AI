@@ -32,7 +32,8 @@ class PresenceClient(FakeClient):
         return {"worker_id": worker_id, "session_id": session_id, "outcome": outcome,
                 "heartbeat_timeout_seconds": 35, "last_seen_at": datetime.now(timezone.utc).isoformat()}
 
-    def register_worker(self, worker_id, session_id, capabilities, **kwargs):
+    def register_worker(self, worker_id, session_id, capabilities, *, timeout_seconds=None,
+                        request_guard=None, **kwargs):
         self.registrations.append((worker_id, session_id, capabilities, kwargs))
         return self.receipt(worker_id, session_id, "REGISTERED")
 
@@ -216,7 +217,7 @@ def test_registration_failure_fails_closed_before_ready_or_computation(tmp_path)
         raise WorkerClientError('WORKER_SESSION_CONFLICT')
     client.register_worker = refuse
     with pytest.raises(WorkerClientError, match='WORKER_SESSION_CONFLICT'):
-        worker(tmp_path, client, calls).run_once()
+        worker(tmp_path, client, calls, registration_wait_seconds=0).run_once()
     assert not client.ready_calls and not client.claims and not calls
 
 
@@ -382,7 +383,10 @@ def test_type_queries_reach_segment_beyond_twenty_blocked_media_stages(tmp_path)
     assert all(query['limit'] == 4 for query in queries)
 
 
-def test_heartbeat_http_timeout_is_tightened_to_short_server_ttl():
+def test_heartbeat_http_timeout_is_tightened_to_short_server_ttl(monkeypatch):
+    # This checks the configured TTL cap, not elapsed network time. A zero
+    # clock origin avoids cancellation error in (started + timeout) - started.
+    monkeypatch.setattr('livecut.worker_client.time.monotonic', lambda: 0.0)
     session, requests = str(uuid4()), []
 
     def receive(request):
@@ -394,7 +398,10 @@ def test_heartbeat_http_timeout_is_tightened_to_short_server_ttl():
         client.heartbeat_worker('worker-1', session, timeout_seconds=5 / 3)
     finally:
         client.close()
-    assert requests[0].extensions['timeout'] == {
+    timeouts = requests[0].extensions['timeout']
+    assert set(timeouts) == {'connect', 'read', 'write', 'pool'}
+    assert all(0 < value <= 5 / 3 for value in timeouts.values())
+    assert timeouts == {
         phase: 5 / 3 for phase in ('connect', 'read', 'write', 'pool')}
 
 
@@ -440,16 +447,17 @@ def test_presence_expiring_during_ready_prevents_claiming_or_model_dispatch(tmp_
 
 def test_hung_heartbeat_cannot_extend_local_guard_or_be_revived_by_a_late_receipt(tmp_path):
     client, clock, errors = PresenceClient(), {'now': 0}, []
-    entered, release, check_guard, failed = (threading.Event() for _ in range(4))
+    entered, executing, release, check_guard, failed = (threading.Event() for _ in range(5))
 
     def hung(worker_id, session_id, *, timeout_seconds=None):
         assert timeout_seconds <= 5 / 3
         entered.set()
-        assert release.wait(2)
+        assert release.wait(10)
         return client.receipt(worker_id, session_id, 'ACCEPTED') | {'heartbeat_timeout_seconds': 5}
 
     def execute(context):
-        assert check_guard.wait(2)
+        executing.set()
+        assert check_guard.wait(5)
         context.guard.check()
         pytest.fail('the expired presence must stop the next dispatch even while its HTTP thread hangs')
 
@@ -473,14 +481,18 @@ def test_hung_heartbeat_cannot_extend_local_guard_or_be_revived_by_a_late_receip
     thread = threading.Thread(target=run)
     thread.start()
     try:
-        assert entered.wait(2)
+        assert entered.wait(5)
+        # Registration heartbeats may start before the stage's journal fsync
+        # and claim finish. Expire presence only after execution has entered;
+        # otherwise we test pre-claim rejection rather than a fenced dispatch.
+        assert executing.wait(5)
         clock['now'] = 6
         check_guard.set()
-        assert failed.wait(2)
+        assert failed.wait(5)
         assert runner.stop.is_set()
     finally:
         release.set()
-        thread.join(2)
+        thread.join(5)
     assert not thread.is_alive()
     assert len(errors) == 1 and isinstance(errors[0], WorkerClientError)
     assert errors[0].code == 'WORKER_SESSION_EXPIRED'

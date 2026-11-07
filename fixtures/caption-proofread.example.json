@@ -1,0 +1,36 @@
+{
+  "schema_version": "1.0",
+  "session_id": "11111111-1111-4111-8111-111111111111",
+  "turn_id": "22222222-2222-4222-8222-222222222222",
+  "job_id": "33333333-3333-4333-8333-333333333333",
+  "video_id": "44444444-4444-4444-8444-444444444444",
+  "source_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "transcript_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "instruction": "合成验收：检查术语错字，不确定时保留原文并提示回听。",
+  "caption_snapshot_hash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "export_id": "55555555-5555-4555-8555-555555555555",
+  "clip_id": "66666666-6666-4666-8666-666666666666",
+  "caption_revision": 0,
+  "caption_content_hash": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+  "coverage": {"offset": 0, "count": 2, "total_cues": 2, "next_offset": null, "cue_ids": ["c000001", "c000002"]},
+  "suggestions": [
+    {
+      "cue_id": "c000001",
+      "before": "合成字幕：cloud code 会整理上下文。",
+      "after": "合成字幕：Claude Code 会整理上下文。",
+      "decision": "CORRECTION",
+      "reason": "根据相邻文本提出术语写法建议，仍需回听核对。",
+      "evidence_utterance_ids": ["u000001"]
+    },
+    {
+      "cue_id": "c000002",
+      "before": "合成字幕：这里还有一个不确定的专有名词。",
+      "after": null,
+      "decision": "UNCERTAIN",
+      "reason": "当前文本不足以确定专有名词，请回听原音频。",
+      "evidence_utterance_ids": ["u000002"]
+    }
+  ],
+  "tool_calls": [],
+  "provenance": {"text_model_id": "fixture-text-model", "prompt_version": "caption-proofread-v1", "retrieval_mode": "none"}
+}

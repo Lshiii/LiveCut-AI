@@ -17,6 +17,9 @@ import java.util.UUID;
 
 import io.livecut.jobs.JobModels.*;
 import io.livecut.exports.ExportService;
+import io.livecut.clips.ClipRequestService;
+import io.livecut.agent.AgentService;
+import io.livecut.captions.CaptionRenderSpec;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.http.HttpStatus;
@@ -37,7 +40,7 @@ import tools.jackson.databind.ObjectMapper;
 @EnableScheduling
 public class JobService {
     private static final List<String> FLOW = List.of("MEDIA", "ASR", "SEGMENT", "TIMELINE");
-    private static final Set<String> CONFIG_FIELDS = Set.of("asr_model", "text_model", "visual_provider", "max_text_calls", "max_asr_submissions", "ocr_sampling", "ocr_max_frames", "analysis_mode");
+    private static final Set<String> CONFIG_FIELDS = Set.of("asr_model", "text_model", "text_fallback_models", "visual_provider", "max_text_calls", "max_asr_submissions", "ocr_sampling", "ocr_max_frames", "analysis_mode");
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final RowMapper<StageRow> STAGE = (row, index) -> new StageRow(
             row.getString("id"), row.getString("job_id"), row.getString("stage_type"), row.getString("shard_key"),
@@ -46,17 +49,23 @@ public class JobService {
             row.getString("input_hash"), row.getString("checkpoint_key"), row.getString("checkpoint_hash"),
             row.getString("manifest_key"), row.getString("manifest_hash"), row.getString("error_code"),
             row.getString("owner_type"), row.getString("owner_id"),
-            StageDiagnostics.read(row.getString("diagnostic_json"), row.getString("error_code"), row.getInt("attempt")));
+            StageDiagnostics.read(row.getString("diagnostic_json"), row.getString("error_code"), row.getInt("attempt")),TextExecutionPolicy.readProgress(row.getString("text_progress_json")));
     private final JdbcTemplate jdbc;
     private final TransactionTemplate transaction;
     private final ArtifactVerifier artifactVerifier;
     private final ExportService exports;
     private final WorkerCapacityService workers;
+    private final ClipRequestService clips;
+    private final AgentService agents;
     private final int leaseSeconds;
     private final int hardDeadlineSeconds;
     private final int maxAttempts;
     private final int retryDelaySeconds;
     private final boolean scanEnabled;
+    @Value("${LIVECUT_TEXT_MODEL:qwen-plus}")
+    private String defaultTextModel;
+    @Value("${LIVECUT_TEXT_FALLBACK_MODELS:}")
+    private String defaultFallbackModels;
 
     public JobService(JdbcTemplate jdbc, PlatformTransactionManager manager,
                       @Value("${livecut.jobs.lease-seconds:30}") int leaseSeconds,
@@ -64,7 +73,7 @@ public class JobService {
                       @Value("${livecut.jobs.max-attempts:3}") int maxAttempts,
                       @Value("${livecut.jobs.retry-delay-seconds:2}") int retryDelaySeconds,
                       @Value("${livecut.jobs.scan-enabled:true}") boolean scanEnabled,
-                      ArtifactVerifier artifactVerifier, ExportService exports, WorkerCapacityService workers) {
+                      ArtifactVerifier artifactVerifier, ExportService exports, WorkerCapacityService workers, ClipRequestService clips, AgentService agents) {
         if (leaseSeconds < 1 || leaseSeconds > 3600 || hardDeadlineSeconds < 1 || hardDeadlineSeconds > 86400
                 || maxAttempts < 1 || maxAttempts > 10 || retryDelaySeconds < 0 || retryDelaySeconds > 3600) {
             throw new IllegalArgumentException("Invalid scheduler lease, deadline, attempt or retry settings");
@@ -73,6 +82,8 @@ public class JobService {
         this.artifactVerifier = artifactVerifier;
         this.exports = exports;
         this.workers = workers;
+        this.clips = clips;
+        this.agents = agents;
         this.transaction = new TransactionTemplate(manager);
         this.transaction.setIsolationLevel(TransactionDefinition.ISOLATION_READ_COMMITTED);
         this.leaseSeconds = leaseSeconds;
@@ -120,6 +131,84 @@ public class JobService {
         }
     }
 
+    /** A new text budget and generation, backed by immutable completed preparation. */
+    public JobSnapshot resumeFromAsr(String sourceJobId, ResumeFromAsrRequest request, String idempotencyKey) {
+        String sourceId = uuid(sourceJobId, "INVALID_JOB_ID");
+        String key = identifier(idempotencyKey, "idempotency key");
+        int budget = request == null || request.maxTextCalls() == null ? 12 : quota(request.maxTextCalls(), 100);
+        String requestHash = sha256("resume-from-asr\n" + sourceId + "\n" + budget);
+        // Only an unlocked routing hint is read first. Never acquire the source
+        // parent before its video: create serializes generations video -> job.
+        String videoId = String.valueOf(job(sourceId, false).get("video_id"));
+        try {
+            return transaction.execute(status -> {
+                List<Map<String, Object>> videos = jdbc.queryForList("SELECT id,content_hash FROM video_asset WHERE id=? FOR UPDATE", videoId);
+                if (videos.isEmpty()) throw missing("VIDEO_NOT_FOUND", "Video was not found");
+                JobSnapshot replay = existingResume(key, requestHash);
+                if (replay != null) return replay;
+                Map<String, Object> source = job(sourceId, true);
+                if (!videoId.equals(source.get("video_id"))) throw conflict("PREPARATION_SOURCE_INVALID", "Source video identity changed");
+                List<StageRow> sourceStages = stages(sourceId, true);
+                Map<String, Object> sourceConfig = readConfig(source);
+                String blocked = AnalysisRecoveryPolicy.resumeBlockReason(String.valueOf(source.get("status")), sourceConfig, sourceStages);
+                if (blocked != null) throw conflict(blocked, "Completed media and ASR from a terminal topic analysis are required");
+                String sourceHash = String.valueOf(videos.getFirst().get("content_hash"));
+                Map<String, Object> preparation = new TreeMap<>();
+                preparation.put("schema_version", 1);
+                preparation.put("source_job_id", sourceId);
+                preparation.put("video_id", videoId);
+                preparation.put("source_generation", ((Number) source.get("generation")).intValue());
+                preparation.put("source_hash", sourceHash);
+                preparation.put("asr_model", sourceConfig.get("asr_model"));
+                for (String type : List.of("MEDIA", "ASR")) {
+                    StageRow stage = sourceStages.stream().filter(row -> type.equals(row.stageType())).findFirst().orElseThrow();
+                    // Verifies manifest identity and all pinned audio/media-info/
+                    // transcript bytes. The original video is deliberately not
+                    // opened here; the worker verifies it before execution.
+                    artifactVerifier.verifyManifest(stage.manifestKey(), stage.manifestHash(), artifactIdentity(stage, source));
+                    preparation.put(type.toLowerCase(java.util.Locale.ROOT), Map.of("id", stage.id(), "attempt", stage.attempt(),
+                            "manifest_key", stage.manifestKey(), "manifest_hash", stage.manifestHash()));
+                }
+                Map<String, Object> defaults = config(null);
+                Map<String, Object> nextConfig = new TreeMap<>(sourceConfig);
+                nextConfig.put("text_model", defaults.get("text_model"));
+                nextConfig.put("text_fallback_models", defaults.get("text_fallback_models"));
+                nextConfig.put("max_text_calls", budget);
+                nextConfig.put("max_asr_submissions", 0);
+                // Missing historical OCR settings had prefix/16 semantics.
+                nextConfig.putIfAbsent("ocr_sampling", "prefix");
+                nextConfig.putIfAbsent("ocr_max_frames", 16);
+                nextConfig = config(nextConfig);
+                String configJson = JSON.writeValueAsString(nextConfig), configHash = sha256(configJson);
+                String preparationJson = JSON.writeValueAsString(preparation);
+                int generation = jdbc.queryForObject("SELECT COALESCE(MAX(generation),0)+1 FROM analysis_job WHERE video_id=?", Integer.class, videoId);
+                String id = UUID.randomUUID().toString();
+                jdbc.update("INSERT INTO analysis_job (id,video_id,generation,idempotency_key,request_hash,config_hash,config_json,status,max_text_calls,max_asr_submissions,resumed_from_job_id,preparation_source_json) VALUES (?,?,?,?,?,?,?,'QUEUED',?,0,?,?)",
+                        id, videoId, generation, key, requestHash, configHash, configJson, budget, sourceId, preparationJson);
+                for (String type : FLOW) {
+                    jdbc.update("INSERT INTO job_stage (id,job_id,owner_id,stage_type,shard_key,status,input_hash) VALUES (?,?,?,?,'0',?,?)",
+                            UUID.randomUUID().toString(), id, id, type, "MEDIA".equals(type) ? "READY" : "BLOCKED",
+                            sha256(sourceHash + "\n" + configHash + "\n" + sha256(preparationJson) + "\n" + type + "\n0"));
+                }
+                return snapshot(job(id, true));
+            });
+        } catch (DuplicateKeyException collision) {
+            return transaction.execute(status -> {
+                JobSnapshot replay = existingResume(key, requestHash);
+                if (replay == null) throw collision;
+                return replay;
+            });
+        }
+    }
+
+    private JobSnapshot existingResume(String key, String requestHash) {
+        List<Map<String, Object>> receipts = jdbc.queryForList("SELECT id,request_hash FROM analysis_job WHERE idempotency_key=?", key);
+        if (receipts.isEmpty()) return null;
+        // Reject a foreign receipt without locking an unrelated video's job.
+        if (!requestHash.equals(receipts.getFirst().get("request_hash"))) throw conflict("IDEMPOTENCY_CONFLICT", "Idempotency key belongs to different job input");
+        return snapshot(job(String.valueOf(receipts.getFirst().get("id")), true));
+    }
+
     public JobPage list(int limit, int offset) {
         if (limit < 1 || limit > 100 || offset < 0) { throw bad("INVALID_ARGUMENT", "limit must be 1..100 and offset nonnegative"); }
         return transaction.execute(status -> {
@@ -155,6 +244,8 @@ public class JobService {
             if (!actions.canRetry()) {
                 String message = "ATTEMPTS_EXHAUSTED".equals(actions.retryBlockReason())
                         ? "Execution attempts are exhausted; create a new analysis job"
+                        : "TEXT_RECOVERY_EXHAUSTED".equals(actions.retryBlockReason())
+                        ? "This text recovery round is exhausted; continue from completed ASR with a new text budget"
                         : "Only failed jobs with failed stages can be retried";
                 throw conflict(actions.retryBlockReason(), message);
             }
@@ -170,14 +261,14 @@ public class JobService {
 
     public List<ReadyStage> ready(String stageType, int limit, String jobId) {
         if (limit < 1 || limit > 100) { throw bad("INVALID_ARGUMENT", "limit must be 1..100"); }
-        if (stageType != null && !FLOW.contains(stageType) && !"EXPORT_CLIP".equals(stageType)) { throw bad("INVALID_ARGUMENT", "Unknown stage type"); }
+        if (stageType != null && !FLOW.contains(stageType) && !Set.of("EXPORT_CLIP","CAPTION_PROOFREAD","ANCHOR_CLIP").contains(stageType)) { throw bad("INVALID_ARGUMENT", "Unknown stage type"); }
         String targetJob = jobId == null ? null : uuid(jobId, "INVALID_JOB_ID");
         String predicate = stageType == null ? "" : " AND s.stage_type=?";
         List<Object> parameters = new ArrayList<>();
         if (stageType != null) { parameters.add(stageType); }
         if (targetJob != null) { predicate += " AND s.job_id=?"; parameters.add(targetJob); }
         parameters.add(limit);
-        return jdbc.query("SELECT s.* FROM job_stage s JOIN analysis_job j ON j.id=s.job_id LEFT JOIN export_job e ON s.owner_type='EXPORT' AND e.id=s.owner_id AND e.job_id=s.job_id WHERE s.status='READY' AND s.next_run_at<=CURRENT_TIMESTAMP(6) AND ((s.owner_type='ANALYSIS' AND j.status IN ('QUEUED','RUNNING')) OR (s.owner_type='EXPORT' AND j.status='REVIEW_READY' AND e.status IN ('QUEUED','RUNNING')))" + predicate + " ORDER BY s.next_run_at,s.id LIMIT ?",
+        return jdbc.query("SELECT s.* FROM job_stage s JOIN analysis_job j ON j.id=s.job_id LEFT JOIN export_job e ON s.owner_type='EXPORT' AND e.id=s.owner_id AND e.job_id=s.job_id LEFT JOIN clip_request c ON s.owner_type='CLIP_REQUEST' AND c.id=s.owner_id AND c.job_id=s.job_id LEFT JOIN agent_turn a ON s.owner_type='AGENT_TURN' AND a.id=s.owner_id AND a.job_id=s.job_id WHERE s.status='READY' AND s.next_run_at<=CURRENT_TIMESTAMP(6) AND ((s.owner_type='ANALYSIS' AND j.status IN ('QUEUED','RUNNING')) OR (s.owner_type='EXPORT' AND j.status='REVIEW_READY' AND e.status IN ('QUEUED','RUNNING')) OR (s.owner_type='CLIP_REQUEST' AND j.status='REVIEW_READY' AND c.status IN ('QUEUED','RUNNING')) OR (s.owner_type='AGENT_TURN' AND j.status='REVIEW_READY' AND a.status IN ('QUEUED','RUNNING')))" + predicate + " ORDER BY s.next_run_at,s.id LIMIT ?",
                 (row, index) -> new ReadyStage(row.getString("id"), row.getString("job_id"), row.getString("stage_type"), row.getString("shard_key"), instant(row, "next_run_at")), parameters.toArray());
     }
 
@@ -235,7 +326,7 @@ public class JobService {
             String token = UUID.randomUUID().toString();
             Instant deadline = now.plusSeconds(hardDeadlineSeconds);
             Instant lease = minimum(now.plusSeconds(leaseSeconds), deadline);
-            jdbc.update("UPDATE job_stage SET status='RUNNING',attempt=attempt+1,run_token=?,worker_id=?,worker_session_id=?,lease_until=?,hard_deadline_at=?,error_code=NULL,diagnostic_json=NULL,updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND status='READY'",
+            jdbc.update("UPDATE job_stage SET status='RUNNING',attempt=attempt+1,run_token=?,worker_id=?,worker_session_id=?,lease_until=?,hard_deadline_at=?,error_code=NULL,diagnostic_json=NULL,text_progress_json=NULL,render_progress_json=NULL,updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND status='READY'",
                     token, worker, session, timestamp(lease), timestamp(deadline), stageId);
             StageRow current = stage(stageId, true);
             jdbc.update("UPDATE stage_claim_request SET outcome='CLAIMED',attempt=?,run_token=? WHERE worker_id=? AND claim_request_id=?", current.attempt(), token, worker, claimId);
@@ -274,6 +365,47 @@ public class JobService {
             return action("ACCEPTED", locked.stage().id());
         });
     }
+    public StageActionResult textProgress(String stageId,TextProgressRequest request){
+        if(request==null)throw bad("INVALID_ARGUMENT","Text progress is required");
+        Map<String,Object> progress=TextExecutionPolicy.progress(request.progress());
+        return transaction.execute(status->{
+            LockedStage locked=lockActiveStage(stageId,request.credential());
+            if(!Set.of("SEGMENT","CAPTION_PROOFREAD","ANCHOR_CLIP").contains(locked.stage().stageType())||isExport(locked.stage()))throw conflict("MODEL_KIND_CONFLICT","Only text stages can publish recovery progress");
+            String serialized=TextExecutionPolicy.serialize(progress);
+            String existing=jdbc.queryForObject("SELECT text_progress_json FROM job_stage WHERE id=?",String.class,locked.stage().id());
+            if(existing!=null&&progress.equals(TextExecutionPolicy.readProgress(existing)))return action("ALREADY_APPLIED",locked.stage().id());
+            jdbc.update("UPDATE job_stage SET text_progress_json=?,updated_at=CURRENT_TIMESTAMP(6) WHERE id=?",serialized,locked.stage().id());
+            touchParent(locked.stage(),null);
+            return action("ACCEPTED",locked.stage().id());
+        });
+    }
+
+    public StageActionResult renderProgress(String stageId,tools.jackson.databind.JsonNode request){
+        final List<String> phases=List.of("PREPARING","ENCODING","VALIDATING","PUBLISHING");
+        final Credential execution;final long sequence,processed,total;final String phase;
+        try{
+            CaptionRenderSpec.fields(request,Set.of("attempt","run_token","sequence","phase","processed_ms","total_ms"));
+            execution=new Credential((int)CaptionRenderSpec.number(request,"attempt",1,Integer.MAX_VALUE),CaptionRenderSpec.text(request,"run_token"));
+            sequence=CaptionRenderSpec.number(request,"sequence",1,CaptionRenderSpec.MAX_SAFE);phase=CaptionRenderSpec.text(request,"phase");
+            processed=CaptionRenderSpec.number(request,"processed_ms",0,CaptionRenderSpec.MAX_SAFE);total=CaptionRenderSpec.number(request,"total_ms",1,CaptionRenderSpec.MAX_SAFE);
+            if(!phases.contains(phase)||processed>total)throw new IllegalArgumentException();
+        }catch(RuntimeException invalid){throw bad("INVALID_RENDER_PROGRESS","Invalid render progress payload");}
+        return transaction.execute(status->{
+            LockedStage locked=lockActiveStage(stageId,execution);
+            if(!isExport(locked.stage())||!"EXPORT_CLIP".equals(locked.stage().stageType()))throw conflict("RENDER_PROGRESS_NOT_SUPPORTED","Only captioned exports may publish render progress");
+            Map<String,Object> owner=exports.lockOwner(locked.stage().ownerId(),locked.jobId());
+            if(!"CAPTIONED".equals(owner.get("render_mode")))throw conflict("RENDER_PROGRESS_NOT_SUPPORTED","Only captioned exports may publish render progress");
+            var spec=exports.captionRenderFrozen(owner).path("caption_render");
+            if(total!=spec.path("input_media").path("duration_ms").longValue())throw bad("INVALID_RENDER_PROGRESS","Render duration does not match the frozen input");
+            String previous=jdbc.queryForObject("SELECT render_progress_json FROM job_stage WHERE id=?",String.class,locked.stage().id());
+            if(previous!=null){var old=JSON.readTree(previous);
+                if(sequence<=old.path("sequence").longValue())return action("ALREADY_APPLIED",locked.stage().id());
+                if(phases.indexOf(phase)<phases.indexOf(old.path("phase").asText())||processed<old.path("processed_ms").longValue())throw bad("INVALID_RENDER_PROGRESS","Render progress cannot move backwards");}
+            Map<String,Object> progress=new TreeMap<>();progress.put("sequence",sequence);progress.put("phase",phase);progress.put("processed_ms",processed);progress.put("total_ms",total);progress.put("updated_at",locked.dbNow().toString());
+            jdbc.update("UPDATE job_stage SET render_progress_json=?,updated_at=CURRENT_TIMESTAMP(6) WHERE id=?",JSON.writeValueAsString(progress),locked.stage().id());
+            touchParent(locked.stage(),null);return action("ACCEPTED",locked.stage().id());
+        });
+    }
 
     public StageActionResult complete(String stageId, CompleteRequest request) {
         if (request == null) { throw bad("INVALID_ARGUMENT", "A completion request is required"); }
@@ -301,6 +433,8 @@ public class JobService {
             var manifest = verifyResult(stage, job, request);
             jdbc.update("UPDATE job_stage SET status='SUCCEEDED',lease_until=NULL,manifest_key=?,manifest_hash=?,error_code=NULL,diagnostic_json=NULL,updated_at=CURRENT_TIMESTAMP(6) WHERE id=?", request.manifestKey(), request.manifestHash(), id);
             if (isExport(stage)) { exports.recordSuccess(stage, manifest); }
+            else if (isClipRequest(stage)) { clips.recordSuccess(stage,job,manifest); }
+            else if (isAgentTurn(stage)) { agents.recordSuccess(stage,job,manifest); }
             else { advance(jobId, stage.stageType()); }
             touchParent(stage, null);
             return action("ACCEPTED", id);
@@ -314,7 +448,9 @@ public class JobService {
         return transaction.execute(status -> {
             LockedStage locked = lockActiveStage(stageId, request.credential());
             Map<String, Object> diagnostic = StageDiagnostics.create(request.diagnostic(), request.errorCode(), locked.stage().attempt());
-            if (request.retryable() && locked.stage().attempt() < maxAttempts) {
+            boolean fixedCaptionInput=isExport(locked.stage())&&CaptionRenderSpec.requiresNewRender(request.errorCode())
+                    &&"CAPTIONED".equals(jdbc.queryForObject("SELECT render_mode FROM export_job WHERE id=?",String.class,locked.stage().ownerId()));
+            if (request.retryable() && !fixedCaptionInput && locked.stage().attempt() < maxAttempts) {
                 retryWait(locked.stage(), request.errorCode(), locked.dbNow(), diagnostic);
                 touchParent(locked.stage(), null);
             } else { terminalFailure(locked.stage(), request.errorCode(), diagnostic); }
@@ -377,9 +513,11 @@ public class JobService {
     }
 
     private void terminalFailure(StageRow stage, String code, Map<String, Object> diagnostic) {
-        List<StageRow> siblings = isExport(stage) ? List.of() : stages(stage.jobId(), true);
+        List<StageRow> siblings = isExport(stage)||isClipRequest(stage)||isAgentTurn(stage) ? List.of() : stages(stage.jobId(), true);
         jdbc.update("UPDATE job_stage SET status='FAILED',run_token=NULL,worker_id=NULL,worker_session_id=NULL,lease_until=NULL,hard_deadline_at=NULL,error_code=?,diagnostic_json=?,last_retryable=FALSE,updated_at=CURRENT_TIMESTAMP(6) WHERE id=?", code, StageDiagnostics.json(diagnostic), stage.id());
         if (isExport(stage)) { exports.refreshLocked(stage.ownerId()); return; }
+        if (isClipRequest(stage)) { clips.refreshLocked(stage.ownerId()); return; }
+        if (isAgentTurn(stage)) { agents.refreshLocked(stage.ownerId()); return; }
         // Fence sibling work when the parent is terminal; manual retry only
         // revives explicit FAILED rows, never a still-live previous token.
         for (StageRow sibling : siblings) {
@@ -409,14 +547,16 @@ public class JobService {
 
     private JobSnapshot existingCreate(String id, String videoId, Map<String, Object> normalized,
                                        Set<String> suppliedFields, String requestHash) {
-        Map<String, Object> row = job(id, true);
+        // Validate immutable receipt input before locking its parent. A key
+        // collision may refer to another video's recovery job.
+        Map<String, Object> row = job(id, false);
         if (!requestHash.equals(row.get("request_hash"))) {
-            // Only omitted fields absent from this locked historical receipt may
+            // Only omitted fields absent from this immutable historical receipt may
             // use their old shape. Never backfill stored config or reinterpret an
             // explicit policy/frame budget, including duplicate-key recovery.
             Map<String, Object> historicalShape = new TreeMap<>(normalized);
             Map<String, Object> frozen = readConfig(row);
-            for (String field : List.of("ocr_sampling", "ocr_max_frames", "analysis_mode")) {
+            for (String field : List.of("ocr_sampling", "ocr_max_frames", "analysis_mode", "text_fallback_models")) {
                 if (!suppliedFields.contains(field) && !frozen.containsKey(field)) { historicalShape.remove(field); }
             }
             String historicalRequestHash = sha256(videoId + "\n" + sha256(JSON.writeValueAsString(historicalShape)));
@@ -424,7 +564,7 @@ public class JobService {
                 throw conflict("IDEMPOTENCY_CONFLICT", "Idempotency key belongs to different job input");
             }
         }
-        return snapshot(row);
+        return snapshot(job(id, true));
     }
 
     private Map<String, Object> job(String id, boolean lock) {
@@ -446,7 +586,11 @@ public class JobService {
     }
 
     private List<StageRow> stages(String jobId, boolean lock) {
-        return jdbc.query("SELECT * FROM job_stage WHERE job_id=? AND owner_type='ANALYSIS' ORDER BY id" + (lock ? " FOR UPDATE" : ""), STAGE, jobId);
+        // A PRIMARY scan chosen for ORDER BY id may wait on another job's row
+        // before MySQL filters job_id. Claim already holds the capacity lock,
+        // while that other job may be waiting for it: always narrow locked
+        // scans by the job-leading index before acquiring sibling stage locks.
+        return jdbc.query("SELECT * FROM job_stage" + (lock ? " FORCE INDEX (uk_stage_identity)" : "") + " WHERE job_id=? AND owner_type='ANALYSIS' ORDER BY id" + (lock ? " FOR UPDATE" : ""), STAGE, jobId);
     }
 
     private JobSnapshot snapshot(Map<String, Object> row) {
@@ -460,7 +604,7 @@ public class JobService {
                         ((Number) row.get("text_calls_reserved")).intValue(),
                         ((Number) row.get("max_asr_submissions")).intValue(),
                         ((Number) row.get("asr_calls_reserved")).intValue()), actions(row, rows),
-                valueInstant(row.get("created_at")), valueInstant(row.get("updated_at")));
+                valueInstant(row.get("created_at")), valueInstant(row.get("updated_at")), (String) row.get("resumed_from_job_id"));
     }
 
     /** Advisory snapshot and mutation endpoints share the exact same policy.
@@ -470,16 +614,16 @@ public class JobService {
     private JobActions actions(Map<String, Object> job, List<StageRow> rows) {
         String status = String.valueOf(job.get("status"));
         boolean canCancel = !Set.of("CANCELLED", "REVIEW_READY").contains(status);
-        List<StageRow> failed = rows.stream().filter(stage -> stage.status().equals("FAILED")).toList();
-        String blocked = !"FAILED".equals(status) || failed.isEmpty() ? "JOB_NOT_RETRYABLE"
-                : failed.stream().anyMatch(stage -> stage.attempt() >= maxAttempts) ? "ATTEMPTS_EXHAUSTED" : null;
-        return new JobActions(canCancel, blocked == null, blocked, maxAttempts);
+        String blocked = AnalysisRecoveryPolicy.retryBlockReason(status, rows, maxAttempts);
+        String resumeBlocked = AnalysisRecoveryPolicy.resumeBlockReason(status, readConfig(job), rows);
+        return new JobActions(canCancel, blocked == null, blocked, maxAttempts, resumeBlocked == null, resumeBlocked);
     }
 
     private static StageSnapshot stageSnapshot(StageRow row, boolean publicView) {
         return new StageSnapshot(row.id(), row.stageType(), row.shardKey(), row.status(), row.attempt(),
                 row.leaseUntil(), row.hardDeadlineAt(), row.nextRunAt(), row.inputHash(),
-                publicView ? null : row.checkpointKey(), publicView ? null : row.manifestKey(), row.manifestHash(), row.errorCode(), row.diagnostic());
+                publicView ? null : row.checkpointKey(), publicView ? null : row.manifestKey(), row.manifestHash(), row.errorCode(), row.diagnostic(),
+                row.textProgress());
     }
 
     private StageActionResult action(String outcome, String stageId) { return new StageActionResult(outcome, stageSnapshot(stage(stageId, true), false)); }
@@ -499,9 +643,16 @@ public class JobService {
         return new ClaimResult(outcome, stage.id(), stage.attempt(), stage.runToken(), stage.leaseUntil(), stage.hardDeadlineAt(),
                 stage.jobId(), stage.stageType(), stage.shardKey(), String.valueOf(video.get("source_key")),
                 isExport(stage) ? exports.manifestIdentity(stage, job).sourceHash() : String.valueOf(video.get("content_hash")),
-                isExport(stage) ? exports.claimConfig(stage) : readConfig(job), artifacts,
+                isExport(stage) ? exports.claimConfig(stage) : isClipRequest(stage) ? clips.claimConfig(stage) : isAgentTurn(stage) ? agents.claimConfig(stage) : analysisClaimConfig(job), artifacts,
                 stage.checkpointKey(), stage.checkpointHash(), stage.inputHash(),
                 String.valueOf(job.get("video_id")), ((Number) job.get("generation")).intValue());
+    }
+
+    private Map<String, Object> analysisClaimConfig(Map<String, Object> job) {
+        Map<String, Object> config = new TreeMap<>(readConfig(job));
+        Object preparation = job.get("preparation_source_json");
+        if (preparation != null) config.put("preparation_reuse", JSON.readValue(String.valueOf(preparation), new TypeReference<Map<String, Object>>() {}));
+        return config;
     }
 
     private static ClaimResult noClaim(String outcome, String stageId) { return new ClaimResult(outcome, stageId, null, null, null, null, null, null, null, null, null, null, List.of(), null, null, null, null, 0); }
@@ -519,22 +670,30 @@ public class JobService {
     private StageParent lockParent(String id) {
         StageRow hint = stage(id, false);
         Map<String, Object> analysis = job(hint.jobId(), true);
-        Map<String, Object> owner = isExport(hint) ? exports.lockOwner(hint.ownerId(), hint.jobId()) : analysis;
+        Map<String, Object> owner = isExport(hint) ? exports.lockOwner(hint.ownerId(), hint.jobId()) : isClipRequest(hint) ? clips.lockOwner(hint.ownerId(),hint.jobId()) : isAgentTurn(hint) ? agents.lockOwner(hint.ownerId(),hint.jobId()) : analysis;
         return new StageParent(analysis, owner, stage(id, true));
     }
     private boolean activeParent(StageParent parent) {
+        if(isClipRequest(parent.stage()))return "REVIEW_READY".equals(parent.analysis().get("status"))&&clips.active(parent.owner());
+        if(isAgentTurn(parent.stage()))return "REVIEW_READY".equals(parent.analysis().get("status"))&&agents.active(parent.owner());
         return isExport(parent.stage()) ? "REVIEW_READY".equals(parent.analysis().get("status")) && exports.active(parent.owner()) : activeJob(parent.analysis());
     }
     private void requireActive(StageParent parent, Credential credential) {
         if (!activeParent(parent) || !parent.stage().status().equals("RUNNING") || !matches(parent.stage(), credential)) { throw stale(); }
     }
     private static boolean isExport(StageRow stage) { return "EXPORT".equals(stage.ownerType()); }
+    private static boolean isClipRequest(StageRow stage) { return "CLIP_REQUEST".equals(stage.ownerType()); }
+    private static boolean isAgentTurn(StageRow stage) { return "AGENT_TURN".equals(stage.ownerType()); }
     private void touchParent(StageRow stage, String analysisStatus) {
         if (isExport(stage)) { exports.refreshLocked(stage.ownerId()); }
+        else if(isClipRequest(stage)) { clips.refreshLocked(stage.ownerId()); }
+        else if(isAgentTurn(stage)) { agents.refreshLocked(stage.ownerId()); }
         else { touch(stage.jobId(), analysisStatus); }
     }
     private ArtifactVerifier.VerifiedManifest verifyResult(StageRow stage, Map<String, Object> job, CompleteRequest request) {
         return isExport(stage) ? exports.verifyResult(stage, job, request.manifestKey(), request.manifestHash())
+                : isClipRequest(stage) ? clips.verifyResult(stage,job,request.manifestKey(),request.manifestHash())
+                : isAgentTurn(stage) ? agents.verifyResult(stage,job,request.manifestKey(),request.manifestHash())
                 : artifactVerifier.verifyManifest(request.manifestKey(), request.manifestHash(), artifactIdentity(stage, job));
     }
     private static void credential(Credential value) { if (value == null || value.attempt() < 1 || value.runToken() == null || !value.runToken().matches("[A-Za-z0-9_-]{16,64}")) { throw stale(); } }
@@ -547,9 +706,10 @@ public class JobService {
         for (String part : suffix.split("/", -1)) { if (part.isEmpty() || part.equals(".") || part.equals("..")) { throw bad("INVALID_MANIFEST_KEY", "Artifact reference contains an invalid path component"); } }
     }
 
-    private static Map<String, Object> config(Map<String, Object> supplied) {
+    private Map<String, Object> config(Map<String, Object> supplied) {
         Map<String, Object> result = new TreeMap<>();
-        result.put("asr_model", "paraformer-v2"); result.put("text_model", "qwen-plus");
+        result.put("asr_model", "paraformer-v2"); result.put("text_model", defaultTextModel);
+        result.put("text_fallback_models",TextExecutionPolicy.configuredFallbacks(defaultFallbackModels));
         result.put("visual_provider", "ocr"); result.put("max_text_calls", 12); result.put("max_asr_submissions", 1);
         result.put("ocr_sampling", "uniform");
         result.put("ocr_max_frames", 120);
@@ -561,6 +721,7 @@ public class JobService {
         for (String field : List.of("asr_model", "text_model")) {
             if (!(result.get(field) instanceof String model) || !model.matches("[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}")) { throw bad("INVALID_ARGUMENT", "Invalid model identifier"); }
         }
+        result.put("text_fallback_models",TextExecutionPolicy.fallbackModels(result.get("text_fallback_models")));
         if (!(result.get("visual_provider") instanceof String provider) || !Set.of("ocr", "none").contains(provider)) { throw bad("INVALID_ARGUMENT", "visual_provider must be ocr or none"); }
         if (!(result.get("analysis_mode") instanceof String mode) || !Set.of("topics", "commerce").contains(mode)) { throw bad("INVALID_ARGUMENT", "analysis_mode must be topics or commerce"); }
         if (!(result.get("ocr_sampling") instanceof String sampling) || !Set.of("prefix", "uniform").contains(sampling)) { throw bad("INVALID_ARGUMENT", "ocr_sampling must be prefix or uniform"); }

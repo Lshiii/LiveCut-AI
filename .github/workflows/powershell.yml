@@ -1,4 +1,4 @@
-name: PowerShell syntax
+name: PowerShell checks
 
 on:
   push:
@@ -36,3 +36,9 @@ jobs:
             if (@($parseErrors).Count -ne 0) { throw "Syntax error in $($scriptFile.Name)." }
           }
           Write-Output "Parsed $($scriptFiles.Count) PowerShell files. Native MySQL execution is covered by the separate opt-in local scratch test."
+      - name: Test Worker launcher with mocked uv in PowerShell 7
+        shell: pwsh
+        run: ./scripts/tests/worker-launch-tests.ps1
+      - name: Test Worker launcher with mocked uv in Windows PowerShell
+        shell: powershell
+        run: ./scripts/tests/worker-launch-tests.ps1

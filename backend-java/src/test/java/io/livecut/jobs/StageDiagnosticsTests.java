@@ -46,6 +46,10 @@ class StageDiagnosticsTests {
     }
 
     @Test void zeroBudgetUnknownOutcomeAndOcrFailuresDoNotSuggestBlindPaidRetry() {
+        assertSuggestion("PREPARATION_REUSE_MISSING_SOURCE", "CHECK_ARTIFACT_INTEGRITY");
+        assertSuggestion("PREPARATION_REUSE_ARTIFACT_MISMATCH", "CHECK_ARTIFACT_INTEGRITY");
+        assertSuggestion("PREPARATION_REUSE_MODEL_MISMATCH", "CHECK_SOURCE_AND_CONFIGURATION");
+        assertSuggestion("PREPARATION_REUSE_STORAGE_ERROR", "CHECK_WORKER_STORAGE");
         assertSuggestion("BUDGET_EXHAUSTED", "NEW_JOB_WITH_BUDGET");
         assertSuggestion("MODEL_BUDGET_EXHAUSTED", "NEW_JOB_WITH_BUDGET");
         assertSuggestion("UNKNOWN_OUTCOME", "RECONCILE_MODEL_CALL");
@@ -53,6 +57,11 @@ class StageDiagnosticsTests {
         assertSuggestion("CALL_STATE_UNCERTAIN", "RECONCILE_MODEL_CALL");
         assertSuggestion("MODEL_RESPONSE_ALREADY_EXISTS", "RECONCILE_MODEL_CALL");
         assertSuggestion("MODEL_DISPATCH_NOT_GRANTED", "RECONCILE_MODEL_CALL");
+        assertSuggestion("TEXT_RETRIES_EXHAUSTED", "CHECK_PROVIDER_AND_CALL_STATE");
+        assertSuggestion("TEXT_RETRY_DEADLINE_EXCEEDED", "CHECK_PROVIDER_AND_CALL_STATE");
+        assertSuggestion("INVALID_TEXT_RETRY_CONFIGURATION", "CHECK_PROVIDER_CONFIGURATION");
+        assertSuggestion("TEXT_RETRY_POLICY_CONFLICT", "CHECK_PROVIDER_CONFIGURATION");
+        assertSuggestion("TEXT_FALLBACK_NOT_ALLOWED", "CHECK_PROVIDER_CONFIGURATION");
         assertSuggestion("OCR_CACHE_BUSY", "WAIT_FOR_CACHE_OWNER");
         assertSuggestion("OCR_CACHE_CAPACITY_EXCEEDED", "CHECK_CACHE_CAPACITY");
         assertSuggestion("OCR_CACHE_UNSAFE_PATH", "CHECK_STORAGE_SAFETY");

@@ -89,6 +89,21 @@ class ModelCallIntegrationTests {
         assertCode("MODEL_CALL_INPUT_CONFLICT", () -> calls.reserve(changed));
         assertEquals(1, reserved(fixture));
     }
+    @Test
+    void onlyFrozenFallbackModelsShareTheOriginalTextBudget(){
+        Fixture fixture=fixture("SEGMENT",1);
+        jdbc.update("UPDATE analysis_job SET config_json=JSON_SET(config_json,'$.text_fallback_models',JSON_ARRAY('deepseek-flash')) WHERE id=?",fixture.jobId());
+        var fallback=new ReserveRequest(fixture.stageId(),1,TOKEN,"fallback-approved",INPUT_HASH,"fallback-operation","deepseek-flash","TEXT");
+        assertEquals("RESERVED",calls.reserve(fallback).outcome());
+        assertEquals("MODEL_BUDGET_EXHAUSTED",reserveOutcome(reserve(fixture,"primary-after-fallback","primary-operation","TEXT")));
+        var other=new ReserveRequest(fixture.stageId(),1,TOKEN,"fallback-unapproved",INPUT_HASH,"other-operation","unapproved-model","TEXT");
+        assertEquals("MODEL_CONFIG_CONFLICT",reserveOutcome(other));assertEquals(1,reserved(fixture));
+        Fixture historical=fixture("SEGMENT",2);
+        assertEquals("MODEL_CONFIG_CONFLICT",reserveOutcome(new ReserveRequest(historical.stageId(),1,TOKEN,"old-no-fallback",INPUT_HASH,"fallback-operation","deepseek-flash","TEXT")));
+        Fixture asr=fixture("ASR",2);
+        jdbc.update("UPDATE analysis_job SET config_json=JSON_SET(config_json,'$.text_fallback_models',JSON_ARRAY('deepseek-flash')) WHERE id=?",asr.jobId());
+        assertEquals("MODEL_CONFIG_CONFLICT",reserveOutcome(new ReserveRequest(asr.stageId(),1,TOKEN,"asr-not-text",INPUT_HASH,"fallback-operation","deepseek-flash","ASR")));
+    }
 
     @Test
     void concurrentLastSlotReservationsCannotOverspend() throws Exception {

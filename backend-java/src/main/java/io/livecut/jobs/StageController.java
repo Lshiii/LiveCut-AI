@@ -47,6 +47,10 @@ public class StageController {
     public StageActionResult checkpoint(@PathVariable String id, @RequestBody CheckpointRequest request) {
         return service.checkpoint(id, request);
     }
+    @PostMapping("/{id}/text-progress")
+    public StageActionResult textProgress(@PathVariable String id,@RequestBody JobModels.TextProgressRequest request){return service.textProgress(id,request);}
+    @PostMapping("/{id}/render-progress")
+    public StageActionResult renderProgress(@PathVariable String id,@RequestBody tools.jackson.databind.JsonNode request){return service.renderProgress(id,request);}
 
     @PostMapping("/{id}/complete")
     public StageActionResult complete(@PathVariable String id, @RequestBody CompleteRequest request) {
