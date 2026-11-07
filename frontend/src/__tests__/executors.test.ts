@@ -18,8 +18,8 @@ test('proofreading capacity is distinct while a complete legacy executor report 
   const current = snapshot()
   assert.ok(parseExecutorSnapshot(current).stages.some(stage => stage.stage_type === 'CAPTION_PROOFREAD'))
   const legacy = snapshot()
-  legacy.stages = legacy.stages.filter(stage => stage.stage_type !== 'CAPTION_PROOFREAD')
-  legacy.workers[0]!.stage_types = legacy.workers[0]!.stage_types.filter(type => type !== 'CAPTION_PROOFREAD')
+  legacy.stages = legacy.stages.filter(stage => !['CAPTION_PROOFREAD', 'ANCHOR_CLIP'].includes(stage.stage_type))
+  legacy.workers[0]!.stage_types = legacy.workers[0]!.stage_types.filter(type => !['CAPTION_PROOFREAD', 'ANCHOR_CLIP'].includes(type))
   assert.equal(parseExecutorSnapshot(legacy).stages.length, 5)
   legacy.workers[0]!.stage_types.push('CAPTION_PROOFREAD')
   assert.throws(() => parseExecutorSnapshot(legacy), ExecutorSnapshotError)
@@ -48,7 +48,7 @@ test('malformed capacity, stage sets and worker identities are rejected rather t
     (x: any) => { x.workers[0].status = 'RUNNING' }, (x: any) => { x.workers[0].last_seen_at = null },
     (x: any) => { x.workers[0].stage_types = ['MEDIA', 'MEDIA'] }, (x: any) => { x.workers[0].stage_types = [] },
     (x: any) => { x.workers[0].target_job_id = 'untrusted' }, (x: any) => { x.workers[0].slots = '1' },
-    (x: any) => { x.stages.pop() }, (x: any) => { x.stages[1] = x.stages[0] },
+    (x: any) => { x.stages.pop(); x.stages.pop() }, (x: any) => { x.stages[1] = x.stages[0] },
     (x: any) => { x.stages[0].reason = 'FAILED' }, (x: any) => { x.resources.pop() },
     (x: any) => { x.resources[0].limit = 0 }, (x: any) => { x.resources[0].in_use = Infinity },
     (x: any) => { x.resources[1] = x.resources[0] },

@@ -4,6 +4,8 @@ import { api, ApiError, post, type ExportJob } from './api'
 import FailureDiagnostic from './FailureDiagnostic.vue'
 import TextRequestProgress from './TextRequestProgress.vue'
 import { canPrefillClipInstruction } from './videoAgent'
+import { AnswerClipError, answerClipBinding, sameAnswerClipBinding, supportsAnswerClipProtocol, verifyAnswerClipBinding, type AnswerClipBinding, type AnswerClipSelection } from './answerClip'
+import { IntentCreateError, intentCreatePayload, intentCreateReceipt, intentCreateRejectedBeforeInsert, intentCreateResponseMatches, parseIntentCreatePayload, parseIntentCreateReceipt, prepareIntentCreateReceipt, type IntentCreateReceipt } from './intentCreate'
 import CaptionPanel from './CaptionPanel.vue'
 import TranscriptRangePicker from './TranscriptRangePicker.vue'
 import DraftBackupPanel from './DraftBackupPanel.vue'
@@ -19,8 +21,9 @@ import { intentCanCancel, intentCanConfirm, intentCanExport, intentCanResume, in
   IntentReadScope, IntentResponseError, newestIntentSnapshot, parseIntentSnapshot, refreshIntentEvidence,
   parseResumedIntentSnapshot, type IntentOutput, type IntentResumeReceipt, type IntentSnapshot, type IntentUtterance } from './intentClips'
 
-const props = defineProps<{ jobId: string; videoUrl: string; active?: boolean }>()
+const props = defineProps<{ jobId: string; videoUrl: string; videoId?: string; videoHash?: string; active?: boolean }>()
 const instruction = ref(''), maxCalls = ref<number | string>(6), requests = ref<IntentSnapshot[]>([])
+const answerSelection = ref<AnswerClipSelection | null>(null)
 const selectedId = ref(''), snapshot = ref<IntentSnapshot | null>(null), outputs = ref<IntentOutput[]>([])
 const baseline = ref(''), draftRevision = ref<number | null>(null), action = ref('')
 const draftBasePlanHash = ref<string | null>(null)
@@ -67,27 +70,30 @@ const sequence = new SequencePreview((state, reason) => {
 })
 const scope = new IntentReadScope()
 let stopped = false, refreshing = false, timer: number | undefined, selectionVersion = 0, focusVersion = 0
-let pendingCreate: { input: string; key: string } | null = null
+const pendingCreate = ref<IntentCreateReceipt | null>(null)
+const inputAnswerBinding = computed(() => answerSelection.value?.binding ?? pendingCreate.value?.source_answer ?? null)
+const pendingCreatePayload = computed(() => pendingCreate.value ? parseIntentCreatePayload(JSON.parse(pendingCreate.value.input)) : null)
 const pendingResumes = new Map<string, IntentResumeReceipt>()
 const pending = computed(() => !!action.value)
 const planDirty = computed(() => !!snapshot.value?.plan && JSON.stringify(intentPayload(outputs.value)) !== baseline.value)
 const planRevisionConflict = computed(() => draftRevision.value !== null && !!snapshot.value?.plan && snapshot.value.revision > draftRevision.value
   && JSON.stringify(intentPayload(outputs.value)) !== JSON.stringify(intentPayload(snapshot.value.plan.outputs)))
-const dirty = computed(() => planDirty.value || planRevisionConflict.value || saveNeedsCheck.value || !!instruction.value.trim() || !!rangePickerEditor.value?.dirty)
+const dirty = computed(() => planDirty.value || planRevisionConflict.value || saveNeedsCheck.value || !!instruction.value.trim() || !!inputAnswerBinding.value || !!pendingCreate.value || !!rangePickerEditor.value?.dirty)
 const backupValue = computed(() => {
   const planChanged = planDirty.value || saveNeedsCheck.value || planRevisionConflict.value || action.value === 'save'
-  if (!instruction.value.length && maxCalls.value === 6 && !planChanged) return null
-  return captureIntentDraft(props.jobId, instruction.value, maxCalls.value, planChanged && snapshot.value?.plan ? {
+  if (!instruction.value.length && maxCalls.value === 6 && !planChanged && !inputAnswerBinding.value && !pendingCreate.value) return null
+  const receiptPayload = pendingCreate.value ? parseIntentCreatePayload(JSON.parse(pendingCreate.value.input)) : null
+  return captureIntentDraft(props.jobId, receiptPayload?.instruction ?? instruction.value, receiptPayload?.max_text_calls ?? maxCalls.value, planChanged && snapshot.value?.plan ? {
     snapshot: snapshot.value, outputs: outputs.value, baseRevision: draftRevision.value,
     basePlanHash: draftBasePlanHash.value, needsCheck: saveNeedsCheck.value || planRevisionConflict.value || action.value === 'save',
-  } : null)
+  } : null, inputAnswerBinding.value, pendingCreate.value)
 })
 const backupBlocked = computed(() => loading.value || props.active === false || historyOpen.value || pending.value || dirty.value
   || maxCalls.value !== 6 || !!rangePickerTarget.value || !!captionTarget.value || !!captionEditor.value?.dirty || !!captionEditor.value?.pending)
 const validation = computed(() => snapshot.value?.plan
-  ? intentOutputValidation(outputs.value, snapshot.value.utterances, snapshot.value.source.duration_ms, snapshot.value.plan.goals) : '')
-const canConfirm = computed(() => !saveNeedsCheck.value && !planRevisionConflict.value && !rangePickerTarget.value && !instruction.value.trim() && intentCanConfirm(snapshot.value, outputs.value, planDirty.value, pending.value))
-const canExport = computed(() => !saveNeedsCheck.value && !planRevisionConflict.value && !rangePickerTarget.value && !instruction.value.trim() && intentCanExport(snapshot.value, planDirty.value, pending.value))
+  ? intentOutputValidation(outputs.value, snapshot.value.utterances, snapshot.value.source.duration_ms, snapshot.value.plan.goals, snapshot.value.source_answer) : '')
+const canConfirm = computed(() => !saveNeedsCheck.value && !planRevisionConflict.value && !rangePickerTarget.value && !instruction.value.trim() && !inputAnswerBinding.value && !pendingCreate.value && intentCanConfirm(snapshot.value, outputs.value, planDirty.value, pending.value))
+const canExport = computed(() => !saveNeedsCheck.value && !planRevisionConflict.value && !rangePickerTarget.value && !instruction.value.trim() && !inputAnswerBinding.value && !pendingCreate.value && intentCanExport(snapshot.value, planDirty.value, pending.value))
 const canCancel = computed(() => intentCanCancel(snapshot.value, planDirty.value, pending.value))
 const canResume = computed(() => intentCanResume(snapshot.value, dirty.value, pending.value))
 const selectedCount = computed(() => outputs.value.filter(value => value.enabled).length)
@@ -118,19 +124,42 @@ const rangePickerApplyHandler = computed(() => {
 const names: Record<string, string> = { QUEUED: '等待执行', RUNNING: '正在查找', PLAN_READY: '候选已生成', FAILED: '执行失败', CANCELLED: '已取消',
   FOUND: '已找到证据', NOT_FOUND: '未找到', NEEDS_REVIEW: '需进一步核对', READY: '等待领取', BLOCKED: '等待前序',
   RETRY_WAIT: '等待重试', SUCCEEDED: '已完成', PARTIAL_FAILED: '部分失败', SKIPPED: '已跳过' }
-defineExpose({ dirty: computed(() => dirty.value || !!captionEditor.value?.dirty), pending: computed(() => pending.value || !!captionEditor.value?.pending), prefillInstruction })
+defineExpose({ dirty: computed(() => dirty.value || !!captionEditor.value?.dirty), pending: computed(() => pending.value || !!captionEditor.value?.pending), prefillInstruction, prefillAnswerClip })
 function prefillInstruction(value: string): boolean {
   if (!canPrefillClipInstruction(value, dirty.value || !!captionEditor.value?.dirty, pending.value || !!captionEditor.value?.pending)) return false
   closeRangePicker(false)
-  instruction.value = value.trim(); error.value = ''; notice.value = '已填入视频助手的建议。请核对要求，再点击查找片段。'
+  instruction.value = value.trim(); answerSelection.value = null; error.value = ''; notice.value = '已填入视频助手的建议。请核对要求，再点击查找片段。'
   closeHistory(false); setView('compose')
   const version = ++focusVersion
   void nextTick(() => { if (!stopped && props.active !== false && intentView.value === 'compose' && version === focusVersion) instructionInput.value?.focus() })
   return true
 }
+function bindingMatchesCurrent(binding: AnswerClipBinding) {
+  return binding.job_id === props.jobId && !!props.videoId && binding.video_id === props.videoId && !!props.videoHash && binding.source_hash === props.videoHash
+}
+function prefillAnswerClip(value: AnswerClipSelection): boolean {
+  if (!bindingMatchesCurrent(value.binding) || !canPrefillClipInstruction(value.instruction, dirty.value || !!captionEditor.value?.dirty, pending.value || !!captionEditor.value?.pending)) return false
+  if (!prefillInstruction(value.instruction)) return false
+  answerSelection.value = { instruction: value.instruction, question: value.question, binding: answerClipBinding(value.binding), citations: value.citations.map(citation => ({ ...citation })) }
+  notice.value = '已保留所选原句与回答来源；它们共同组成一个目标。请核对后手动查找，尚未提交。'
+  return true
+}
+function removeAnswerAnchor() { if (!pending.value && !pendingCreate.value) { answerSelection.value = null; notice.value = '已明确移除原句锚定，文字要求保留；下次查找按普通要求执行。' } }
+function discardInput() { if (!pending.value && !pendingCreate.value) { instruction.value = ''; maxCalls.value = 6; answerSelection.value = null } }
+function readCreateReceipt(protectInput = false): boolean {
+  try {
+    const saved = parseIntentCreateReceipt(JSON.parse(localStorage.getItem(`livecut-intent-create-${props.jobId}`) ?? 'null'))
+    if (saved && protectInput) {
+      try { intentCreateReceipt(saved, intentCreatePayload(instruction.value, Number(maxCalls.value), inputAnswerBinding.value), () => { throw new Error('No replacement key') }, inputAnswerBinding.value) }
+      catch { return false } // Preserve this page's different draft and the other page's UNKNOWN receipt.
+    }
+    if (saved) pendingCreate.value = saved
+  } catch { /* Invalid stored input is never replayed. */ }
+  return true
+}
 
 function message(value: unknown) {
-  const code = value instanceof ApiError ? value.code : value instanceof IntentResponseError || value instanceof SnapshotError ? 'INVALID_CLIP_RESPONSE' : 'CLIENT_ERROR'
+  const code = value instanceof ApiError || value instanceof IntentCreateError ? value.code : value instanceof AnswerClipError ? 'INVALID_ANSWER_SOURCE' : value instanceof IntentResponseError || value instanceof SnapshotError ? 'INVALID_CLIP_RESPONSE' : 'CLIENT_ERROR'
   const messages: Record<string, string> = {
     NETWORK_UNAVAILABLE: '无法连接服务，本页输入和方案修改仍然保留。',
     REQUEST_TIMEOUT: '请求超时。创建或继续查找可再次点击，系统会复用同一个请求标识；其余操作请先重新读取核对服务端状态。',
@@ -147,10 +176,23 @@ function message(value: unknown) {
     CLIP_RESUME_SOURCE_CHANGED: '原视频或转写来源已变化，无法复用本次请求。请重新核对来源。',
     IDEMPOTENCY_CONFLICT: '这次操作的请求标识与内容不一致，已保留本页内容，请重新读取核对。',
     INVALID_CLIP_REQUEST: '剪辑要求或文本请求上限无效，请检查后再操作。',
+    CLIP_SUBMISSION_UNKNOWN: '原提交结果尚未核对。请使用原请求核对，不能更换锚定、要求或请求标识。',
+    CLIP_SUBMISSION_OTHER_PAGE: '准备期间另一个页面留下了不同的待核对请求。已停止本次提交，本页要求和所选原句仍保留；请先在原页面核对，未覆盖其请求标识。',
+    CLIP_RECEIPT_STORAGE_UNAVAILABLE: '暂时无法核对本机请求标识，本次没有提交。请恢复浏览器存储访问后重试，本页要求与所选原句仍保留。',
+    INVALID_ANSWER_SOURCE: '所选原句或回答标识无效，请重新选择原回答中的视频引用。',
+    ANSWER_SOURCE_UNAVAILABLE: '原回答或视频来源当前不匹配，未建立新的剪辑请求。请核对原回答。',
+    ANSWER_SOURCE_INVALID: '原回答的冻结来源或引用校验未通过，已有字幕和方案保持不变。',
+    ANCHOR_CLIP_UNAVAILABLE: '当前服务尚未确认支持原句锚定剪辑，请检查后端版本或 API 代理后重试。锚定与原请求标识保留，未提交为普通文字请求。',
   }
   return messages[code] ?? `剪辑操作未完成：${code}`
 }
 function fail(value: unknown) { error.value = message(value) }
+function editorActive() { return props.active !== false }
+async function requireAnchorProtocol(jobId: string) {
+  const raw = await api<unknown>(`/api/executors?job_id=${jobId}`)
+  try { if (!supportsAnswerClipProtocol(raw)) throw new Error('missing-anchor-queue') }
+  catch { throw new ApiError('ANCHOR_CLIP_UNAVAILABLE') }
+}
 function upsert(value: IntentSnapshot) {
   const index = requests.value.findIndex(row => row.id === value.id)
   const latest = newestIntentSnapshot(index < 0 ? undefined : requests.value[index], value)
@@ -240,37 +282,57 @@ async function poll() {
   if (!stopped) timer = window.setTimeout(() => { void poll() }, 5000)
 }
 function validOperation(requestId: string, version: number) { return !stopped && selectedId.value === requestId && version === selectionVersion }
-async function create() {
-  const query = instruction.value.trim()
-  if (pending.value || rangePickerTarget.value || !query) return
-  if (saveNeedsCheck.value || planRevisionConflict.value) { error.value = '请先核对当前方案的保存结果，再创建其他请求。'; return }
-  if ([...query].length > 2000) { error.value = '剪辑要求最多 2000 字。'; return }
-  if (typeof maxCalls.value !== 'number' || !Number.isInteger(maxCalls.value) || maxCalls.value < 1 || maxCalls.value > 24) { error.value = '模型请求上限须为 1～24 的整数。'; return }
-  if (planDirty.value) { error.value = '请先保存或放弃当前方案修改，再创建其他请求。'; return }
-  const jobId = props.jobId, payload = { instruction: query, max_text_calls: maxCalls.value }
-  const storageKey = `livecut-intent-create-${jobId}`, input = JSON.stringify(payload)
-  let saved: { input: string; key: string } | null = pendingCreate
-  if (!saved) { try { saved = JSON.parse(localStorage.getItem(storageKey) ?? 'null') } catch { /* A corrupt old receipt is never reused. */ } }
-  const key = saved?.input === input && typeof saved.key === 'string' ? saved.key : crypto.randomUUID()
-  pendingCreate = { input, key }
-  try { localStorage.setItem(storageKey, JSON.stringify(pendingCreate)) } catch { /* Keep the mounted-view receipt when storage is unavailable. */ }
-  action.value = 'create'; error.value = ''; notice.value = ''; scope.invalidate()
-  const version = ++selectionVersion, navigation = navigationVersion
+async function create(reconcile = false) {
+  if (pending.value || rangePickerTarget.value || props.active === false) return
+  if (saveNeedsCheck.value || planRevisionConflict.value || planDirty.value) { error.value = '请先核对、保存或放弃当前方案修改，再创建其他请求。'; return }
+  if (!pendingCreate.value && !readCreateReceipt(true)) { error.value = '另一个页面有不同的未核对提交。本页新要求保留，请先在原页面核对，不能替换原请求标识。'; return }
+  if (pendingCreate.value && !reconcile) { error.value = '原提交结果尚未核对，请使用“核对原提交”，原要求和锚定不会自动替换。'; return }
+  if (reconcile && !pendingCreate.value) return
+  const jobId = props.jobId, original = pendingCreate.value
+  let payload, binding: AnswerClipBinding | null
   try {
-    const raw = await post<unknown>(`/api/jobs/${jobId}/clip-requests`, payload, { 'Idempotency-Key': key })
+    payload = reconcile && original ? parseIntentCreatePayload(JSON.parse(original.input)) : intentCreatePayload(instruction.value, Number(maxCalls.value), inputAnswerBinding.value)
+    if (!payload) throw new IntentCreateError('INVALID_CLIP_REQUEST')
+    binding = reconcile ? original?.source_answer ?? null : inputAnswerBinding.value
+    if (!reconcile && (typeof maxCalls.value !== 'number' || binding && !bindingMatchesCurrent(binding))) throw new IntentCreateError('INVALID_CLIP_REQUEST')
+  } catch (value) { fail(value); return }
+  action.value = 'create'; error.value = ''; notice.value = ''; scope.invalidate()
+  const version = ++selectionVersion, navigation = navigationVersion, storageKey = `livecut-intent-create-${jobId}`
+  let receipt: IntentCreateReceipt | null = null
+  try {
+    if (binding) { await requireAnchorProtocol(jobId); if (stopped || version !== selectionVersion || jobId !== props.jobId || !editorActive()) return }
+    // New anchored requests recheck the VIDEO answer. An existing UNKNOWN receipt
+    // instead replays its exact key/body and verifies the returned frozen source.
+    if (binding && !reconcile) {
+      const rawTurn = await api<unknown>(`/api/agent-turns/${binding.turn_id}`)
+      const verified = await verifyAnswerClipBinding(binding, rawTurn)
+      if (stopped || version !== selectionVersion || jobId !== props.jobId || !editorActive()) return
+      answerSelection.value = { ...verified, instruction: payload.instruction }
+    }
+    // No await between this final storage read, key allocation, and our write.
+    // Async capability/answer reads must never authorize overwriting a later tab's receipt.
+    receipt = prepareIntentCreateReceipt(() => localStorage.getItem(storageKey), original, payload, () => crypto.randomUUID(), binding)
+    pendingCreate.value = receipt
+    try { localStorage.setItem(storageKey, JSON.stringify(receipt)) } catch { /* Retain the same mounted receipt if storage fails. */ }
+    const raw = await api<unknown>(`/api/jobs/${jobId}/clip-requests`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'Idempotency-Key': receipt.key }, body: receipt.input })
     if (stopped || version !== selectionVersion || jobId !== props.jobId) return
     const value = parseIntentSnapshot(raw, jobId)
+    if (!intentCreateResponseMatches(value, payload, binding)) throw new IntentResponseError()
     selectedId.value = value.id; snapshot.value = null; outputs.value = []; batches.value = []; previewUrl.value = ''
-    instruction.value = ''; accept(value, true); defaultViewRequest = ''
+    instruction.value = ''; answerSelection.value = null; accept(value, true); defaultViewRequest = ''
     if (navigation === navigationVersion && intentView.value === 'compose') setView('review', false)
-    pendingCreate = null
-    try {
-      const current = JSON.parse(localStorage.getItem(storageKey) ?? 'null')
-      if (current?.key === key) localStorage.removeItem(storageKey)
-    } catch { /* The accepted request remains visible even if local storage is unavailable. */ }
-    notice.value = '请求已保存，执行服务会查找符合要求的片段。原话题草稿保持独立。'
-  } catch (value) { if (!stopped && version === selectionVersion) fail(value) }
-  finally { if (!stopped && version === selectionVersion) action.value = '' }
+    pendingCreate.value = null
+    try { const current = parseIntentCreateReceipt(JSON.parse(localStorage.getItem(storageKey) ?? 'null')); if (current?.key === receipt.key && current.input === receipt.input) localStorage.removeItem(storageKey) } catch { /* Accepted state remains visible. */ }
+    notice.value = binding ? '锚定剪辑请求已核对保存，所选原句与回答来源已冻结。请等待候选并人工核对。' : '请求已保存，执行服务会查找符合要求的片段。原话题草稿保持独立。'
+  } catch (value) {
+    if (!stopped && version === selectionVersion) {
+      fail(value)
+      if (receipt && value instanceof ApiError && intentCreateRejectedBeforeInsert(value.code)) {
+        if (pendingCreate.value?.key === receipt.key && pendingCreate.value.input === receipt.input) pendingCreate.value = null
+        try { const current = parseIntentCreateReceipt(JSON.parse(localStorage.getItem(storageKey) ?? 'null')); if (current?.key === receipt.key && current.input === receipt.input) localStorage.removeItem(storageKey) } catch { /* Do not remove another page's receipt. */ }
+      }
+    }
+  } finally { if (!stopped && version === selectionVersion) action.value = '' }
 }
 async function cancelRequest() {
   if (!canCancel.value || !snapshot.value) return
@@ -300,6 +362,7 @@ async function resumeRequest() {
   action.value = 'resume'; error.value = ''; notice.value = ''; scope.invalidate()
   const version = ++selectionVersion, navigation = navigationVersion
   try {
+    if (source.source_answer) { await requireAnchorProtocol(jobId); if (!validOperation(id, version) || props.jobId !== jobId || props.active === false) return }
     const raw = await post<unknown>(`/api/clip-requests/${id}/resume`, { max_text_calls: budget }, { 'Idempotency-Key': receipt.key })
     if (!validOperation(id, version) || props.jobId !== jobId) return
     const value = parseResumedIntentSnapshot(raw, source, budget)
@@ -404,6 +467,7 @@ function assessBackup(raw: unknown) {
 function editorDraftSignature() {
   return JSON.stringify({ selected: selectedId.value, instruction: instruction.value, max_calls: maxCalls.value,
     revision: draftRevision.value, base_hash: draftBasePlanHash.value, outputs: intentPayload(outputs.value),
+    source_answer: inputAnswerBinding.value, create_receipt: pendingCreate.value,
     needs_check: saveNeedsCheck.value, conflict: planRevisionConflict.value })
 }
 async function restoreBackup(raw: unknown) {
@@ -419,6 +483,15 @@ async function restoreBackup(raw: unknown) {
     && !captionEditor.value?.dirty && !captionEditor.value?.pending && action.value === 'restore-draft'
   try {
     let server: IntentSnapshot | null = null
+    const verifiedAnswers: AnswerClipSelection[] = []
+    for (const binding of [requested.source_answer, requested.plan?.source_answer]) {
+      if (!binding || verifiedAnswers.some(value => sameAnswerClipBinding(value.binding, binding))) continue
+      if (!bindingMatchesCurrent(binding)) { error.value = '锚定回答与当前视频来源不一致，只能下载备份保留。'; return }
+      const rawTurn = await api<unknown>(`/api/agent-turns/${binding.turn_id}`)
+      const verified = await verifyAnswerClipBinding(binding, rawTurn)
+      if (!current()) return
+      verifiedAnswers.push(verified)
+    }
     if (requested.plan) {
       const id = requested.plan.request_id
       const response = await api<unknown>(`/api/clip-requests/${id}`)
@@ -428,9 +501,13 @@ async function restoreBackup(raw: unknown) {
       server = newestIntentSnapshot(requests.value.find(value => value.id === id), fresh)
       draftReadResults.value = { ...draftReadResults.value, [id]: server }
     }
-    const result = restoreIntentDraft(requested, jobId, server)
+    const result = restoreIntentDraft(requested, jobId, server, verifiedAnswers)
     if (!current()) return
     if (!result.ok) { error.value = result.reason; return }
+    if (result.draft.create_receipt) {
+      const stored = parseIntentCreateReceipt(JSON.parse(localStorage.getItem(`livecut-intent-create-${jobId}`) ?? 'null'))
+      if (stored && (stored.key !== result.draft.create_receipt.key || stored.input !== result.draft.create_receipt.input)) { error.value = '另一个页面有不同的未核对请求，不能覆盖其标识。请先核对原提交。'; return }
+    }
     pauseMedia(); closeHistory(false)
     if (result.draft.plan && server && result.outputs) {
       scope.invalidate(); selectionVersion++; selectedId.value = server.id
@@ -443,6 +520,9 @@ async function restoreBackup(raw: unknown) {
       defaultViewRequest = ''; setView('review')
     } else setView('compose')
     instruction.value = result.draft.instruction; maxCalls.value = result.draft.max_calls
+    answerSelection.value = result.draft.source_answer ? verifiedAnswers.find(value => sameAnswerClipBinding(value.binding, result.draft.source_answer)) ?? null : null
+    pendingCreate.value = result.draft.create_receipt ?? null
+    if (pendingCreate.value) { try { localStorage.setItem(`livecut-intent-create-${jobId}`, JSON.stringify(pendingCreate.value)) } catch { /* In-memory UNKNOWN receipt still blocks replacement. */ } }
     notice.value = result.draft.plan?.needs_check
       ? '已恢复本机草稿，上次保存结果仍需核对。请先核对保存结果，再决定保存、确认或生成成片。'
       : '已恢复本机草稿，尚未提交。请核对要求与方案，再手动查找、保存和确认；不会自动生成成片。'
@@ -673,7 +753,7 @@ watch(() => props.videoUrl, () => { pauseMedia() }, { flush: 'sync' })
 watch(pending, value => { if (value) stopSequencePreview() }, { flush: 'sync' })
 watch(() => props.active, value => { if (value === false) { focusVersion++; closeHistory(false); pauseMedia() } }, { flush: 'sync' })
 onMounted(() => {
-  window.addEventListener('beforeunload', unload); document.addEventListener('visibilitychange', updatePreviewVisibility); updatePreviewVisibility(); void poll()
+  readCreateReceipt(); window.addEventListener('beforeunload', unload); document.addEventListener('visibilitychange', updatePreviewVisibility); updatePreviewVisibility(); void poll()
   contextObserver = new ResizeObserver(entries => {
     const width = entries[0]?.contentRect.width
     if (stopped || !width) return
@@ -700,15 +780,17 @@ onBeforeUnmount(() => { stopped = true; selectionVersion++; focusVersion++; clos
       <div class="intent-views">
         <div v-show="intentView === 'compose'" :id="`intent-page-${jobId}-compose`" class="intent-compose-view" role="tabpanel" :aria-labelledby="`intent-view-${jobId}-compose`">
           <div class="intent-compose-title"><h3>想从视频里剪出什么？</h3><p class="help">每个目标生成一个视频。先找候选，再由你核对、确认。</p></div>
-          <div class="intent-compose"><label for="intent-instruction">剪辑要求<textarea id="intent-instruction" ref="instructionInput" v-model="instruction" :disabled="pending" maxlength="2000" rows="4" placeholder="例如：把缓存失效原因和解决方法分别剪出来，保留完整解释，跳过关注引导。"></textarea></label><div class="intent-create-row"><label>模型请求上限<input v-model.number="maxCalls" type="number" min="1" max="24" :disabled="pending" aria-label="剪辑模型请求上限"></label><span>复用现有转写，不重新提交 ASR。</span><button class="primary" :disabled="pending || !instruction.trim() || planDirty || saveNeedsCheck || planRevisionConflict" @click="create">{{ action === 'create' ? '正在创建…' : '查找片段' }}</button></div></div>
+          <div v-if="pendingCreate" class="intent-anchor-receipt" role="status"><strong>原提交结果待核对</strong><p>原要求：{{ pendingCreatePayload?.instruction }}</p><p>原预算上限 {{ pendingCreatePayload?.max_text_calls }} 次；{{ pendingCreate.source_answer ? `锚定回答 #${pendingCreate.source_answer.turn_id.slice(0, 8)} · ${pendingCreate.source_answer.utterance_ids.length} 条原句` : '普通文字要求' }}。不会自动换键或退回普通请求。</p><button class="secondary" :disabled="pending || active === false || planDirty || saveNeedsCheck || planRevisionConflict" @click="create(true)">核对原提交</button></div>
+          <details v-if="inputAnswerBinding" class="intent-answer-anchor" :open="inputAnswerBinding.utterance_ids.length <= 3"><summary>围绕所选原句剪辑 · 1 个目标 · {{ inputAnswerBinding.utterance_ids.length }} 句</summary><p>来自视频回答 #{{ inputAnswerBinding.turn_id.slice(0, 8) }}<template v-if="answerSelection"> · {{ answerSelection.question }}</template></p><p>这些原句位于视频中的具体位置，将共同组成一个片段。可补充前后解释，所选句会完整保留。初始候选仅核对这些原句及相邻上下文，不代表全文检索。</p><blockquote v-for="citation in answerSelection?.citations ?? []" :key="citation.utterance_id"><strong>原视频 {{ topicTime(citation.start_ms) }} → {{ topicTime(citation.end_ms) }}</strong><p>{{ citation.text }}</p></blockquote><p v-if="!answerSelection">原句标识：{{ inputAnswerBinding.utterance_ids.join('、') }}。核对原提交后显示冻结引用。</p><button class="text-button" :disabled="pending || !!pendingCreate" @click="removeAnswerAnchor">取消绑定，保留文字要求</button></details>
+          <div class="intent-compose"><label for="intent-instruction">剪辑要求<textarea id="intent-instruction" ref="instructionInput" v-model="instruction" :disabled="pending || !!pendingCreate" maxlength="2000" rows="4" placeholder="例如：把缓存失效原因和解决方法分别剪出来，保留完整解释，跳过关注引导。"></textarea></label><div class="intent-create-row"><label>模型请求上限<input v-model.number="maxCalls" type="number" min="1" max="24" :disabled="pending || !!pendingCreate" aria-label="剪辑模型请求上限"></label><span>复用现有转写，不重新提交 ASR。</span><button class="primary" :disabled="pending || !!pendingCreate || !instruction.trim() || planDirty || saveNeedsCheck || planRevisionConflict" @click="create()">{{ action === 'create' ? '正在创建…' : '查找片段' }}</button></div></div>
           <p v-if="saveNeedsCheck || planRevisionConflict" class="intent-draft-hint">当前方案的保存结果需要核对，新要求仍保留。<button class="text-button" @click="setView('review')">回到核对方案 →</button></p>
           <p v-else-if="planDirty" class="intent-draft-hint">当前方案有未保存修改。新要求会保留，先回到核对方案保存或放弃修改，再查找。<button class="text-button" @click="setView('review')">回到核对方案 →</button></p>
-          <div v-if="instruction.length || maxCalls !== 6" class="intent-compose-actions"><button class="text-button" :disabled="pending" @click="instruction = ''; maxCalls = 6">放弃新要求与请求上限修改</button></div>
+          <div v-if="instruction.length || maxCalls !== 6 || inputAnswerBinding" class="intent-compose-actions"><button class="text-button" :disabled="pending || !!pendingCreate" @click="discardInput">放弃新要求与请求上限修改</button></div>
           <details class="intent-guide"><summary>查找与自动恢复说明</summary><p>系统复用本视频的转写，返回原句证据与候选范围。短暂错误会在次数和预算上限内自动恢复，已完成的语音转写会保留；每个确认目标生成一个视频。新请求不会覆盖原来的话题草稿或既有成片。</p></details>
         </div>
         <div v-show="intentView === 'review'" :id="`intent-page-${jobId}-review`" class="intent-review-view" role="tabpanel" :aria-labelledby="`intent-view-${jobId}-review`">
           <div v-if="snapshot" class="intent-review-layout">
-            <aside class="intent-context" aria-label="剪辑原视频与执行信息">
+            <aside class="intent-context" aria-label="剪辑原视频与执行信息"><details v-if="snapshot.source_answer" class="intent-answer-anchor" :open="snapshot.source_answer.citations.length <= 3"><summary>已绑定所选原句 · 1 个目标 · {{ snapshot.source_answer.citations.length }} 句</summary><p>回答 #{{ snapshot.source_answer.turn_id.slice(0, 8) }} · {{ snapshot.source_answer.question }}</p><p>初始候选来自所选句及相邻上下文；人工可在完整转写中扩展范围，仍须完整保留所有所选句。</p><blockquote v-for="citation in snapshot.source_answer.citations" :key="citation.utterance_id"><strong>原视频 {{ topicTime(citation.start_ms) }} → {{ topicTime(citation.end_ms) }}</strong><p>{{ citation.text }}</p></blockquote></details>
               <h3 class="intent-reference-title">原视频回看</h3>
               <details class="intent-source-details" :open="sourceContextOpen" @toggle="sourceContextOpen = ($event.target as HTMLDetailsElement).open"><summary>回看原视频 <span>{{ sourceContextOpen ? '收起' : '展开' }}</span></summary>
               <video ref="sourcePlayer" :src="videoUrl" controls preload="metadata" playsinline class="intent-source" @play="guardPlayback" @loadedmetadata="sourceMetadata" @timeupdate="sourceSequenceTime" @playing="sourceSequenceTime" @seeking="sourceSequenceSeeking" @seeked="sequence.seeked($event.currentTarget as HTMLVideoElement)" @pause="sequence.pause($event.currentTarget as HTMLVideoElement)" @ended="sequence.ended($event.currentTarget as HTMLVideoElement)" @ratechange="sequence.rateChange($event.currentTarget as HTMLVideoElement)" @error="sourceSequenceError"></video>
@@ -726,7 +808,7 @@ onBeforeUnmount(() => { stopped = true; selectionVersion++; focusVersion++; clos
         <div v-if="['FAILED', 'CANCELLED'].includes(snapshot.status)" class="intent-recovery-actions">
           <p class="help">继续查找会复用已完成转写，新建一次文本分析，使用下方设置的调用次数上限；旧请求与调用记录保留。</p>
           <p v-if="instruction.trim()" class="help">剪辑要求页有尚未提交的新要求，请先提交或放弃输入，再继续当前请求。</p>
-          <label class="intent-resume-budget">新请求模型上限<input v-model.number="maxCalls" type="number" min="1" max="24" :disabled="pending" aria-label="继续查找模型请求上限"></label><button class="primary" :disabled="!canResume" @click="resumeRequest">{{ action === 'resume' ? '正在继续…' : '继续查找' }}</button>
+          <label class="intent-resume-budget">新请求模型上限<input v-model.number="maxCalls" type="number" min="1" max="24" :disabled="pending || !!pendingCreate" aria-label="继续查找模型请求上限"></label><button class="primary" :disabled="!canResume" @click="resumeRequest">{{ action === 'resume' ? '正在继续…' : '继续查找' }}</button>
         </div>
         <TextRequestProgress :progress="snapshot.stage.text_progress" :terminal="['PLAN_READY', 'FAILED', 'CANCELLED'].includes(snapshot.status)" />
         <FailureDiagnostic v-if="snapshot.status !== 'CANCELLED'" :error-code="snapshot.stage.error_code" :attempt="snapshot.stage.attempt" />

@@ -1,4 +1,5 @@
 import { intentPayload, parseIntentSnapshot, type IntentOutput, type IntentPlan, type IntentSnapshot } from './intentClips.ts'
+import { sameAnswerClipSource } from './answerClip.ts'
 
 function planIdentity(plan: IntentPlan) {
   return JSON.stringify({ schema_version: plan.schema_version, request_id: plan.request_id, job_id: plan.job_id,
@@ -28,6 +29,7 @@ export function intentSaveRecovered(known: IntentSnapshot | null, incoming: Inte
       || previous.resumed_from_request_id !== latest.resumed_from_request_id || previous.created_at !== latest.created_at
       || previous.source.video_sha256 !== latest.source.video_sha256 || previous.source.transcript_hash !== latest.source.transcript_hash
       || previous.source.duration_ms !== latest.source.duration_ms
+      || !sameAnswerClipSource(previous.source_answer, latest.source_answer)
       || previous.stage.id !== latest.stage.id || previous.stage.stage_type !== latest.stage.stage_type
       || previous.stage.status !== latest.stage.status || previous.stage.attempt !== latest.stage.attempt
       || previous.stage.error_code !== latest.stage.error_code

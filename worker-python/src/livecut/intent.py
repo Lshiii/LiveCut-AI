@@ -198,7 +198,7 @@ def _rows(value: object, goals: list[dict], items: list[dict], *, timed: bool,
 
 
 def validate_clip_plan(plan: dict, utterances: list[dict], *, expected: dict | None = None,
-                       allow_enabled: bool = False) -> None:
+                       allow_enabled: bool = False, answer_source: dict | None = None) -> None:
     """Validate source references; this cannot prove semantic truth or completeness."""
     fields = {"schema_version", "request_id", "job_id", "video_id", "source_hash", "transcript_hash", "duration_ms",
               "instruction", "goals", "constraints", "outputs", "provenance"}
@@ -224,10 +224,18 @@ def validate_clip_plan(plan: dict, utterances: list[dict], *, expected: dict | N
         provenance = plan["provenance"]
         if (not isinstance(provenance, dict) or set(provenance) != {"text_model_id", "prompt_version", "retrieval_mode", "index_hash"}
                 or not isinstance(provenance["text_model_id"], str) or not _ID.fullmatch(provenance["text_model_id"])
-                or provenance["prompt_version"] != PROMPT_VERSION
-                or provenance["retrieval_mode"] not in {"bm25", "bm25_dense_rrf"}
+                or provenance["prompt_version"] not in {PROMPT_VERSION, "anchor-clips-v1"}
+                or provenance["retrieval_mode"] not in ({"anchor_context"} if provenance["prompt_version"] == "anchor-clips-v1" else {"bm25", "bm25_dense_rrf"})
                 or not isinstance(provenance["index_hash"], str) or not _HASH.fullmatch(provenance["index_hash"])):
             raise _InvalidOutput("PROVENANCE")
+        if provenance["prompt_version"] == "anchor-clips-v1":
+            if answer_source is None:
+                raise _InvalidOutput("ANCHOR_SOURCE_REQUIRED")
+            from .anchor_clip import validate_anchor_outputs
+
+            validate_anchor_outputs(plan, items, answer_source)
+        elif answer_source is not None:
+            raise _InvalidOutput("ANCHOR_PROMPT_REQUIRED")
     except _InvalidOutput as exc:
         raise SegmentationError("INVALID_CLIP_PLAN", "Clip plan failed validation: " + exc.rule) from exc
     except (TypeError, KeyError, ValueError) as exc:

@@ -1,4 +1,4 @@
-export const EXECUTOR_STAGES = ['MEDIA', 'ASR', 'SEGMENT', 'TIMELINE', 'EXPORT_CLIP', 'CAPTION_PROOFREAD'] as const
+export const EXECUTOR_STAGES = ['MEDIA', 'ASR', 'SEGMENT', 'TIMELINE', 'EXPORT_CLIP', 'CAPTION_PROOFREAD', 'ANCHOR_CLIP'] as const
 export type ExecutorStageType = typeof EXECUTOR_STAGES[number]
 export type ExecutorReason = 'AVAILABLE' | 'NO_EXECUTOR' | 'BUSY' | 'RESOURCE_BUSY'
 export interface ExecutorCapacity {
@@ -69,12 +69,13 @@ export function parseExecutorSnapshot(raw: unknown): ExecutorSnapshot {
     resourceIds.add(value.name as string)
     return { name: value.name as ExecutorSnapshot['resources'][number]['name'], limit: value.limit, in_use: value.in_use }
   })
-  const legacyStages = EXECUTOR_STAGES.filter(type => type !== 'CAPTION_PROOFREAD')
-  // During a rolling upgrade the previous Java version still reports its five
-  // capacities. It must not claim a new proofreading worker without its queue.
+  const legacyStages = EXECUTOR_STAGES.slice(0, 5)
+  // Accept complete deployed generations (five, six, or seven queues), while
+  // every worker capability must be backed by a queue in this same snapshot.
   if (resourceIds.size !== 3 || !legacyStages.every(type => stageIds.has(type))
-      || (stageIds.size !== legacyStages.length && stageIds.size !== EXECUTOR_STAGES.length)
-      || (!stageIds.has('CAPTION_PROOFREAD') && workers.some(worker => worker.stage_types.includes('CAPTION_PROOFREAD')))) invalid()
+      || ![5, 6, 7].includes(stageIds.size)
+      || (stageIds.has('ANCHOR_CLIP') && !stageIds.has('CAPTION_PROOFREAD'))
+      || workers.some(worker => worker.stage_types.some(type => !stageIds.has(type)))) invalid()
   return { ...top, generated_at: raw.generated_at, heartbeat_timeout_seconds: raw.heartbeat_timeout_seconds,
     workers, stages, resources }
 }

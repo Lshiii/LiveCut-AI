@@ -40,7 +40,7 @@ public class ArtifactVerifier {
     private static final Map<String, Set<String>> REQUIRED_KINDS = Map.of(
             "MEDIA", Set.of("media_info", "audio"), "ASR", Set.of("transcript"),
             "SEGMENT", Set.of("analysis_result"), "TIMELINE", Set.of("analysis_result"),
-            "EXPORT_CLIP", Set.of("clip", "media_info"), "CAPTION_PROOFREAD", Set.of("caption_proofread"));
+            "EXPORT_CLIP", Set.of("clip", "media_info"), "CAPTION_PROOFREAD", Set.of("caption_proofread"),"ANCHOR_CLIP",Set.of("clip_plan"));
     private static final JsonMapper JSON = JsonMapper.builder()
             .enable(StreamReadFeature.STRICT_DUPLICATE_DETECTION)
             .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS).build();
@@ -93,7 +93,7 @@ public class ArtifactVerifier {
     }
 
     public VerifiedManifest verifyClipPlanManifest(String key,String hash,ManifestIdentity expected) {
-        if(expected==null||!"SEGMENT".equals(expected.stageType()))throw invalidReference();
+        if(expected==null||!Set.of("SEGMENT","ANCHOR_CLIP").contains(expected.stageType()))throw invalidReference();
         return verifyManifest(key,hash,expected,null,"clip_plan");
     }
 

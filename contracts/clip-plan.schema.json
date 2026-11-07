@@ -33,12 +33,26 @@
       "type": "object", "additionalProperties": false, "required": ["text_model_id", "prompt_version", "retrieval_mode", "index_hash"],
       "properties": {
         "text_model_id": {"type": "string", "minLength": 1, "maxLength": 128},
-        "prompt_version": {"const": "intent-clips-v1"},
-        "retrieval_mode": {"enum": ["bm25", "bm25_dense_rrf"]},
+        "prompt_version": {"enum": ["intent-clips-v1", "anchor-clips-v1"]},
+        "retrieval_mode": {"enum": ["bm25", "bm25_dense_rrf", "anchor_context"]},
         "index_hash": {"$ref": "#/$defs/hash"}
-      }
+      },
+      "allOf": [
+        {"if": {"properties": {"prompt_version": {"const": "anchor-clips-v1"}}}, "then": {"properties": {"retrieval_mode": {"const": "anchor_context"}}}},
+        {"if": {"properties": {"prompt_version": {"const": "intent-clips-v1"}}}, "then": {"properties": {"retrieval_mode": {"enum": ["bm25", "bm25_dense_rrf"]}}}}
+      ]
     }
   },
+  "allOf": [
+    {
+      "if": {"properties": {"provenance": {"properties": {"prompt_version": {"const": "anchor-clips-v1"}}}}},
+      "then": {"properties": {
+        "goals": {"maxItems": 1, "items": {"properties": {"goal_id": {"const": "answer-source"}}}},
+        "outputs": {"maxItems": 1, "items": {"properties": {"goal_id": {"const": "answer-source"}}}},
+        "constraints": {"properties": {"keep_explanation_complete": {"const": true}, "exclude": {"maxItems": 0}}}
+      }}
+    }
+  ],
   "$defs": {
     "hash": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
     "id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$"},

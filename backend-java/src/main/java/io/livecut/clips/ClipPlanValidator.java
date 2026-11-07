@@ -28,8 +28,9 @@ public final class ClipPlanValidator {
         Set<String> exclusionRules=new HashSet<>();for(JsonNode e:array(constraints,"exclude",0,8))if(!e.isString()||e.stringValue().isBlank()||e.stringValue().length()>120||!exclusionRules.add(e.stringValue()))throw bad("Invalid exclusion");
         JsonNode provenance=plan.path("provenance");fields(provenance,Set.of("text_model_id","prompt_version","retrieval_mode","index_hash"));
         equal(provenance,"text_model_id",String.valueOf(request.get("text_model_id")));
-        equal(provenance,"prompt_version","intent-clips-v1");String mode=text(provenance,"retrieval_mode",64);
-        if(!Set.of("bm25","bm25_dense_rrf").contains(mode))throw bad("Invalid retrieval mode");hash(text(provenance,"index_hash",64));
+        boolean anchored=AnswerClipSource.stored(request)!=null;
+        equal(provenance,"prompt_version",anchored?AnswerClipSource.PROMPT:"intent-clips-v1");String mode=text(provenance,"retrieval_mode",64);
+        if(!(anchored?Set.of("anchor_context"):Set.of("bm25","bm25_dense_rrf")).contains(mode))throw bad("Invalid retrieval mode");hash(text(provenance,"index_hash",64));
         Set<String> outputIds=new HashSet<>(),seenGoals=new HashSet<>();
         for(JsonNode output:array(plan,"outputs",1,6)){
             fields(output,Set.of("output_id","goal_id","title","status","reason","enabled","parts","excluded","evidence_utterance_ids"));
@@ -59,6 +60,7 @@ public final class ClipPlanValidator {
             if(state.equals("NOT_FOUND")&&(!parts.isEmpty()||!evidence.isEmpty()))throw bad("Missing goal cannot invent source parts");
         }
         if(!seenGoals.equals(goals))throw bad("Each goal requires an explicit result");
+        AnswerClipSource.validatePlan(plan,request,initial);
         return plan;
     }
     /** Ordinary review edits retain the identities and classifications published by the worker. */

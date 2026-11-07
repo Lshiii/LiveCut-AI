@@ -4,13 +4,14 @@ import { api, ApiError, post } from './api'
 import FailureDiagnostic from './FailureDiagnostic.vue'
 import TextRequestProgress from './TextRequestProgress.vue'
 import AgentAnswer from './AgentAnswer.vue'
+import { selectAnswerClip, type AnswerClipSelection } from './answerClip'
 import { topicTime } from './topics'
 import { AgentReadScope, AgentResponseError, agentTurnActive, agentTurnReceipt, canPrefillClipInstruction,
   newestAgentSession, newestAgentTurn, parseAgentSession, parseAgentTurn,
   type AgentCitation, type AgentReceipt, type AgentSession, type AgentTurn } from './videoAgent'
 
 const props = defineProps<{ jobId: string; videoId: string; videoHash: string; videoUrl: string; clipTargetBusy?: boolean; active?: boolean }>()
-const emit = defineEmits<{ clipInstruction: [instruction: string] }>()
+const emit = defineEmits<{ clipInstruction: [instruction: string]; clipAnchor: [selection: AnswerClipSelection] }>()
 const sessions = ref<AgentSession[]>([]), selectedId = ref(''), question = ref(''), maxCalls = ref(8)
 const action = ref(''), error = ref(''), refreshError = ref(''), notice = ref(''), loading = ref(true)
 const selected = computed(() => sessions.value.find(session => session.id === selectedId.value) ?? null)
@@ -19,7 +20,8 @@ const recentAnswer = computed(() => [...(selected.value?.turns ?? [])].reverse()
 const recentCitations = computed(() => recentAnswer.value?.result?.citations ?? [])
 const allEvidenceVisible = ref(false)
 const visibleCitations = computed(() => allEvidenceVisible.value ? recentCitations.value : recentCitations.value.slice(0, 3))
-const pending = computed(() => !!action.value), dirty = computed(() => !!question.value.trim())
+const anchorPreparing = ref(false), anchorChoices = ref<Record<string, string[]>>({})
+const pending = computed(() => !!action.value || anchorPreparing.value), dirty = computed(() => !!question.value.trim())
 const citation = ref<AgentCitation | null>(null), sourcePlayer = ref<HTMLVideoElement | null>(null), playbackError = ref('')
 const messageList = ref<HTMLOListElement | null>(null)
 const panel = ref<HTMLElement | null>(null), referenceDock = ref<HTMLElement | null>(null), referenceEvidence = ref<HTMLElement | null>(null)
@@ -229,6 +231,23 @@ function suggest(value: string) {
   if (!canPrefillClipInstruction(value, !!props.clipTargetBusy, pending.value)) { error.value = '剪辑区域有未提交内容或正在提交，请先处理后再送入要求。'; return }
   emit('clipInstruction', value)
 }
+function chooseAnchor(turn: AgentTurn, id: string, event: Event) {
+  if (pending.value || props.active === false || turn.status !== 'SUCCEEDED' || turn.result?.answer_scope !== 'VIDEO' || !turn.result.citations.some(citation => citation.utterance_id === id)) return
+  const previous = anchorChoices.value[turn.id] ?? []
+  anchorChoices.value = { ...anchorChoices.value, [turn.id]: (event.target as HTMLInputElement).checked ? [...new Set([...previous, id])] : previous.filter(value => value !== id) }
+}
+async function suggestAnchors(turn: AgentTurn) {
+  const owner = selected.value, ids = anchorChoices.value[turn.id] ?? [], version = selectionVersion, videoHash = props.videoHash
+  if (!owner || !ids.length || pending.value || props.active === false || props.clipTargetBusy) return
+  anchorPreparing.value = true; error.value = ''
+  try {
+    const selection = await selectAnswerClip(owner, turn, ids)
+    if (stopped || version !== selectionVersion || selectedId.value !== owner.id || !anchorEditorActive() || props.clipTargetBusy || props.videoHash !== videoHash) return
+    emit('clipAnchor', selection)
+  } catch { error.value = '所选原句或回答来源无法核对。请使用成功视频回答里的引用，最多24句、合计12000字。' }
+  finally { anchorPreparing.value = false }
+}
+function anchorEditorActive() { return props.active !== false }
 async function preview(value: AgentCitation) {
   if (stopped || props.active === false) return
   conversationFocused.value = false
@@ -306,7 +325,7 @@ onBeforeUnmount(() => { stopped = true; selectionVersion++; pauseReference(); re
         <div v-if="!selected?.turns.length" class="agent-welcome"><h3>从视频里找答案</h3><p>可以先概括内容，也可以沿着已有回答继续追问。证据不足时会明确说明。</p></div>
         <ol v-else ref="messageList" class="agent-turns" aria-label="对话记录" @scroll.passive="messageScroll"><li v-for="turn in selected.turns" :key="turn.id" class="agent-turn"><div class="agent-question"><span>你的问题 · 第 {{ turn.sequence }} 轮</span><p>{{ turn.question }}</p></div><div class="agent-answer"><div class="agent-answer-heading"><strong>视频助手</strong><span class="agent-status">{{ names[turn.status] }}</span><button v-if="agentTurnActive(turn)" class="text-button" :disabled="pending" @click="cancel(turn)">{{ action === 'cancel' ? '正在取消…' : '取消本轮' }}</button></div><TextRequestProgress :progress="turn.stage.text_progress" :terminal="!agentTurnActive(turn)" /><FailureDiagnostic :diagnostic="turn.stage.diagnostic" :error-code="turn.stage.error_code" :attempt="turn.stage.attempt" />
           <template v-if="turn.result"><span class="agent-scope" :class="turn.result.answer_scope.toLowerCase()">{{ scopes[turn.result.answer_scope] }}</span><AgentAnswer class="agent-answer-text" :text="turn.result.answer" /><p v-if="turn.result.answer_scope === 'GENERAL'" class="help">这部分是通用知识补充，不能当作视频中已经说过的话。</p><p v-else-if="turn.result.answer_scope === 'INSUFFICIENT'" class="help">当前视频证据不足，可换个说法，或补充想找的具体内容。</p>
-            <details v-if="turn.result.citations.length" class="agent-citations"><summary>视频原句依据 · {{ turn.result.citations.length }} 条</summary><button v-for="source in turn.result.citations" :key="source.utterance_id" class="agent-citation" :class="{ selected: citation?.utterance_id === source.utterance_id }" @click="preview(source)"><span>回看 {{ topicTime(source.start_ms) }} → {{ topicTime(source.end_ms) }}</span><p>{{ source.text }}</p></button></details>
+            <details v-if="turn.result.citations.length" class="agent-citations"><summary>视频原句依据 · {{ turn.result.citations.length }} 条</summary><p v-if="turn.result.answer_scope === 'VIDEO'" class="agent-anchor-help">从同一回答中选择要保留的原句，剪成一个片段；可以补充前后解释，所选句会完整保留。</p><div v-for="(source, sourceIndex) in turn.result.citations" :key="source.utterance_id" class="agent-citation-row"><label v-if="turn.result.answer_scope === 'VIDEO' && turn.status === 'SUCCEEDED'" class="agent-anchor-choice"><input type="checkbox" :checked="(anchorChoices[turn.id] ?? []).includes(source.utterance_id)" :disabled="pending || clipTargetBusy || active === false" :aria-label="`选择剪辑原句 第${sourceIndex + 1}条 ${topicTime(source.start_ms)}至${topicTime(source.end_ms)}`" @change="chooseAnchor(turn, source.utterance_id, $event)"><span>选择此原句</span></label><button class="agent-citation" :class="{ selected: citation?.utterance_id === source.utterance_id }" @click="preview(source)"><span>回看 {{ topicTime(source.start_ms) }} → {{ topicTime(source.end_ms) }}</span><p>{{ source.text }}</p></button></div><div v-if="turn.result.answer_scope === 'VIDEO'" class="agent-anchor-actions"><span>已选 {{ (anchorChoices[turn.id] ?? []).length }} 条 · 来自第 {{ turn.sequence }} 轮视频回答</span><button class="secondary" :disabled="pending || clipTargetBusy || active === false || !(anchorChoices[turn.id] ?? []).length" @click="suggestAnchors(turn)">按所选原句剪辑</button><small>仅填入剪辑区，不创建请求；初始候选只核对所选句及相邻上下文，仍需人工回看。</small></div></details>
             <details v-if="turn.result.tool_calls.length" class="agent-tools"><summary>查找过程 · {{ turn.result.tool_calls.length }} 步</summary><ol><li v-for="call in turn.result.tool_calls" :key="call.step"><strong>{{ call.step }}. {{ toolNames[call.tool_name] }}</strong><p v-if="call.tool_name === 'search_transcript'">查询：{{ call.arguments.query }}</p><p v-else-if="call.tool_name === 'read_context'">补读前 {{ call.arguments.before }} 句、后 {{ call.arguments.after }} 句</p><p v-else>查看第 {{ Number(call.arguments.offset) + 1 }} 项起的话题，最多 {{ call.arguments.limit }} 项</p><small>返回 {{ call.result_utterance_ids.length }} 条原句依据</small></li></ol></details>
             <div v-if="turn.result.suggested_clip_instruction" class="agent-clip-suggestion"><p>{{ turn.result.suggested_clip_instruction }}</p><button class="secondary" :disabled="pending || clipTargetBusy" @click="suggest(turn.result.suggested_clip_instruction)">送到剪辑要求</button><small v-if="clipTargetBusy">请先保存或放弃剪辑区域的未提交内容。</small><small v-else>仅填入要求，你仍需在剪辑区域点击查找、核对并确认。</small></div>
           </template><p v-else class="help">{{ turn.status === 'CANCELLED' ? '本轮已取消，已有对话和视频结果仍保留。' : turn.status === 'FAILED' ? '本轮未生成可用回答。请查看原因，原转写与此前回答仍保留。' : turn.status === 'QUEUED' ? '问题已保存，正在等待执行服务。' : '正在结合视频内容查找证据并回答，进度会自动更新。' }}</p>
@@ -400,6 +419,15 @@ onBeforeUnmount(() => { stopped = true; selectionVersion++; pauseReference(); re
 .agent-citation span { color: #64748b; font-size: 12px; }
 .agent-citation p { margin-top: 5px; font-size: 14px; line-height: 1.8; overflow-wrap: anywhere; }
 .agent-citation.selected, .agent-citation.selected:hover { border-color: #e47650; background: #fff8f4; }
+.agent-citation-row { margin: 0 10px 10px; padding: 10px; border: 1px solid #e2e8f0; border-radius: 7px; background: #fff; }
+.agent-citation-row .agent-citation { width: 100%; margin: 0; padding: 8px 0; border: 0; background: transparent; }
+.agent-anchor-choice { display: inline-flex; min-height: 36px; align-items: center; gap: 8px; color: #475569; font-size: 13px; cursor: pointer; }
+.agent-anchor-choice input { width: 17px; height: 17px; margin: 0; accent-color: #e47650; }
+.agent-anchor-help { padding: 0 12px 10px; color: #64748b; font-size: 13px; line-height: 1.8; }
+.agent-anchor-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; padding: 2px 12px 12px; color: #64748b; font-size: 13px; }
+.agent-anchor-actions button { min-height: 36px; margin-left: auto; }
+.agent-anchor-actions small { flex-basis: 100%; font-size: 12px; line-height: 1.8; }
+
 .agent-tools ol { padding: 0 11px 10px; margin: 0; list-style: none; }
 .agent-tools li { padding: 6px 0 9px 11px; border-left: 2px solid #e2e8f0; overflow-wrap: anywhere; }
 .agent-tools strong { color: #334155; font-weight: 500; }

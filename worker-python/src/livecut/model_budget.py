@@ -240,7 +240,7 @@ class BudgetTransport(httpx.BaseTransport):
             if request.method == "POST" and "/tasks/" in path:
                 return self._query(request)
             return self.inner.handle_request(request)
-        allowed = {"ASR": {"ASR"}, "TEXT": {"SEGMENT", "CAPTION_PROOFREAD"}}
+        allowed = {"ASR": {"ASR"}, "TEXT": {"SEGMENT", "CAPTION_PROOFREAD", "ANCHOR_CLIP"}}
         if self.context.lease.stage_type not in allowed[kind]:
             raise ModelBudgetError("MODEL_OPERATION_NOT_ALLOWED")
         try:

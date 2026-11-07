@@ -1,4 +1,5 @@
 import { parseTextProgress, type TextProgress } from './textProgress.ts'
+import { parseAnswerClipSource, sameAnswerClipSource, type AnswerClipSource } from './answerClip.ts'
 
 export interface IntentUtterance { utterance_id: string; start_ms: number; end_ms: number; text: string }
 export interface IntentPart { start_utterance_id: string; end_utterance_id: string; start_ms: number; end_ms: number }
@@ -23,6 +24,7 @@ export interface IntentSnapshot {
   budget: { max_text_calls: number; text_calls_reserved: number }
   stage: { id: string; stage_type: string; status: string; attempt: number; error_code: string | null; text_progress?: TextProgress }
   source: { video_sha256: string; transcript_hash: string; duration_ms: number }
+  source_answer?: AnswerClipSource | null
   revision: number; plan_hash: string | null; confirmed_revisions: number[]
   plan: IntentPlan | null; utterances: IntentUtterance[]
 }
@@ -47,8 +49,9 @@ export function intentPartIds(part: IntentPart, utterances: IntentUtterance[]): 
   return first >= 0 && last >= first ? utterances.slice(first, last + 1).map(value => value.utterance_id) : []
 }
 export function intentOutputValidation(outputs: IntentOutput[], utterances: IntentUtterance[], duration: number,
-  goals?: IntentPlan['goals']): string {
+  goals?: IntentPlan['goals'], sourceAnswer?: AnswerClipSource | null): string {
   if (!outputs.length || outputs.length > 6) return '方案应包含 1～6 个剪辑目标。'
+  if (sourceAnswer && outputs.length !== 1) return '所选原句共同组成一个剪辑目标，不能拆成多个目标。'
   const outputIds = new Set<string>(), goalIds = new Set<string>()
   const source = new Map(utterances.map((value, index) => [value.utterance_id, { value, index }]))
   for (const output of outputs) {
@@ -77,6 +80,8 @@ export function intentOutputValidation(outputs: IntentOutput[], utterances: Inte
         || !text(value.reason, 300) || kept.has(value.utterance_id)) return '排除语句不能同时出现在保留片段中；如需保留，请先取消排除。'
       excluded.add(value.utterance_id)
     }
+    if (sourceAnswer && output.parts.length && sourceAnswer.utterance_ids.some(id => !kept.has(id))) return '候选区间必须完整保留所有锚定原句；可扩展前后解释，不能删去所选句。'
+    if (sourceAnswer && sourceAnswer.utterance_ids.some(id => excluded.has(id))) return '锚定原句不能被排除。'
   }
   if (goals && (goals.length !== outputs.length || goals.some(goal => !goalIds.has(goal.goal_id)))) return '每个需求目标都应有对应结果，包括未找到的目标。'
   return ''
@@ -90,7 +95,7 @@ export function parseIntentSnapshot(raw: unknown, jobId: string, requestId?: str
     || !row(raw.budget) || !integer(raw.budget.max_text_calls, 1) || !integer(raw.budget.text_calls_reserved)
     || raw.budget.text_calls_reserved > raw.budget.max_text_calls
     || !row(raw.stage) || typeof raw.stage.id !== 'string' || !uuid.test(raw.stage.id)
-    || raw.stage.stage_type !== 'SEGMENT' || !stageStates.has(raw.stage.status as string) || !integer(raw.stage.attempt)
+    || !['SEGMENT', 'ANCHOR_CLIP'].includes(raw.stage.stage_type as string) || !stageStates.has(raw.stage.status as string) || !integer(raw.stage.attempt)
     || !(raw.stage.error_code === null || (typeof raw.stage.error_code === 'string' && /^[A-Z][A-Z0-9_]{0,79}$/.test(raw.stage.error_code)))
     || !row(raw.source) || !digest(raw.source.video_sha256) || !digest(raw.source.transcript_hash) || !integer(raw.source.duration_ms, 1)
     || !integer(raw.revision) || !(raw.plan_hash === null || digest(raw.plan_hash))
@@ -98,11 +103,25 @@ export function parseIntentSnapshot(raw: unknown, jobId: string, requestId?: str
     || new Set(raw.confirmed_revisions).size !== raw.confirmed_revisions.length || !Array.isArray(raw.utterances)
     || !(raw.resumed_from_request_id === undefined || raw.resumed_from_request_id === null
       || (typeof raw.resumed_from_request_id === 'string' && uuid.test(raw.resumed_from_request_id) && raw.resumed_from_request_id !== raw.id))) invalid()
+  let sourceAnswer: AnswerClipSource | null = null
+  try { if (raw.source_answer !== undefined && raw.source_answer !== null) sourceAnswer = parseAnswerClipSource(raw.source_answer, jobId, raw.video_id, raw.source as unknown as { video_sha256: string; transcript_hash: string; duration_ms: number }) }
+  catch { invalid() }
+  if ((raw.stage.stage_type === 'ANCHOR_CLIP') !== !!sourceAnswer) invalid()
   const ids = new Set<string>(); let end = 0
   for (const value of raw.utterances) {
     if (!row(value) || !id(value.utterance_id) || ids.has(value.utterance_id) || !text(value.text, 20000)
       || !integer(value.start_ms) || !integer(value.end_ms, value.start_ms + 1) || value.start_ms < end || value.end_ms > raw.source.duration_ms) invalid()
     ids.add(value.utterance_id); end = value.end_ms
+  }
+  if (sourceAnswer && raw.utterances.length) {
+    const byId = new Map((raw.utterances as unknown as IntentUtterance[]).map((value, index) => [value.utterance_id, { value, index }]))
+    let prior = -1, units = 0
+    for (const id of sourceAnswer.context_utterance_ids) {
+      const item = byId.get(id)
+      if (!item || item.index <= prior) invalid()
+      prior = item.index; units += item.value.text.length
+    }
+    if (units > 12000 || sourceAnswer.citations.some(citation => { const item = byId.get(citation.utterance_id)?.value; return !item || item.text !== citation.text || item.start_ms !== citation.start_ms || item.end_ms !== citation.end_ms })) invalid()
   }
   if (raw.plan === null) {
     if (raw.status === 'PLAN_READY' || raw.plan_hash !== null || raw.revision !== 0 || raw.confirmed_revisions.length) invalid()
@@ -115,7 +134,9 @@ export function parseIntentSnapshot(raw: unknown, jobId: string, requestId?: str
       || !row(plan.constraints) || typeof plan.constraints.keep_explanation_complete !== 'boolean'
       || !Array.isArray(plan.constraints.exclude) || plan.constraints.exclude.length > 8 || new Set(plan.constraints.exclude).size !== plan.constraints.exclude.length || plan.constraints.exclude.some(value => !text(value, 120))
       || !row(plan.provenance) || !text(plan.provenance.text_model_id, 200) || !text(plan.provenance.prompt_version, 200)
-      || plan.provenance.prompt_version !== 'intent-clips-v1' || !['bm25', 'bm25_dense_rrf'].includes(plan.provenance.retrieval_mode as string) || !digest(plan.provenance.index_hash) || !Array.isArray(plan.outputs)) invalid()
+      || (sourceAnswer ? plan.provenance.prompt_version !== 'anchor-clips-v1' || plan.provenance.retrieval_mode !== 'anchor_context'
+        : plan.provenance.prompt_version !== 'intent-clips-v1' || !['bm25', 'bm25_dense_rrf'].includes(plan.provenance.retrieval_mode as string))
+      || !digest(plan.provenance.index_hash) || !Array.isArray(plan.outputs)) invalid()
     const goals = new Set<string>()
     for (const goal of plan.goals) {
       if (!row(goal) || !id(goal.goal_id) || goal.goal_id.length > 64 || goals.has(goal.goal_id) || !text(goal.description, 300)) invalid()
@@ -124,12 +145,12 @@ export function parseIntentSnapshot(raw: unknown, jobId: string, requestId?: str
     for (const output of plan.outputs) {
       if (!row(output) || !Array.isArray(output.parts) || output.parts.some(value => !row(value)) || !Array.isArray(output.excluded) || output.excluded.some(value => !row(value))) invalid()
     }
-    if (intentOutputValidation(plan.outputs as unknown as IntentOutput[], raw.utterances as unknown as IntentUtterance[], raw.source.duration_ms, plan.goals as IntentPlan['goals'])) invalid()
+    if (intentOutputValidation(plan.outputs as unknown as IntentOutput[], raw.utterances as unknown as IntentUtterance[], raw.source.duration_ms, plan.goals as IntentPlan['goals'], sourceAnswer)) invalid()
   }
   const { text_progress: rawProgress, ...stage } = raw.stage
   const progress = parseTextProgress(rawProgress)
   const { resumed_from_request_id: resumedFrom, ...value } = raw
-  return { ...value, ...(typeof resumedFrom === 'string' ? { resumed_from_request_id: resumedFrom } : {}),
+  return { ...value, source_answer: sourceAnswer, ...(typeof resumedFrom === 'string' ? { resumed_from_request_id: resumedFrom } : {}),
     stage: { ...stage, ...(progress ? { text_progress: progress } : {}) } } as unknown as IntentSnapshot
 }
 
@@ -139,7 +160,7 @@ export function parseResumedIntentSnapshot(raw: unknown, source: IntentSnapshot,
   if (value.id === source.id || value.resumed_from_request_id !== source.id || value.video_id !== source.video_id
     || value.instruction !== source.instruction || value.source.video_sha256 !== source.source.video_sha256
     || value.source.transcript_hash !== source.source.transcript_hash || value.source.duration_ms !== source.source.duration_ms
-    || value.budget.max_text_calls !== maxTextCalls) invalid()
+    || value.budget.max_text_calls !== maxTextCalls || !sameAnswerClipSource(value.source_answer, source.source_answer)) invalid()
   return value
 }
 
@@ -164,7 +185,8 @@ export function newestIntentSnapshot(known: IntentSnapshot | null | undefined, i
   if (!known || known.id !== incoming.id) return incoming
   if (known.job_id !== incoming.job_id || known.video_id !== incoming.video_id || known.instruction !== incoming.instruction
     || known.resumed_from_request_id !== incoming.resumed_from_request_id || known.source.duration_ms !== incoming.source.duration_ms
-    || known.source.video_sha256 !== incoming.source.video_sha256 || known.source.transcript_hash !== incoming.source.transcript_hash) invalid()
+    || known.source.video_sha256 !== incoming.source.video_sha256 || known.source.transcript_hash !== incoming.source.transcript_hash
+    || !sameAnswerClipSource(known.source_answer, incoming.source_answer)) invalid()
   if (incoming.state_version < known.state_version || incoming.revision < known.revision
     || (incoming.state_version === known.state_version && incoming.status !== known.status)
     || known.confirmed_revisions.some(value => !incoming.confirmed_revisions.includes(value))) return known
@@ -180,7 +202,7 @@ export function intentPayload(outputs: IntentOutput[]): { outputs: IntentOutput[
 }
 export function intentCanConfirm(snapshot: IntentSnapshot | null, outputs: IntentOutput[], dirty: boolean, pending: boolean): boolean {
   return !!snapshot?.plan && snapshot.status === 'PLAN_READY' && !dirty && !pending
-    && !intentOutputValidation(outputs, snapshot.utterances, snapshot.source.duration_ms, snapshot.plan.goals)
+    && !intentOutputValidation(outputs, snapshot.utterances, snapshot.source.duration_ms, snapshot.plan.goals, snapshot.source_answer)
     && outputs.some(value => value.enabled)
 }
 export function intentCanExport(snapshot: IntentSnapshot | null, dirty: boolean, pending: boolean): boolean {

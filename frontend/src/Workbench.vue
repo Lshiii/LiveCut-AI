@@ -5,6 +5,7 @@ import ReviewPanel from './ReviewPanel.vue'
 import TopicReviewPanel from './TopicReviewPanel.vue'
 import IntentClipPanel from './IntentClipPanel.vue'
 import VideoAgentPanel from './VideoAgentPanel.vue'
+import type { AnswerClipSelection } from './answerClip'
 import UploadPanel from './UploadPanel.vue'
 import FailureDiagnostic from './FailureDiagnostic.vue'
 import TextRequestProgress from './TextRequestProgress.vue'
@@ -27,7 +28,7 @@ const recoveryBudget = ref(12)
 const pendingResumes = new Map<string, AnalysisResumeReceipt>()
 const uploadPanel = ref<{ chooseFile: () => void } | null>(null)
 const reviewEditor = ref<{ dirty: boolean; pending: boolean } | null>(null)
-const intentEditor = ref<{ dirty: boolean; pending: boolean; prefillInstruction(value: string): boolean } | null>(null)
+const intentEditor = ref<{ dirty: boolean; pending: boolean; prefillInstruction(value: string): boolean; prefillAnswerClip(value: AnswerClipSelection): boolean } | null>(null)
 const agentEditor = ref<{ dirty: boolean; pending: boolean } | null>(null)
 type WorkbenchTab = 'agent' | 'topics' | 'clips' | 'task'
 const activeTab = ref<WorkbenchTab>('task'), mobileTasksOpen = ref(false)
@@ -193,6 +194,11 @@ function useAgentClipInstruction(value: string) {
   if (!intentEditor.value?.prefillInstruction(value)) { errorMessage.value = '剪辑区域有未提交内容或正在提交，请先处理后再填入助手建议。'; return }
   activeTab.value = 'clips'
   notice.value = '剪辑要求已填入，请核对后点击“查找片段”。'
+}
+function useAgentClipAnchor(value: AnswerClipSelection) {
+  if (value.binding.job_id !== selectedJob.value?.id || value.binding.video_id !== currentVideo.value?.id || value.binding.source_hash !== currentVideo.value?.content_hash
+    || !intentEditor.value?.prefillAnswerClip(value)) { errorMessage.value = '原句来源不匹配，或剪辑区域有未提交内容。请先核对并处理当前草稿。'; return }
+  activeTab.value = 'clips'; notice.value = '所选原句与回答来源已填入单目标剪辑要求；请核对后手动查找片段。'
 }
 async function loadDetail(id: string, background = false, allowPending = false) {
   if (stopped || !canSelect(id, allowPending)) return
@@ -429,14 +435,14 @@ onUnmounted(() => { stopped = true; compactQuery.removeEventListener('change', u
       </div>
       <div class="workbench-content">
         <div id="workbench-pane-agent" v-show="activeTab === 'agent'" class="workbench-pane conversation-pane" role="tabpanel" aria-labelledby="workbench-tab-agent">
-          <VideoAgentPanel v-if="selectedJob?.status === 'REVIEW_READY' && currentVideo && topicMode" :key="`agent-${selectedJob.id}`" ref="agentEditor" :active="activeTab === 'agent'" :job-id="selectedJob.id" :video-id="currentVideo.id" :video-hash="currentVideo.content_hash" :video-url="currentVideo.content_url" :clip-target-busy="!!intentEditor?.dirty || !!intentEditor?.pending" @clip-instruction="useAgentClipInstruction" />
+          <VideoAgentPanel v-if="selectedJob?.status === 'REVIEW_READY' && currentVideo && topicMode" :key="`agent-${selectedJob.id}`" ref="agentEditor" :active="activeTab === 'agent'" :job-id="selectedJob.id" :video-id="currentVideo.id" :video-hash="currentVideo.content_hash" :video-url="currentVideo.content_url" :clip-target-busy="!!intentEditor?.dirty || !!intentEditor?.pending" @clip-instruction="useAgentClipInstruction" @clip-anchor="useAgentClipAnchor" />
         </div>
         <div id="workbench-pane-topics" v-show="activeTab === 'topics'" class="workbench-pane" :class="{ 'topic-workspace-pane': topicMode }" role="tabpanel" aria-labelledby="workbench-tab-topics">
           <TopicReviewPanel v-if="selectedJob?.status === 'REVIEW_READY' && currentVideo && topicMode" :key="selectedJob.id" ref="reviewEditor" :active="activeTab === 'topics'" :job-id="selectedJob.id" :video-url="currentVideo.content_url" />
           <ReviewPanel v-else-if="selectedJob?.status === 'REVIEW_READY' && currentVideo" :key="selectedJob.id" ref="reviewEditor" :active="activeTab === 'topics'" :job-id="selectedJob.id" :video-url="currentVideo.content_url" />
         </div>
         <div id="workbench-pane-clips" v-show="activeTab === 'clips'" class="workbench-pane intent-workspace-pane" role="tabpanel" aria-labelledby="workbench-tab-clips">
-          <IntentClipPanel v-if="selectedJob?.status === 'REVIEW_READY' && currentVideo && topicMode" :key="`intent-${selectedJob.id}`" ref="intentEditor" :active="activeTab === 'clips'" :job-id="selectedJob.id" :video-url="currentVideo.content_url" />
+          <IntentClipPanel v-if="selectedJob?.status === 'REVIEW_READY' && currentVideo && topicMode" :key="`intent-${selectedJob.id}`" ref="intentEditor" :active="activeTab === 'clips'" :job-id="selectedJob.id" :video-url="currentVideo.content_url" :video-id="currentVideo.id" :video-hash="currentVideo.content_hash" />
         </div>
         <div id="workbench-pane-task" v-show="activeTab === 'task'" class="workbench-pane task-pane" role="tabpanel" aria-labelledby="workbench-tab-task"><div class="settings-grid">
           <section class="panel setup-panel">

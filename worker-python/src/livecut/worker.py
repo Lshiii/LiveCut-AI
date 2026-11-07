@@ -35,7 +35,7 @@ from .topic_contracts import validate_topic_result
 from .topics import discover_topics
 from .worker_client import WorkerClient, WorkerClientError
 
-STAGES = ("MEDIA", "ASR", "SEGMENT", "CAPTION_PROOFREAD", "TIMELINE", "EXPORT_CLIP")
+STAGES = ("MEDIA", "ASR", "SEGMENT", "CAPTION_PROOFREAD", "ANCHOR_CLIP", "TIMELINE", "EXPORT_CLIP")
 
 
 class WorkerError(Exception):
@@ -1218,6 +1218,7 @@ class AnalysisStageExecutor:
         from .intent import build_clip_plan
 
         lease, directory = context.lease, context.directory
+        anchored = lease.stage_type == "ANCHOR_CLIP"
         config = lease.config.get("clip_request")
         required = {"request_id", "instruction", "source_job_id", "source_transcript_key",
                     "source_transcript_hash", "duration_ms", "max_text_calls", "text_model_id"}
@@ -1226,6 +1227,14 @@ class AnalysisStageExecutor:
                 or type(config["max_text_calls"]) is not int or not 1 <= config["max_text_calls"] <= 24
                 or type(config["duration_ms"]) is not int or config["duration_ms"] <= 0):
             raise WorkerError("INVALID_INTENT_INPUT")
+        if (anchored and (not isinstance(config.get("answer_source"), dict)
+                         or lease.config.get("max_asr_submissions") != 0
+                         or type(lease.config.get("max_asr_submissions")) is not int
+                         or type(lease.config.get("max_text_calls")) is not int
+                         or lease.config.get("max_text_calls") != config["max_text_calls"]
+                         or lease.config.get("text_model") != config["text_model_id"])
+                or not anchored and "answer_source" in config):
+            raise WorkerError("INVALID_ANCHOR_CLIP_INPUT")
         transcript_path = context.predecessor("ASR", "transcript")
         expected_path = shared_path(context.storage_root, config["source_transcript_key"], must_exist=True)
         if (transcript_path != expected_path
@@ -1235,10 +1244,17 @@ class AnalysisStageExecutor:
         if media.get("duration_ms") != config["duration_ms"]:
             raise WorkerError("INVALID_INTENT_INPUT")
         transcript = json.loads(_native_path(transcript_path).read_text(encoding="utf-8"))
+        if anchored:
+            from .anchor_clip import validate_answer_source
+            from .segmentation import _inputs
+
+            validate_answer_source(config["answer_source"], _inputs(transcript, config["duration_ms"]),
+                config["duration_ms"], expected={"job_id": lease.job_id, "video_id": lease.video_id,
+                    "source_hash": lease.source_hash, "transcript_hash": config["source_transcript_hash"]})
         if self.transport_factory is None:
             raise WorkerError("DURABLE_BUDGET_REQUIRED")
         embedder = None
-        if os.environ.get("LIVECUT_INTENT_EMBEDDING_DIR"):
+        if not anchored and os.environ.get("LIVECUT_INTENT_EMBEDDING_DIR"):
             from .intent_embedding import LocalIntentEmbedder
 
             context.guard.check()
@@ -1257,13 +1273,23 @@ class AnalysisStageExecutor:
             from .text_resilience import ResilientTextTransport
 
             client.livecut_resumable_text = isinstance(text_transport, ResilientTextTransport)
-            build_clip_plan(transcript, config["duration_ms"], config["instruction"], _native_path(directory),
-                request_id=config["request_id"], job_id=lease.job_id, video_id=lease.video_id,
-                source_hash=lease.source_hash, transcript_hash=config["source_transcript_hash"],
-                model=config["text_model_id"], max_calls=config["max_text_calls"], client=client,
-                base_url=os.environ.get("LIVECUT_TEXT_BASE_URL"), dense_embedder=embedder,
-                embedding_model_id=embedder.model_id if embedder else None,
-                index_cache_dir=_native_path(context.storage_root / "cache" / "intent-index-v1"))
+            if anchored:
+                from .anchor_clip import build_anchor_clip_plan
+
+                build_anchor_clip_plan(transcript, config["duration_ms"], config["instruction"],
+                    config["answer_source"], _native_path(directory), request_id=config["request_id"],
+                    job_id=lease.job_id, video_id=lease.video_id, source_hash=lease.source_hash,
+                    transcript_hash=config["source_transcript_hash"], model=config["text_model_id"],
+                    max_calls=config["max_text_calls"], client=client,
+                    base_url=os.environ.get("LIVECUT_TEXT_BASE_URL"), guard=context.guard.check)
+            else:
+                build_clip_plan(transcript, config["duration_ms"], config["instruction"], _native_path(directory),
+                    request_id=config["request_id"], job_id=lease.job_id, video_id=lease.video_id,
+                    source_hash=lease.source_hash, transcript_hash=config["source_transcript_hash"],
+                    model=config["text_model_id"], max_calls=config["max_text_calls"], client=client,
+                    base_url=os.environ.get("LIVECUT_TEXT_BASE_URL"), dense_embedder=embedder,
+                    embedding_model_id=embedder.model_id if embedder else None,
+                    index_cache_dir=_native_path(context.storage_root / "cache" / "intent-index-v1"))
         context.guard.check()
         artifacts = [context.artifact(kind, directory / filename) for kind, filename in (
             ("clip_plan", "clip-plan.json"), ("retrieval_index", "retrieval-index.json"),
@@ -1296,6 +1322,10 @@ class AnalysisStageExecutor:
                 raise WorkerError("SOURCE_HASH_MISMATCH")
         if "agent_turn" in config and "clip_request" in config:
             raise WorkerError("INVALID_AGENT_INPUT")
+        if lease.stage_type == "ANCHOR_CLIP":
+            if "clip_request" not in config or "agent_turn" in config:
+                raise WorkerError("INVALID_ANCHOR_CLIP_INPUT")
+            return self._execute_intent(context)
         if lease.stage_type == "CAPTION_PROOFREAD":
             if "agent_turn" not in config or "clip_request" in config:
                 raise WorkerError("INVALID_CAPTION_PROOFREAD_INPUT")

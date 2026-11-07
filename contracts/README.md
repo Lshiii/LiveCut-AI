@@ -10,6 +10,8 @@
 
 ## 按需求剪辑 v1.0
 
+回答引用联动剪辑可在创建请求时携带 `source_answer:{turn_id,utterance_ids}`。Java 冻结的公开 `source_answer` 与私有 claim 的 `clip_request.answer_source` 使用 [answer-source.schema.json](./answer-source.schema.json)，旧普通请求为 null。冻结对象只接受同任务成功 VIDEO 回答的原引用，时间由原 ASR 映射；JSON Schema 之外另查 UTF-16 总长、摘要、顺序及完整原句。锚定使用专用 ANCHOR_CLIP/TEXT，`clip_plan` 仍为 v1.0、prompt_version 为 anchor-clips-v1，单目标候选完整保留全部锚句。普通请求仍用 intent-clips-v1 与 SEGMENT。恢复、人工修订及验收边界见 [回答原句联动剪辑](../docs/58-回答原句联动剪辑.md)。
+
 独立请求方案使用 [clip-plan.schema.json](./clip-plan.schema.json)，不覆盖原话题预测与审核修订。每个目标一个输出，包含有序的多个源区间、证据和排除原句。JSON Schema 检查结构；Java 与 Python 另行核验来源哈希、目标完整覆盖、语句存在与顺序、时间映射、区间不重叠和排除证据互斥。自动方案所有输出初始不勾选，只有 FOUND 可人工启用；确认版本才能导出。接口及边界见 [按需求检索与剪辑方案](../docs/37-按需求检索与剪辑方案.md)。
 
 请求快照可包含 `resumed_from_request_id`，仅表示继续操作创建的新请求与旧请求的关系，不反写剪辑方案的 request_id。取消和继续的状态、幂等、来源核验及计费边界见[协议](../docs/39-剪辑请求取消与继续.md)。旧快照缺少该字段仍合法。

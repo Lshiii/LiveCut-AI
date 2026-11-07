@@ -225,3 +225,11 @@
 .intent-boundary-button strong { color: #334155; font-size: 14px; font-variant-numeric: tabular-nums; }
 .intent-boundary-button small { margin-left: auto; color: #9d5b3f; font-size: 12px; }
 .intent-boundary-button p { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; margin: 8px 0 0; color: #475569; font-size: 14px; line-height: 1.75; }
+
+.intent-answer-anchor, .intent-anchor-receipt { min-width: 0; margin: 0 0 16px; padding: 12px 14px; border: 1px solid #edcbbd; border-radius: 8px; background: #fff8f3; color: #475569; font-size: 13px; line-height: 1.8; overflow-wrap: anywhere; }
+.intent-answer-anchor > summary { min-height: 36px; padding: 5px 0; color: #9a4f32; font-weight: 600; cursor: pointer; }
+.intent-answer-anchor > p, .intent-anchor-receipt > p { margin: 7px 0; }
+.intent-answer-anchor blockquote { margin: 10px 0; padding: 9px 12px; border-left: 2px solid #e6a78e; background: #fff; }
+.intent-answer-anchor blockquote strong { color: #9a4f32; font-size: 13px; font-weight: 500; }
+.intent-answer-anchor blockquote p { margin-top: 5px; color: #334155; font-size: 14px; }
+.intent-answer-anchor > button, .intent-anchor-receipt > button { min-height: 36px; margin-top: 8px; }
