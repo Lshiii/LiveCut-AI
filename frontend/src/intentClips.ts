@@ -226,13 +226,15 @@ export class IntentReadScope {
   private epoch = 0
   private controllers = new Set<AbortController>()
   private stopped = false
-  begin(): { signal: AbortSignal; current(): boolean; release(): void } {
+  begin(parent?: AbortSignal): { signal: AbortSignal; current(): boolean; release(): void } {
     const controller = new AbortController(), epoch = this.epoch
-    if (this.stopped) controller.abort()
+    const abort = () => controller.abort()
+    if (this.stopped || parent?.aborted) controller.abort()
+    else parent?.addEventListener('abort', abort, { once: true })
     this.controllers.add(controller)
     return { signal: controller.signal,
       current: () => !this.stopped && epoch === this.epoch && !controller.signal.aborted,
-      release: () => { this.controllers.delete(controller) } }
+      release: () => { parent?.removeEventListener('abort', abort); this.controllers.delete(controller) } }
   }
   invalidate() { this.epoch++; for (const controller of this.controllers) controller.abort(); this.controllers.clear() }
   dispose() { this.stopped = true; this.invalidate() }

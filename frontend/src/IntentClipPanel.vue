@@ -17,6 +17,7 @@ import { intentPreviewParts } from './intentPreviewParts'
 import { SequencePreview, type SequencePreviewPart, type SequencePreviewState } from './sequencePreview'
 import { validateTranscriptRange } from './transcriptRange'
 import { intentSaveRecovered } from './intentSaveRecovery'
+import { IntentRefreshScheduler, intentHasActiveWork, type IntentRefreshLease } from './intentRefreshScheduler'
 import { intentCanCancel, intentCanConfirm, intentCanExport, intentCanResume, intentOutputValidation, intentPayload, intentResumeReceipt,
   IntentReadScope, IntentResponseError, newestIntentSnapshot, parseIntentSnapshot, refreshIntentEvidence,
   parseResumedIntentSnapshot, type IntentOutput, type IntentResumeReceipt, type IntentSnapshot, type IntentUtterance } from './intentClips'
@@ -69,7 +70,7 @@ const sequence = new SequencePreview((state, reason) => {
   else if (reason === 'failed') sequenceFeedback.value = '区间预览暂时未能播放。可先点击原视频播放按钮，再重试预览。'
 })
 const scope = new IntentReadScope()
-let stopped = false, refreshing = false, timer: number | undefined, selectionVersion = 0, focusVersion = 0
+let stopped = false, selectionVersion = 0, focusVersion = 0
 const pendingCreate = ref<IntentCreateReceipt | null>(null)
 const inputAnswerBinding = computed(() => answerSelection.value?.binding ?? pendingCreate.value?.source_answer ?? null)
 const pendingCreatePayload = computed(() => pendingCreate.value ? parseIntentCreatePayload(JSON.parse(pendingCreate.value.input)) : null)
@@ -100,6 +101,11 @@ const selectedCount = computed(() => outputs.value.filter(value => value.enabled
 const unresolved = computed(() => outputs.value.filter(value => value.status !== 'FOUND').length)
 const confirmed = computed(() => !!snapshot.value && snapshot.value.confirmed_revisions.includes(snapshot.value.revision))
 const completedClips = computed(() => batches.value.reduce((count, batch) => count + batch.clips.filter(clip => clip.status === 'SUCCEEDED').length, 0))
+const hasActiveRefreshWork = computed(() => intentHasActiveWork(requests.value, batches.value))
+const refreshScheduler = new IntentRefreshScheduler({ refresh: refreshNow, hasActiveWork: () => hasActiveRefreshWork.value })
+function syncRefreshLifecycle() { refreshScheduler.update({ active: props.active !== false, visible: previewPageVisible.value,
+  blocked: pending.value || !!captionEditor.value?.pending }) }
+function windowFocused() { syncRefreshLifecycle(); void refreshScheduler.refresh() }
 const primaryAction = computed(() => saveNeedsCheck.value || planRevisionConflict.value
   ? { label: action.value === 'check-save' ? '正在核对…' : '核对保存结果', enabled: !rangePickerTarget.value && !pending.value, run: checkSavedPlan }
   : planDirty.value
@@ -234,15 +240,16 @@ async function selectRequest(id: string) {
   if (known) accept(known, true)
   await refresh()
 }
-async function refresh() {
+function refresh() { return refreshScheduler.restart() }
+async function refreshNow(lease: IntentRefreshLease) {
   // Mutations invalidate older reads; do not start a new list read during their POST.
   // Otherwise an exports response captured before creation can erase the new batch.
-  if (refreshing || stopped || pending.value) return
-  refreshing = true
-  const read = scope.begin(), jobId = props.jobId
+  if (stopped || pending.value || props.active === false || document.hidden) return
+  const read = scope.begin(lease.signal), jobId = props.jobId
+  const current = () => read.current() && lease.current() && jobId === props.jobId
   try {
     const raw = await api<{ items: unknown[] }>(`/api/jobs/${jobId}/clip-requests`, { signal: read.signal })
-    if (!read.current() || jobId !== props.jobId) return
+    if (!current()) return
     if (!Array.isArray(raw.items)) throw new IntentResponseError()
     const ids = new Set<string>()
     for (const item of raw.items) {
@@ -258,10 +265,10 @@ async function refresh() {
     const requestId = selectedId.value
     if (requestId) {
       const detail = await api<unknown>(`/api/clip-requests/${requestId}`, { signal: read.signal })
-      if (!read.current() || selectedId.value !== requestId) return
+      if (!current() || selectedId.value !== requestId) return
       accept(parseIntentSnapshot(detail, jobId, requestId))
       const exported = await api<{ items: unknown[] }>(`/api/clip-requests/${requestId}/exports`, { signal: read.signal })
-      if (!read.current() || selectedId.value !== requestId) return
+      if (!current() || selectedId.value !== requestId) return
       if (!Array.isArray(exported.items)) throw new IntentResponseError()
       const incoming = exported.items.map(value => {
         if (!value || typeof value !== 'object' || !('id' in value) || typeof value.id !== 'string') throw new IntentResponseError()
@@ -274,12 +281,8 @@ async function refresh() {
       }
     }
     refreshError.value = ''
-  } catch (value) { if (read.current()) refreshError.value = message(value) }
-  finally { read.release(); refreshing = false; loading.value = false }
-}
-async function poll() {
-  await refresh()
-  if (!stopped) timer = window.setTimeout(() => { void poll() }, 5000)
+  } catch (value) { if (current()) { refreshError.value = message(value); throw value } }
+  finally { read.release(); if (lease.current()) loading.value = false }
 }
 function validOperation(requestId: string, version: number) { return !stopped && selectedId.value === requestId && version === selectionVersion }
 async function create(reconcile = false) {
@@ -752,8 +755,11 @@ watch(outputPartsSignature, () => { stopSequencePreview() }, { flush: 'sync' })
 watch(() => props.videoUrl, () => { pauseMedia() }, { flush: 'sync' })
 watch(pending, value => { if (value) stopSequencePreview() }, { flush: 'sync' })
 watch(() => props.active, value => { if (value === false) { focusVersion++; closeHistory(false); pauseMedia() } }, { flush: 'sync' })
+watch([() => props.active, previewPageVisible, pending, () => !!captionEditor.value?.pending], syncRefreshLifecycle, { flush: 'sync' })
+watch(hasActiveRefreshWork, () => refreshScheduler.reschedule(), { flush: 'sync' })
 onMounted(() => {
-  readCreateReceipt(); window.addEventListener('beforeunload', unload); document.addEventListener('visibilitychange', updatePreviewVisibility); updatePreviewVisibility(); void poll()
+  readCreateReceipt(); window.addEventListener('beforeunload', unload); window.addEventListener('focus', windowFocused)
+  document.addEventListener('visibilitychange', updatePreviewVisibility); updatePreviewVisibility(); syncRefreshLifecycle()
   contextObserver = new ResizeObserver(entries => {
     const width = entries[0]?.contentRect.width
     if (stopped || !width) return
@@ -762,7 +768,7 @@ onMounted(() => {
   })
   if (intentPanel.value) contextObserver.observe(intentPanel.value)
 })
-onBeforeUnmount(() => { stopped = true; selectionVersion++; focusVersion++; closeRangePicker(false); pauseMedia(); contextObserver?.disconnect(); scope.dispose(); window.clearTimeout(timer); window.removeEventListener('beforeunload', unload); document.removeEventListener('visibilitychange', updatePreviewVisibility) })
+onBeforeUnmount(() => { stopped = true; refreshScheduler.dispose(); selectionVersion++; focusVersion++; closeRangePicker(false); pauseMedia(); contextObserver?.disconnect(); scope.dispose(); window.removeEventListener('beforeunload', unload); window.removeEventListener('focus', windowFocused); document.removeEventListener('visibilitychange', updatePreviewVisibility) })
 </script>
 
 <template>
