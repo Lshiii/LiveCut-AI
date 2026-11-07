@@ -119,7 +119,7 @@ defineExpose({ flush: leaving })
 </script>
 
 <template>
-  <section v-if="documentId" class="draft-backup" aria-label="本机草稿备份">
+  <section v-if="documentId" class="draft-backup" :class="{ 'draft-backup-idle': value === null && !history.length && !imported && !writeError && !readError && !importError }" aria-label="本机草稿备份">
     <div class="draft-backup-status"><span>{{ statusText }}</span><button v-if="value !== null" type="button" @click="download()">下载当前草稿</button><button v-if="writeError || readError" type="button" @click="retry">重试本机备份</button><button type="button" @click="fileInput?.click()">导入备份文件</button><input ref="fileInput" type="file" accept=".json,application/json" aria-label="选择本机草稿备份文件" class="draft-backup-file" @change="chooseFile"><button v-if="history.length || imported" type="button" :aria-expanded="open" :aria-controls="`${panelId}-history`" @click="open = !open">{{ open ? '收起历史草稿' : `${imported ? '查看备份' : '查看历史草稿'} ${history.length + (imported ? 1 : 0)} 份` }}</button></div>
     <p v-if="writeError || readError" class="draft-backup-error" role="status">{{ writeError || readError }}</p>
     <p v-if="importError" class="draft-backup-error" role="alert">{{ importError }}</p>
@@ -139,6 +139,10 @@ defineExpose({ flush: leaving })
 
 <style scoped>
 .draft-backup { flex: none; min-width: 0; max-height: min(260px, 35%); overflow-y: auto; overscroll-behavior: contain; border-bottom: 1px solid #e2e8f0; background: #f8fafc; padding: 7px 14px; color: #64748b; font: 12px/1.7 system-ui, sans-serif; }
+.draft-backup-idle { padding-block: 1px; background: #fff; }
+.draft-backup-idle .draft-backup-status { padding-block: 0; background: #fff; }
+.draft-backup-idle .draft-backup-status > span { font-size: 11px; }
+.draft-backup-idle button { min-height: 28px; color: #64748b; }
 .draft-backup p { margin: 4px 0; overflow-wrap: anywhere; }
 .draft-backup-status, .draft-backup-actions, .draft-backup-record > div:first-child { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; min-width: 0; }
 .draft-backup-status > span { margin-right: auto; }

@@ -677,7 +677,7 @@ onMounted(() => {
   contextObserver = new ResizeObserver(entries => {
     const width = entries[0]?.contentRect.width
     if (stopped || !width) return
-    const compact = width <= 900
+    const compact = width <= 760
     if (compact !== compactContext) { compactContext = compact; sourceContextOpen.value = !compact }
   })
   if (intentPanel.value) contextObserver.observe(intentPanel.value)
@@ -688,12 +688,13 @@ onBeforeUnmount(() => { stopped = true; selectionVersion++; focusVersion++; clos
 <template>
   <section ref="intentPanel" class="panel intent-panel" aria-label="按需求找片段" @keydown.esc="closeHistory()">
     <div class="intent-surface" :inert="historyOpen ? true : undefined">
-      <header class="intent-toolbar"><h2>按需剪辑 <span v-if="snapshot" class="status">{{ names[snapshot.status] }}</span></h2><div class="intent-toolbar-actions"><button ref="historyToggle" class="secondary" :aria-expanded="historyOpen" :aria-controls="`intent-history-${jobId}`" @click="toggleHistory">历史请求 {{ requests.length }}</button><button class="text-button" :disabled="pending" @click="refresh">刷新</button></div></header>
+      <header class="intent-toolbar"><h2>按需剪辑 <span v-if="snapshot" class="status">{{ names[snapshot.status] }}</span></h2>
       <nav class="intent-view-tabs" role="tablist" aria-label="按需剪辑流程" @keydown="viewKey">
         <button :id="`intent-view-${jobId}-compose`" role="tab" :aria-controls="`intent-page-${jobId}-compose`" :aria-selected="intentView === 'compose'" :tabindex="intentView === 'compose' ? 0 : -1" @click="setView('compose')">剪辑要求<span v-if="instruction.trim()" class="draft-dot" aria-label="有未提交要求"></span></button>
         <button :id="`intent-view-${jobId}-review`" role="tab" :aria-controls="`intent-page-${jobId}-review`" :aria-selected="intentView === 'review'" :tabindex="intentView === 'review' ? 0 : -1" :disabled="!snapshot" @click="setView('review')">核对方案<span v-if="planDirty" class="draft-dot" aria-label="有未保存修改"></span></button>
         <button :id="`intent-view-${jobId}-deliveries`" role="tab" :aria-controls="`intent-page-${jobId}-deliveries`" :aria-selected="intentView === 'deliveries'" :tabindex="intentView === 'deliveries' ? 0 : -1" :disabled="!snapshot" @click="setView('deliveries')">成片与字幕<span v-if="batches.length" class="intent-view-count">{{ completedClips }}</span></button>
       </nav>
+      <div class="intent-toolbar-actions"><button ref="historyToggle" class="secondary" :aria-expanded="historyOpen" :aria-controls="`intent-history-${jobId}`" @click="toggleHistory">历史请求 {{ requests.length }}</button><button class="text-button" :disabled="pending" @click="refresh">刷新</button></div></header>
       <div class="intent-feedback"><div v-if="error" class="message error" role="alert"><span>{{ error }}</span><button aria-label="关闭剪辑错误" @click="error = ''">×</button></div><p v-if="planRevisionConflict" class="intent-warning" role="status">服务端已更新为 r{{ snapshot?.revision }}，与当前基于 r{{ draftRevision }} 的草稿不同。请先核对保存结果；本地修改仍保留。</p><p v-else-if="saveNeedsCheck" class="intent-warning" role="status">上次保存结果尚未确认。请先核对服务端，当前修改仍保留。</p><p v-if="refreshError" class="intent-warning" role="status">{{ refreshError }} 后台状态会继续刷新，当前修改不受影响。</p><p v-if="notice" class="intent-notice" role="status">{{ notice }}</p></div>
       <DraftBackupPanel kind="intent" :document-id="jobId" :value="backupValue" :blocked="backupBlocked" :assess="assessBackup" @restore="restoreBackup" />
       <div class="intent-views">
@@ -736,7 +737,7 @@ onBeforeUnmount(() => { stopped = true; selectionVersion++; focusVersion++; clos
           <p v-if="unresolved" class="intent-warning">有 {{ unresolved }} 个目标未找到充分证据，不能勾选导出。你可以只确认已经核对的目标，或另建更明确的请求。</p>
           <article v-for="(output, index) in outputs" :key="output.output_id" class="intent-output">
             <div class="intent-output-heading"><label><input v-model="output.enabled" type="checkbox" :disabled="pending || output.status !== 'FOUND'" :aria-label="`选择剪辑目标 ${goal(output)}`">目标 {{ index + 1 }}：{{ goal(output) }}</label><div class="intent-output-actions"><span>{{ names[output.status] }}</span><button class="secondary" :disabled="!canPreviewSequence(output)" :aria-label="`${sequenceSelected(output) ? '停止预览' : '预览'}目标 ${index + 1} 全部区间`" @click="previewSequence(output)">{{ sequenceSelected(output) ? '停止预览' : '预览全部区间' }}</button></div></div>
-            <p class="intent-reason">{{ output.reason }}</p>
+            <details class="intent-reason-details" :open="output.status !== 'FOUND'"><summary>AI 选段说明<span v-if="output.status !== 'FOUND'"> · 需要复核</span></summary><p class="intent-reason">{{ output.reason }}</p></details>
             <label class="intent-title-label">成片标题<input v-model="output.title" maxlength="120" :disabled="pending" :aria-label="`剪辑标题 ${index + 1}`"></label>
             <div v-for="(part, partIndex) in output.parts" :key="partIndex" class="intent-part">
               <div class="intent-part-label"><b>保留第 {{ partIndex + 1 }} 段</b><div class="intent-part-actions"><button class="text-button" :disabled="!canPreviewSequence(output, partIndex)" :aria-label="`${sequenceSelected(output, partIndex) ? '停止预览' : '预览'}目标 ${index + 1} 第 ${partIndex + 1} 段`" @click="previewSequence(output, partIndex)">{{ sequenceSelected(output, partIndex) ? '停止本段' : '预览本段' }}</button><button class="text-button" :disabled="pending" @click="locate(part.start_utterance_id)">定位原视频 ↗</button></div></div>
