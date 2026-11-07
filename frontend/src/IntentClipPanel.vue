@@ -6,6 +6,8 @@ import TextRequestProgress from './TextRequestProgress.vue'
 import { canPrefillClipInstruction } from './videoAgent'
 import CaptionPanel from './CaptionPanel.vue'
 import TranscriptRangePicker from './TranscriptRangePicker.vue'
+import DraftBackupPanel from './DraftBackupPanel.vue'
+import { assessIntentDraft, captureIntentDraft, parseIntentDraft, restoreIntentDraft } from './intentDraft'
 import { CaptionBatchError, prepareCaptionBatch } from './captions'
 import { newestSnapshot, parseExportSnapshot, SnapshotError } from './snapshotStream'
 import { topicTime } from './topics'
@@ -18,9 +20,12 @@ import { intentCanCancel, intentCanConfirm, intentCanExport, intentCanResume, in
   parseResumedIntentSnapshot, type IntentOutput, type IntentResumeReceipt, type IntentSnapshot, type IntentUtterance } from './intentClips'
 
 const props = defineProps<{ jobId: string; videoUrl: string; active?: boolean }>()
-const instruction = ref(''), maxCalls = ref(6), requests = ref<IntentSnapshot[]>([])
+const instruction = ref(''), maxCalls = ref<number | string>(6), requests = ref<IntentSnapshot[]>([])
 const selectedId = ref(''), snapshot = ref<IntentSnapshot | null>(null), outputs = ref<IntentOutput[]>([])
 const baseline = ref(''), draftRevision = ref<number | null>(null), action = ref('')
+const draftBasePlanHash = ref<string | null>(null)
+const draftReadResults = ref<Record<string, IntentSnapshot>>({})
+let draftRestoreVersion = 0
 const saveNeedsCheck = ref(false)
 const error = ref(''), refreshError = ref(''), notice = ref(''), loading = ref(true)
 const batches = ref<ExportJob[]>([]), previewUrl = ref(''), sourcePlayer = ref<HTMLVideoElement | null>(null)
@@ -69,6 +74,16 @@ const planDirty = computed(() => !!snapshot.value?.plan && JSON.stringify(intent
 const planRevisionConflict = computed(() => draftRevision.value !== null && !!snapshot.value?.plan && snapshot.value.revision > draftRevision.value
   && JSON.stringify(intentPayload(outputs.value)) !== JSON.stringify(intentPayload(snapshot.value.plan.outputs)))
 const dirty = computed(() => planDirty.value || planRevisionConflict.value || saveNeedsCheck.value || !!instruction.value.trim() || !!rangePickerEditor.value?.dirty)
+const backupValue = computed(() => {
+  const planChanged = planDirty.value || saveNeedsCheck.value || planRevisionConflict.value || action.value === 'save'
+  if (!instruction.value.length && maxCalls.value === 6 && !planChanged) return null
+  return captureIntentDraft(props.jobId, instruction.value, maxCalls.value, planChanged && snapshot.value?.plan ? {
+    snapshot: snapshot.value, outputs: outputs.value, baseRevision: draftRevision.value,
+    basePlanHash: draftBasePlanHash.value, needsCheck: saveNeedsCheck.value || planRevisionConflict.value || action.value === 'save',
+  } : null)
+})
+const backupBlocked = computed(() => loading.value || props.active === false || historyOpen.value || pending.value || dirty.value
+  || maxCalls.value !== 6 || !!rangePickerTarget.value || !!captionTarget.value || !!captionEditor.value?.dirty || !!captionEditor.value?.pending)
 const validation = computed(() => snapshot.value?.plan
   ? intentOutputValidation(outputs.value, snapshot.value.utterances, snapshot.value.source.duration_ms, snapshot.value.plan.goals) : '')
 const canConfirm = computed(() => !saveNeedsCheck.value && !planRevisionConflict.value && !rangePickerTarget.value && !instruction.value.trim() && intentCanConfirm(snapshot.value, outputs.value, planDirty.value, pending.value))
@@ -154,6 +169,7 @@ function accept(value: IntentSnapshot, force = false) {
   if (force || recovered || (!protectedDraft && !pending.value)) {
     outputs.value = latest.plan ? intentPayload(latest.plan.outputs).outputs : []
     baseline.value = JSON.stringify(intentPayload(outputs.value)); draftRevision.value = latest.revision
+    draftBasePlanHash.value = latest.plan_hash
   }
   if (force || recovered) saveNeedsCheck.value = false
   if (recovered) { error.value = ''; notice.value = `已核对服务端 r${latest.revision} 与本页方案一致，无需重复保存。` }
@@ -171,7 +187,7 @@ async function selectRequest(id: string) {
   if (id === selectedId.value || !canChangeRequest()) return
   pauseMedia(); defaultViewRequest = id; viewChosen = false; intentView.value = 'review'
   scope.invalidate(); selectionVersion++; selectedId.value = id; snapshot.value = null; outputs.value = []
-  baseline.value = ''; draftRevision.value = null; batches.value = []; previewUrl.value = ''; error.value = ''; notice.value = ''
+  baseline.value = ''; draftRevision.value = null; draftBasePlanHash.value = null; batches.value = []; previewUrl.value = ''; error.value = ''; notice.value = ''
   const known = requests.value.find(row => row.id === id)
   if (known) accept(known, true)
   await refresh()
@@ -229,7 +245,7 @@ async function create() {
   if (pending.value || rangePickerTarget.value || !query) return
   if (saveNeedsCheck.value || planRevisionConflict.value) { error.value = '请先核对当前方案的保存结果，再创建其他请求。'; return }
   if ([...query].length > 2000) { error.value = '剪辑要求最多 2000 字。'; return }
-  if (!Number.isInteger(maxCalls.value) || maxCalls.value < 1 || maxCalls.value > 24) { error.value = '模型请求上限须为 1～24 的整数。'; return }
+  if (typeof maxCalls.value !== 'number' || !Number.isInteger(maxCalls.value) || maxCalls.value < 1 || maxCalls.value > 24) { error.value = '模型请求上限须为 1～24 的整数。'; return }
   if (planDirty.value) { error.value = '请先保存或放弃当前方案修改，再创建其他请求。'; return }
   const jobId = props.jobId, payload = { instruction: query, max_text_calls: maxCalls.value }
   const storageKey = `livecut-intent-create-${jobId}`, input = JSON.stringify(payload)
@@ -273,7 +289,7 @@ async function cancelRequest() {
 async function resumeRequest() {
   const source = snapshot.value
   if (!source || !canChangeRequest() || !intentCanResume(source, dirty.value, pending.value)) return
-  if (!Number.isInteger(maxCalls.value) || maxCalls.value < 1 || maxCalls.value > 24) { error.value = '模型请求上限须为 1～24 的整数。'; return }
+  if (typeof maxCalls.value !== 'number' || !Number.isInteger(maxCalls.value) || maxCalls.value < 1 || maxCalls.value > 24) { error.value = '模型请求上限须为 1～24 的整数。'; return }
   const jobId = props.jobId, id = source.id, budget = maxCalls.value
   const storageKey = `livecut-intent-resume-${id}-${budget}`
   let saved: unknown = pendingResumes.get(storageKey)
@@ -370,8 +386,68 @@ function discard() {
     const latest = snapshot.value ? newestIntentSnapshot(snapshot.value, requests.value.find(request => request.id === snapshot.value!.id) ?? snapshot.value) : null
     if (latest) accept(latest, true)
     closeRangePicker(false)
-    instruction.value = ''; error.value = ''; notice.value = ''
+    error.value = ''; notice.value = '方案修改已放弃；剪辑要求页中的新要求保持不变。'
   } catch (value) { fail(value) }
+}
+function assessBackup(raw: unknown) {
+  const draft = parseIntentDraft(raw, props.jobId), id = draft?.plan?.request_id
+  let server: IntentSnapshot | null = null
+  if (id) {
+    try {
+      for (const candidate of [draftReadResults.value[id], requests.value.find(value => value.id === id), snapshot.value?.id === id ? snapshot.value : null]) {
+        if (candidate) server = newestIntentSnapshot(server, candidate)
+      }
+    } catch { return { title: '需要人工核对的剪辑备份', description: '已读取的来源信息不一致，当前内容未改变。', compatible: false, reason: '请下载保留后人工核对，不能覆盖当前方案。' } }
+  }
+  return assessIntentDraft(raw, props.jobId, server)
+}
+function editorDraftSignature() {
+  return JSON.stringify({ selected: selectedId.value, instruction: instruction.value, max_calls: maxCalls.value,
+    revision: draftRevision.value, base_hash: draftBasePlanHash.value, outputs: intentPayload(outputs.value),
+    needs_check: saveNeedsCheck.value, conflict: planRevisionConflict.value })
+}
+async function restoreBackup(raw: unknown) {
+  if (backupBlocked.value) { error.value = '请先保存或放弃当前修改，关闭原句选择和字幕窗口，再恢复备份。'; return }
+  const requested = parseIntentDraft(raw, props.jobId)
+  if (!requested) { error.value = '这份备份无法恢复，原记录仍可下载保留。'; return }
+  const jobId = props.jobId, selection = selectionVersion, navigation = navigationVersion
+  const before = editorDraftSignature(), operation = ++draftRestoreVersion
+  action.value = 'restore-draft'; error.value = ''; notice.value = ''; scope.invalidate()
+  const current = () => !stopped && operation === draftRestoreVersion && props.jobId === jobId
+    && selectionVersion === selection && navigationVersion === navigation && props.active !== false && !historyOpen.value
+    && editorDraftSignature() === before && !dirty.value && maxCalls.value === 6 && !rangePickerTarget.value && !captionTarget.value
+    && !captionEditor.value?.dirty && !captionEditor.value?.pending && action.value === 'restore-draft'
+  try {
+    let server: IntentSnapshot | null = null
+    if (requested.plan) {
+      const id = requested.plan.request_id
+      const response = await api<unknown>(`/api/clip-requests/${id}`)
+      if (!current()) return
+      const fresh = parseIntentSnapshot(response, jobId, id)
+      draftReadResults.value = { ...draftReadResults.value, [id]: fresh }
+      server = newestIntentSnapshot(requests.value.find(value => value.id === id), fresh)
+      draftReadResults.value = { ...draftReadResults.value, [id]: server }
+    }
+    const result = restoreIntentDraft(requested, jobId, server)
+    if (!current()) return
+    if (!result.ok) { error.value = result.reason; return }
+    pauseMedia(); closeHistory(false)
+    if (result.draft.plan && server && result.outputs) {
+      scope.invalidate(); selectionVersion++; selectedId.value = server.id
+      batches.value = []; previewUrl.value = ''; snapshot.value = null; outputs.value = []
+      baseline.value = ''; draftRevision.value = null; draftBasePlanHash.value = null
+      accept(server, true)
+      outputs.value = result.outputs
+      draftRevision.value = result.draft.plan.base_revision; draftBasePlanHash.value = result.draft.plan.base_plan_hash
+      saveNeedsCheck.value = result.draft.plan.needs_check
+      defaultViewRequest = ''; setView('review')
+    } else setView('compose')
+    instruction.value = result.draft.instruction; maxCalls.value = result.draft.max_calls
+    notice.value = result.draft.plan?.needs_check
+      ? '已恢复本机草稿，上次保存结果仍需核对。请先核对保存结果，再决定保存、确认或生成成片。'
+      : '已恢复本机草稿，尚未提交。请核对要求与方案，再手动查找、保存和确认；不会自动生成成片。'
+  } catch (value) { if (current()) fail(value) }
+  finally { if (!stopped && operation === draftRestoreVersion) action.value = '' }
 }
 function addPart(output: IntentOutput) {
   if (pending.value || output.parts.length >= 12) return
@@ -619,13 +695,14 @@ onBeforeUnmount(() => { stopped = true; selectionVersion++; focusVersion++; clos
         <button :id="`intent-view-${jobId}-deliveries`" role="tab" :aria-controls="`intent-page-${jobId}-deliveries`" :aria-selected="intentView === 'deliveries'" :tabindex="intentView === 'deliveries' ? 0 : -1" :disabled="!snapshot" @click="setView('deliveries')">成片与字幕<span v-if="batches.length" class="intent-view-count">{{ completedClips }}</span></button>
       </nav>
       <div class="intent-feedback"><div v-if="error" class="message error" role="alert"><span>{{ error }}</span><button aria-label="关闭剪辑错误" @click="error = ''">×</button></div><p v-if="planRevisionConflict" class="intent-warning" role="status">服务端已更新为 r{{ snapshot?.revision }}，与当前基于 r{{ draftRevision }} 的草稿不同。请先核对保存结果；本地修改仍保留。</p><p v-else-if="saveNeedsCheck" class="intent-warning" role="status">上次保存结果尚未确认。请先核对服务端，当前修改仍保留。</p><p v-if="refreshError" class="intent-warning" role="status">{{ refreshError }} 后台状态会继续刷新，当前修改不受影响。</p><p v-if="notice" class="intent-notice" role="status">{{ notice }}</p></div>
+      <DraftBackupPanel kind="intent" :document-id="jobId" :value="backupValue" :blocked="backupBlocked" :assess="assessBackup" @restore="restoreBackup" />
       <div class="intent-views">
         <div v-show="intentView === 'compose'" :id="`intent-page-${jobId}-compose`" class="intent-compose-view" role="tabpanel" :aria-labelledby="`intent-view-${jobId}-compose`">
           <div class="intent-compose-title"><h3>想从视频里剪出什么？</h3><p class="help">每个目标生成一个视频。先找候选，再由你核对、确认。</p></div>
           <div class="intent-compose"><label for="intent-instruction">剪辑要求<textarea id="intent-instruction" ref="instructionInput" v-model="instruction" :disabled="pending" maxlength="2000" rows="4" placeholder="例如：把缓存失效原因和解决方法分别剪出来，保留完整解释，跳过关注引导。"></textarea></label><div class="intent-create-row"><label>模型请求上限<input v-model.number="maxCalls" type="number" min="1" max="24" :disabled="pending" aria-label="剪辑模型请求上限"></label><span>复用现有转写，不重新提交 ASR。</span><button class="primary" :disabled="pending || !instruction.trim() || planDirty || saveNeedsCheck || planRevisionConflict" @click="create">{{ action === 'create' ? '正在创建…' : '查找片段' }}</button></div></div>
           <p v-if="saveNeedsCheck || planRevisionConflict" class="intent-draft-hint">当前方案的保存结果需要核对，新要求仍保留。<button class="text-button" @click="setView('review')">回到核对方案 →</button></p>
           <p v-else-if="planDirty" class="intent-draft-hint">当前方案有未保存修改。新要求会保留，先回到核对方案保存或放弃修改，再查找。<button class="text-button" @click="setView('review')">回到核对方案 →</button></p>
-          <div v-if="instruction.trim()" class="intent-compose-actions"><button class="text-button" :disabled="pending" @click="instruction = ''">放弃新要求</button></div>
+          <div v-if="instruction.length || maxCalls !== 6" class="intent-compose-actions"><button class="text-button" :disabled="pending" @click="instruction = ''; maxCalls = 6">放弃新要求与请求上限修改</button></div>
           <details class="intent-guide"><summary>查找与自动恢复说明</summary><p>系统复用本视频的转写，返回原句证据与候选范围。短暂错误会在次数和预算上限内自动恢复，已完成的语音转写会保留；每个确认目标生成一个视频。新请求不会覆盖原来的话题草稿或既有成片。</p></details>
         </div>
         <div v-show="intentView === 'review'" :id="`intent-page-${jobId}-review`" class="intent-review-view" role="tabpanel" :aria-labelledby="`intent-view-${jobId}-review`">
@@ -653,7 +730,7 @@ onBeforeUnmount(() => { stopped = true; selectionVersion++; focusVersion++; clos
         <FailureDiagnostic v-if="snapshot.status !== 'CANCELLED'" :error-code="snapshot.stage.error_code" :attempt="snapshot.stage.attempt" />
 
             </aside>
-            <div class="intent-output-list"><div class="intent-subheading"><h3>候选目标 <span v-if="snapshot.plan">{{ outputs.length }} 个 · 已选 {{ selectedCount }} 个 · r{{ draftRevision }}</span></h3><button v-if="dirty" class="text-button" :disabled="pending" @click="discard">放弃本页修改</button></div>
+            <div class="intent-output-list"><div class="intent-subheading"><h3>候选目标 <span v-if="snapshot.plan">{{ outputs.length }} 个 · 已选 {{ selectedCount }} 个 · r{{ draftRevision }}</span></h3><button v-if="planDirty || saveNeedsCheck || planRevisionConflict" class="text-button" :disabled="pending" @click="discard">放弃方案修改</button></div>
               <p v-if="!snapshot.plan" class="intent-empty">{{ snapshot.status === 'FAILED' ? '本次查找未完成。请查看执行原因，原视频和原话题结果仍保留。' : snapshot.status === 'CANCELLED' ? '本次请求已取消。' : snapshot.status === 'RUNNING' ? '正在查找候选片段，执行进度会自动更新。' : '正在等待执行服务生成候选方案。' }}</p>
               <template v-else>
           <p v-if="unresolved" class="intent-warning">有 {{ unresolved }} 个目标未找到充分证据，不能勾选导出。你可以只确认已经核对的目标，或另建更明确的请求。</p>
