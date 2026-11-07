@@ -25,7 +25,7 @@ function Assert-WorkerFlag {
     $occurrences = @($workerLaunchTestState.Arguments | Where-Object { $_ -ceq $Flag })
     if ($occurrences.Count -ne 1 -or $index -lt 0 -or $index + 1 -ge $workerLaunchTestState.Arguments.Count -or
         $workerLaunchTestState.Arguments[$index + 1] -cne $Expected) {
-        throw "Worker flag $Flag did not reach the CLI once with invariant numeric formatting."
+        throw "Worker flag $Flag did not reach the CLI once with its expected value."
     }
 }
 
@@ -62,6 +62,21 @@ try {
             throw 'Launcher did not restore the fixture environment.'
         }
     }
+    $stageCases = @('MEDIA', 'ASR', 'SEGMENT', 'TIMELINE', 'EXPORT_CLIP', 'CAPTION_PROOFREAD', 'ANCHOR_CLIP')
+    $stageJob = '11111111-1111-4111-8111-111111111111'
+    foreach ($stage in $stageCases) {
+        & $launcher -EnvFile $configPath -JavaUrl 'http://127.0.0.1:18083' -WorkerId 'stage-launch-test' -JobId $stageJob -StageType $stage -Once
+        Assert-WorkerFlag '--stage-type' $stage
+        Assert-WorkerFlag '--job-id' $stageJob
+        Assert-WorkerFlag '--java-url' 'http://127.0.0.1:18083'
+        Assert-WorkerFlag '--worker-id' 'stage-launch-test'
+        if (@($workerLaunchTestState.Arguments | Where-Object { $_ -ceq '--once' }).Count -ne 1) {
+            throw 'The one-shot stage selection did not reach the mock CLI exactly once.'
+        }
+        if ([Environment]::GetEnvironmentVariable($variableName, 'Process') -cne 'before-launch') {
+            throw 'Stage launch did not restore the fixture environment.'
+        }
+    }
     $launchCountBeforeInvalid = $workerLaunchTestState.LaunchCount
     $invalidWaits = 0
     foreach ($parameterName in @('RegistrationWaitSeconds', 'ReconnectWaitSeconds')) {
@@ -82,7 +97,23 @@ try {
             }
         }
     }
-    [pscustomobject]@{ status = 'passed'; launches = $workerLaunchTestState.LaunchCount; invalid_waits_rejected = $invalidWaits;
+    $invalidStages = 0
+    foreach ($stage in @('UNKNOWN_STAGE', 'ANCHOR_CLIPS')) {
+        foreach ($path in @($configPath, (Join-Path $testDirectory 'missing.env'))) {
+            $rejected = $false
+            try { & $launcher -EnvFile $path -StageType $stage }
+            catch { $rejected = $_.FullyQualifiedErrorId -like 'ParameterArgumentValidationError*' }
+            if (-not $rejected -or $workerLaunchTestState.LaunchCount -ne $launchCountBeforeInvalid) {
+                throw 'An unknown stage was not rejected before config access or external launch.'
+            }
+            if ([Environment]::GetEnvironmentVariable($variableName, 'Process') -cne 'before-launch') {
+                throw 'An invalid stage changed the process environment.'
+            }
+            $invalidStages++
+        }
+    }
+    [pscustomobject]@{ status = 'passed'; launches = $workerLaunchTestState.LaunchCount; stages_forwarded = $stageCases.Count;
+        invalid_stages_rejected = $invalidStages; invalid_waits_rejected = $invalidWaits;
         registration_default = 45; reconnect_default = 180; culture = 'fr-FR' } | ConvertTo-Json -Compress
 } finally {
     [Globalization.CultureInfo]::CurrentCulture = $originalCulture
