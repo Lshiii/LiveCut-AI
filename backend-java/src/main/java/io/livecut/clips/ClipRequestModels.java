@@ -33,4 +33,15 @@ public final class ClipRequestModels {
         @JsonProperty("resumed_from_request_id") @JsonInclude(JsonInclude.Include.NON_NULL) String resumedFromRequestId,
         @JsonProperty("source_answer") JsonNode sourceAnswer) {}
     public record Page(List<Snapshot> items) {}
+    /** Metadata only: this is neither an editable plan nor proof of its frozen source. */
+    public record HistoryItem(String id,@JsonProperty("job_id") String jobId,
+        @JsonProperty("video_id") String videoId,String instruction,String status,
+        @JsonProperty("state_version") long stateVersion,@JsonProperty("created_at") Instant createdAt,
+        @JsonProperty("updated_at") Instant updatedAt,Budget budget,Source source,long revision,
+        @JsonProperty("plan_hash") String planHash,@JsonProperty("source_mode") String sourceMode) {}
+    public record HistoryPage(@JsonProperty("schema_version") String schemaVersion,
+        @JsonProperty("job_id") String jobId,List<HistoryItem> items,int limit,
+        @JsonProperty("next_cursor") String nextCursor,@JsonProperty("active_count") long activeCount) {
+        public HistoryPage { items=List.copyOf(items); }
+    }
 }

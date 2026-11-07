@@ -13,10 +13,16 @@ const browserClock: IntentRefreshClock = {
   clearTimeout: handle => globalThis.clearTimeout(handle as ReturnType<typeof setTimeout>),
 }
 /** A terminal clipping request can still own an unfinished export. Check both. */
-export function intentHasActiveWork(requests: readonly { status: string }[], batches: readonly { status: string; clips: readonly { status: string }[] }[]): boolean {
+export function intentHasActiveWork(requests: readonly { status: string }[], batches: readonly { status: string; clips: readonly { status: string }[] }[], globalActiveCount?: number | null): boolean {
   const activeStage = new Set(['BLOCKED', 'READY', 'RUNNING', 'RETRY_WAIT'])
-  return requests.some(request => request.status === 'QUEUED' || request.status === 'RUNNING')
+  return typeof globalActiveCount === 'number' && globalActiveCount > 0 || requests.some(request => request.status === 'QUEUED' || request.status === 'RUNNING')
     || batches.some(batch => batch.status === 'QUEUED' || batch.status === 'RUNNING' || batch.clips.some(clip => activeStage.has(clip.status)))
+}
+/** Route probes cannot erase a validated activity sample; selected detail always participates. */
+export function intentHistoryHasActiveWork(history: { protocol: string; activeCount: number | null; legacyKnownActiveCount: number },
+  selected: { status: string } | null, batches: readonly { status: string; clips: readonly { status: string }[] }[]): boolean {
+  const knownCount = history.activeCount ?? history.legacyKnownActiveCount
+  return intentHasActiveWork(selected ? [selected] : [], batches, knownCount)
 }
 
 /** Owns only background GET lifetimes; mutation and draft callbacks stay outside this epoch. */

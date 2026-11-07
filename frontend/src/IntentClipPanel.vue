@@ -17,13 +17,17 @@ import { intentPreviewParts } from './intentPreviewParts'
 import { SequencePreview, type SequencePreviewPart, type SequencePreviewState } from './sequencePreview'
 import { validateTranscriptRange } from './transcriptRange'
 import { intentSaveRecovered } from './intentSaveRecovery'
-import { IntentRefreshScheduler, intentHasActiveWork, type IntentRefreshLease } from './intentRefreshScheduler'
+import { IntentRefreshScheduler, intentHistoryHasActiveWork, type IntentRefreshLease } from './intentRefreshScheduler'
+import { IntentHistoryError, IntentHistoryPager, cacheLegacyIntentDetails, mergeVerifiedIntentDetail, readIntentHistory, type IntentHistoryNavigation } from './intentHistory'
 import { intentCanCancel, intentCanConfirm, intentCanExport, intentCanResume, intentOutputValidation, intentPayload, intentResumeReceipt,
   IntentReadScope, IntentResponseError, newestIntentSnapshot, parseIntentSnapshot, refreshIntentEvidence,
   parseResumedIntentSnapshot, type IntentOutput, type IntentResumeReceipt, type IntentSnapshot, type IntentUtterance } from './intentClips'
 
 const props = defineProps<{ jobId: string; videoUrl: string; videoId?: string; videoHash?: string; active?: boolean }>()
-const instruction = ref(''), maxCalls = ref<number | string>(6), requests = ref<IntentSnapshot[]>([])
+const instruction = ref(''), maxCalls = ref<number | string>(6)
+const history = ref(new IntentHistoryPager()), details = ref(new Map<string, IntentSnapshot>()), historyLoading = ref(false)
+const historyScope = new IntentReadScope()
+let historyVersion = 0, historyProbeRequested = true, historyIsProbing = false, initialHistoryChecked = false
 const answerSelection = ref<AnswerClipSelection | null>(null)
 const selectedId = ref(''), snapshot = ref<IntentSnapshot | null>(null), outputs = ref<IntentOutput[]>([])
 const baseline = ref(''), draftRevision = ref<number | null>(null), action = ref('')
@@ -101,11 +105,16 @@ const selectedCount = computed(() => outputs.value.filter(value => value.enabled
 const unresolved = computed(() => outputs.value.filter(value => value.status !== 'FOUND').length)
 const confirmed = computed(() => !!snapshot.value && snapshot.value.confirmed_revisions.includes(snapshot.value.revision))
 const completedClips = computed(() => batches.value.reduce((count, batch) => count + batch.clips.filter(clip => clip.status === 'SUCCEEDED').length, 0))
-const hasActiveRefreshWork = computed(() => intentHasActiveWork(requests.value, batches.value))
+const hasActiveRefreshWork = computed(() => intentHistoryHasActiveWork(history.value, snapshot.value, batches.value))
 const refreshScheduler = new IntentRefreshScheduler({ refresh: refreshNow, hasActiveWork: () => hasActiveRefreshWork.value })
 function syncRefreshLifecycle() { refreshScheduler.update({ active: props.active !== false, visible: previewPageVisible.value,
   blocked: pending.value || !!captionEditor.value?.pending }) }
-function windowFocused() { syncRefreshLifecycle(); void refreshScheduler.refresh() }
+function windowFocused() {
+  const supersedeLegacyRead = history.value.protocol === 'legacy' && historyLoading.value && !historyIsProbing
+  historyProbeRequested = true; syncRefreshLifecycle()
+  if (supersedeLegacyRead) { cancelHistoryRead(); void refreshScheduler.restart() }
+  else void refreshScheduler.refresh()
+}
 const primaryAction = computed(() => saveNeedsCheck.value || planRevisionConflict.value
   ? { label: action.value === 'check-save' ? '正在核对…' : '核对保存结果', enabled: !rangePickerTarget.value && !pending.value, run: checkSavedPlan }
   : planDirty.value
@@ -165,7 +174,7 @@ function readCreateReceipt(protectInput = false): boolean {
 }
 
 function message(value: unknown) {
-  const code = value instanceof ApiError || value instanceof IntentCreateError ? value.code : value instanceof AnswerClipError ? 'INVALID_ANSWER_SOURCE' : value instanceof IntentResponseError || value instanceof SnapshotError ? 'INVALID_CLIP_RESPONSE' : 'CLIENT_ERROR'
+  const code = value instanceof ApiError || value instanceof IntentCreateError ? value.code : value instanceof IntentHistoryError ? 'INVALID_CLIP_HISTORY_RESPONSE' : value instanceof AnswerClipError ? 'INVALID_ANSWER_SOURCE' : value instanceof IntentResponseError || value instanceof SnapshotError ? 'INVALID_CLIP_RESPONSE' : 'CLIENT_ERROR'
   const messages: Record<string, string> = {
     NETWORK_UNAVAILABLE: '无法连接服务，本页输入和方案修改仍然保留。',
     REQUEST_TIMEOUT: '请求超时。创建或继续查找可再次点击，系统会复用同一个请求标识；其余操作请先重新读取核对服务端状态。',
@@ -176,6 +185,9 @@ function message(value: unknown) {
     INVALID_CLIP_PLAN: '标题、原句区间或证据不符合要求，请检查后再保存。',
     CLIP_PLAN_SOURCE_INVALID: '原自动方案校验未通过，请核对来源或重新查找片段。当前修改仍然保留。',
     INVALID_CLIP_RESPONSE: '返回的剪辑方案不完整、来源不匹配或版本过期，已保留本页内容。',
+    INVALID_CLIP_HISTORY_RESPONSE: '历史列表格式、来源或分页顺序不符合约定，已保留上次有效历史及当前草稿。',
+    INVALID_CLIP_HISTORY_CURSOR: '历史分页标识已失效。当前内容保留，可点击“回到最新”重新读取。',
+    INVALID_CLIP_HISTORY_LIMIT: '历史分页大小不符合服务要求，当前内容保留。',
     MODEL_BUDGET_EXHAUSTED: '本次请求的模型次数已用尽，请查看执行原因，调整要求后另建请求。',
     CLIP_REQUEST_NOT_CANCELLABLE: '当前请求已不在等待或执行状态，无法取消。请核对自动更新后的结果。',
     CLIP_REQUEST_NOT_RESUMABLE: '只有失败或已取消的请求可以继续查找。原请求记录保持不变。',
@@ -200,10 +212,9 @@ async function requireAnchorProtocol(jobId: string) {
   catch { throw new ApiError('ANCHOR_CLIP_UNAVAILABLE') }
 }
 function upsert(value: IntentSnapshot) {
-  const index = requests.value.findIndex(row => row.id === value.id)
-  const latest = newestIntentSnapshot(index < 0 ? undefined : requests.value[index], value)
-  if (index < 0) requests.value.unshift(latest)
-  else requests.value[index] = latest
+  const latest = mergeVerifiedIntentDetail(details.value.get(value.id), value, props.jobId, value.id)
+  details.value = new Map(details.value).set(latest.id, latest)
+  history.value.observeDetail(latest)
   return latest
 }
 function accept(value: IntentSnapshot, force = false) {
@@ -236,11 +247,41 @@ async function selectRequest(id: string) {
   pauseMedia(); defaultViewRequest = id; viewChosen = false; intentView.value = 'review'
   scope.invalidate(); selectionVersion++; selectedId.value = id; snapshot.value = null; outputs.value = []
   baseline.value = ''; draftRevision.value = null; draftBasePlanHash.value = null; batches.value = []; previewUrl.value = ''; error.value = ''; notice.value = ''
-  const known = requests.value.find(row => row.id === id)
-  if (known) accept(known, true)
-  await refresh()
+  // A history summary (or an older cached detail) cannot authorize this selection.
+  await refreshScheduler.restart()
 }
-function refresh() { return refreshScheduler.restart() }
+function cancelHistoryRead() { historyVersion++; historyScope.invalidate(); historyLoading.value = false; historyIsProbing = false }
+function refresh() { historyProbeRequested = true; cancelHistoryRead(); return refreshScheduler.restart() }
+async function refreshHistory(navigation: IntentHistoryNavigation = 'refresh', parent?: AbortSignal): Promise<boolean> {
+  if (stopped || props.active === false || document.hidden || pending.value || navigation === 'refresh' && historyLoading.value) return false
+  if (navigation !== 'refresh') { historyScope.invalidate(); historyVersion++ }
+  const version = historyVersion, jobId = props.jobId, read = historyScope.begin(parent), requestedCursor = history.value.cursorFor(navigation)
+  const current = () => !stopped && props.active !== false && !document.hidden && !pending.value && version === historyVersion && jobId === props.jobId && read.current()
+  const probe = navigation === 'latest' || historyProbeRequested
+  historyProbeRequested = false; historyIsProbing = probe || history.value.protocol !== 'legacy'; historyLoading.value = true
+  try {
+    const result = await readIntentHistory({ pager: history.value, jobId, cursor: requestedCursor, probe, current,
+      fetch: path => api<unknown>(path, { signal: read.signal }) })
+    if (!result || !current()) return false
+    if (result.kind === 'modern') history.value.acceptModern(result.page, navigation, requestedCursor)
+    else {
+      // The compatibility endpoint really contains complete snapshots. Validate
+      // the entire merge before caching any item; summaries never take this path.
+      details.value = cacheLegacyIntentDetails(details.value, result.details, jobId)
+      history.value.acceptLegacy(result.rows, navigation)
+    }
+    return true
+  } catch (value) { if (current()) throw value; return false }
+  finally { read.release(); if (!stopped && version === historyVersion) { historyLoading.value = false; historyIsProbing = false } }
+}
+async function navigateHistory(navigation: 'older' | 'newer' | 'latest') {
+  if (stopped || pending.value || historyLoading.value || props.active === false || document.hidden) return
+  if (navigation === 'older' && !history.value.canOlder || navigation === 'newer' && !history.value.canNewer) return
+  initialHistoryChecked = true
+  if (history.value.view === 'legacy' && navigation !== 'latest') { history.value.stepLegacy(navigation); return }
+  try { if (await refreshHistory(navigation)) refreshError.value = '' }
+  catch (value) { if (!stopped && editorActive()) refreshError.value = message(value) }
+}
 async function refreshNow(lease: IntentRefreshLease) {
   // Mutations invalidate older reads; do not start a new list read during their POST.
   // Otherwise an exports response captured before creation can erase the new batch.
@@ -248,19 +289,14 @@ async function refreshNow(lease: IntentRefreshLease) {
   const read = scope.begin(lease.signal), jobId = props.jobId
   const current = () => read.current() && lease.current() && jobId === props.jobId
   try {
-    const raw = await api<{ items: unknown[] }>(`/api/jobs/${jobId}/clip-requests`, { signal: read.signal })
+    let historyFailure: unknown = null, historyUpdated = false
+    try { historyUpdated = await refreshHistory('refresh', read.signal) } catch (value) { historyFailure = value }
     if (!current()) return
-    if (!Array.isArray(raw.items)) throw new IntentResponseError()
-    const ids = new Set<string>()
-    for (const item of raw.items) {
-      const value = parseIntentSnapshot(item, jobId)
-      if (ids.has(value.id)) throw new IntentResponseError()
-      ids.add(value.id); upsert(value)
-    }
-    requests.value.sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at))
-    if (!selectedId.value && requests.value[0]) {
-      selectedId.value = requests.value[0].id; accept(requests.value[0], true)
-      defaultViewRequest = selectedId.value
+    if (historyUpdated && !initialHistoryChecked) {
+      initialHistoryChecked = true
+      if (!selectedId.value && !dirty.value && history.value.items[0]) {
+        selectedId.value = history.value.items[0].id; defaultViewRequest = selectedId.value
+      }
     }
     const requestId = selectedId.value
     if (requestId) {
@@ -280,6 +316,7 @@ async function refreshNow(lease: IntentRefreshLease) {
         if (!viewChosen && !dirty.value) intentView.value = batches.value.length ? 'deliveries' : 'review'
       }
     }
+    if (historyFailure) throw historyFailure
     refreshError.value = ''
   } catch (value) { if (current()) { refreshError.value = message(value); throw value } }
   finally { read.release(); if (lease.current()) loading.value = false }
@@ -449,7 +486,7 @@ async function exportPlan() {
 function discard() {
   if (pending.value) return
   try {
-    const latest = snapshot.value ? newestIntentSnapshot(snapshot.value, requests.value.find(request => request.id === snapshot.value!.id) ?? snapshot.value) : null
+    const latest = snapshot.value ? newestIntentSnapshot(snapshot.value, details.value.get(snapshot.value.id) ?? snapshot.value) : null
     if (latest) accept(latest, true)
     closeRangePicker(false)
     error.value = ''; notice.value = '方案修改已放弃；剪辑要求页中的新要求保持不变。'
@@ -460,7 +497,7 @@ function assessBackup(raw: unknown) {
   let server: IntentSnapshot | null = null
   if (id) {
     try {
-      for (const candidate of [draftReadResults.value[id], requests.value.find(value => value.id === id), snapshot.value?.id === id ? snapshot.value : null]) {
+      for (const candidate of [draftReadResults.value[id], details.value.get(id), snapshot.value?.id === id ? snapshot.value : null]) {
         if (candidate) server = newestIntentSnapshot(server, candidate)
       }
     } catch { return { title: '需要人工核对的剪辑备份', description: '已读取的来源信息不一致，当前内容未改变。', compatible: false, reason: '请下载保留后人工核对，不能覆盖当前方案。' } }
@@ -501,7 +538,8 @@ async function restoreBackup(raw: unknown) {
       if (!current()) return
       const fresh = parseIntentSnapshot(response, jobId, id)
       draftReadResults.value = { ...draftReadResults.value, [id]: fresh }
-      server = newestIntentSnapshot(requests.value.find(value => value.id === id), fresh)
+      server = mergeVerifiedIntentDetail(details.value.get(id), fresh, jobId, id)
+      details.value = new Map(details.value).set(id, server)
       draftReadResults.value = { ...draftReadResults.value, [id]: server }
     }
     const result = restoreIntentDraft(requested, jobId, server, verifiedAnswers)
@@ -756,6 +794,9 @@ watch(() => props.videoUrl, () => { pauseMedia() }, { flush: 'sync' })
 watch(pending, value => { if (value) stopSequencePreview() }, { flush: 'sync' })
 watch(() => props.active, value => { if (value === false) { focusVersion++; closeHistory(false); pauseMedia() } }, { flush: 'sync' })
 watch([() => props.active, previewPageVisible, pending, () => !!captionEditor.value?.pending], syncRefreshLifecycle, { flush: 'sync' })
+watch([() => props.active, previewPageVisible, pending], ([active, visible, writing]) => {
+  if (active === false || !visible || writing) cancelHistoryRead()
+}, { flush: 'sync' })
 watch(hasActiveRefreshWork, () => refreshScheduler.reschedule(), { flush: 'sync' })
 onMounted(() => {
   readCreateReceipt(); window.addEventListener('beforeunload', unload); window.addEventListener('focus', windowFocused)
@@ -768,7 +809,7 @@ onMounted(() => {
   })
   if (intentPanel.value) contextObserver.observe(intentPanel.value)
 })
-onBeforeUnmount(() => { stopped = true; refreshScheduler.dispose(); selectionVersion++; focusVersion++; closeRangePicker(false); pauseMedia(); contextObserver?.disconnect(); scope.dispose(); window.removeEventListener('beforeunload', unload); window.removeEventListener('focus', windowFocused); document.removeEventListener('visibilitychange', updatePreviewVisibility) })
+onBeforeUnmount(() => { stopped = true; historyVersion++; historyScope.dispose(); refreshScheduler.dispose(); selectionVersion++; focusVersion++; closeRangePicker(false); pauseMedia(); contextObserver?.disconnect(); scope.dispose(); window.removeEventListener('beforeunload', unload); window.removeEventListener('focus', windowFocused); document.removeEventListener('visibilitychange', updatePreviewVisibility) })
 </script>
 
 <template>
@@ -780,7 +821,7 @@ onBeforeUnmount(() => { stopped = true; refreshScheduler.dispose(); selectionVer
         <button :id="`intent-view-${jobId}-review`" role="tab" :aria-controls="`intent-page-${jobId}-review`" :aria-selected="intentView === 'review'" :tabindex="intentView === 'review' ? 0 : -1" :disabled="!snapshot" @click="setView('review')">核对方案<span v-if="planDirty" class="draft-dot" aria-label="有未保存修改"></span></button>
         <button :id="`intent-view-${jobId}-deliveries`" role="tab" :aria-controls="`intent-page-${jobId}-deliveries`" :aria-selected="intentView === 'deliveries'" :tabindex="intentView === 'deliveries' ? 0 : -1" :disabled="!snapshot" @click="setView('deliveries')">成片与字幕<span v-if="batches.length" class="intent-view-count">{{ completedClips }}</span></button>
       </nav>
-      <div class="intent-toolbar-actions"><button ref="historyToggle" class="secondary" :aria-expanded="historyOpen" :aria-controls="`intent-history-${jobId}`" @click="toggleHistory">历史请求 {{ requests.length }}</button><button class="text-button" :disabled="pending" @click="refresh">刷新</button></div></header>
+      <div class="intent-toolbar-actions"><button ref="historyToggle" class="secondary" :aria-expanded="historyOpen" :aria-controls="`intent-history-${jobId}`" @click="toggleHistory">历史请求<span v-if="history.loaded"> · 第 {{ history.pageNumber }} 页</span></button><button class="text-button" :disabled="pending" @click="refresh">刷新</button></div></header>
       <div class="intent-feedback"><div v-if="error" class="message error" role="alert"><span>{{ error }}</span><button aria-label="关闭剪辑错误" @click="error = ''">×</button></div><p v-if="planRevisionConflict" class="intent-warning" role="status">服务端已更新为 r{{ snapshot?.revision }}，与当前基于 r{{ draftRevision }} 的草稿不同。请先核对保存结果；本地修改仍保留。</p><p v-else-if="saveNeedsCheck" class="intent-warning" role="status">上次保存结果尚未确认。请先核对服务端，当前修改仍保留。</p><p v-if="refreshError" class="intent-warning" role="status">{{ refreshError }} 后台状态会继续刷新，当前修改不受影响。</p><p v-if="notice" class="intent-notice" role="status">{{ notice }}</p></div>
       <DraftBackupPanel kind="intent" :document-id="jobId" :value="backupValue" :blocked="backupBlocked" :assess="assessBackup" @restore="restoreBackup" />
       <div class="intent-views">
@@ -853,7 +894,17 @@ onBeforeUnmount(() => { stopped = true; refreshScheduler.dispose(); selectionVer
       <footer v-if="snapshot?.plan" v-show="intentView === 'review'" class="intent-save-row"><p v-if="validation" class="intent-validation" role="status">{{ validation }}</p><div class="intent-save-controls"><span>{{ planRevisionConflict ? '服务端与本地版本不同，当前草稿仍保留' : saveNeedsCheck ? '保存结果待核对，暂不重复提交' : instruction.trim() ? '有尚未提交的新要求，请先提交或放弃输入。' : planDirty ? '方案修改尚未保存' : confirmed ? `r${snapshot.revision} 已确认，可以生成成片。` : '核对并勾选目标，再确认生成' }}</span><div class="actions"><button class="primary" :disabled="!primaryAction.enabled" @click="primaryAction.run">{{ primaryAction.label }}</button></div></div></footer>
     </div>
     <div v-if="historyOpen" class="intent-history-backdrop" aria-hidden="true" @click="closeHistory()"></div>
-    <aside v-show="historyOpen" ref="historyPanel" :id="`intent-history-${jobId}`" class="intent-history" role="dialog" aria-modal="true" aria-label="剪辑请求列表" @keydown="historyKey"><div class="intent-subheading"><h3>历史请求 {{ requests.length }}</h3><button class="text-button" @click="closeHistory()">关闭历史请求</button></div><p v-if="loading" class="help">正在读取请求…</p><p v-else-if="!requests.length" class="help">还没有剪辑请求。填写要求即可开始。</p><div class="intent-request-list"><button v-for="request in requests" :key="request.id" class="intent-request" :class="{ selected: selectedId === request.id }" :aria-pressed="selectedId === request.id" :disabled="pending" @click="selectRequest(request.id)"><strong>{{ request.instruction }}</strong><span>{{ names[request.status] }} · {{ date(request.created_at) }}</span></button></div></aside>
+    <aside v-show="historyOpen" ref="historyPanel" :id="`intent-history-${jobId}`" class="intent-history" role="dialog" aria-modal="true" aria-label="剪辑请求列表" @keydown="historyKey">
+      <div class="intent-subheading"><h3>历史请求</h3><button class="text-button" @click="closeHistory()">关闭历史请求</button></div>
+      <p class="help">第 {{ history.pageNumber }} 页 · 本页 {{ history.items.length }} 条<template v-if="history.activeCount !== null"> · 本视频处理中 {{ history.activeCount }} 项</template></p>
+      <p v-if="historyLoading" class="help" role="status">正在读取历史，当前方案与草稿保留…</p><p v-else-if="history.loaded && !history.items.length" class="help">本页没有剪辑请求。</p>
+      <p v-if="history.protocol === 'legacy'" class="intent-history-hint">兼容列表最多读取最近 100 条，已知处理中 {{ history.legacyKnownActiveCount }} 项；不代表全量历史，分页不改变当前方案。</p>
+      <p v-if="history.upgradeAvailable" class="intent-history-hint">轻量分页已可用。当前旧页保持不变，点击“回到最新”切换。</p>
+      <p v-if="history.unsupportedOldPage" class="intent-history-hint">当前服务未提供这页的分页接口，旧页仍保留。可回到最新读取兼容列表。</p>
+      <p v-if="selectedId && !history.items.some(item => item.id === selectedId)" class="intent-history-hint">当前请求 #{{ selectedId.slice(0, 8) }} 不在本页，当前方案和本页草稿保持不变。</p>
+      <div class="intent-request-list"><button v-for="request in history.items" :key="request.id" class="intent-request" :class="{ selected: selectedId === request.id }" :aria-pressed="selectedId === request.id" :disabled="pending" @click="selectRequest(request.id)"><strong>{{ request.instruction }}</strong><span>{{ names[request.status] }} · {{ date(request.created_at) }}</span><span>r{{ request.revision }} · {{ request.source_mode === 'ANSWER_CITATIONS' ? '所选原句剪辑' : '文字要求' }} · 文本 {{ request.budget.text_calls_reserved }} / {{ request.budget.max_text_calls }}</span></button></div>
+      <div class="intent-history-pagination" role="group" aria-label="历史分页"><button class="secondary" :disabled="pending || historyLoading || !history.canNewer" @click="navigateHistory('newer')">较新一页</button><button class="secondary" :disabled="pending || historyLoading || !history.canOlder" @click="navigateHistory('older')">更早一页</button><button class="text-button" :disabled="pending || historyLoading" @click="navigateHistory('latest')">回到最新</button></div>
+    </aside>
     <CaptionPanel v-if="captionTarget" :key="`${captionTarget.exportId}:${captionTarget.clipId}`" ref="captionEditor" :export-id="captionTarget.exportId" :clip-id="captionTarget.clipId" :content-url="captionTarget.contentUrl" :active="props.active !== false && intentView === 'deliveries' && !historyOpen" @close="captionTarget = null" />
     <TranscriptRangePicker v-if="rangePickerTarget" :key="rangePickerTarget.token" ref="rangePickerEditor" :output="rangePickerTarget.output" :part-index="rangePickerTarget.partIndex" :utterances="rangePickerTarget.utterances" :duration-ms="rangePickerTarget.durationMs" :initial-field="rangePickerTarget.initialField" :initial-time-ms="rangePickerTarget.initialTimeMs" :active="props.active !== false && intentView === 'review' && !historyOpen" :stale="rangePickerStale" @close="rangePickerCloseHandler" @apply="rangePickerApplyHandler" />
   </section>

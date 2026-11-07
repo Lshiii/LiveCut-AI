@@ -45,6 +45,87 @@ class ClipRequestIntegrationTests {
     @AfterEach void cleanup(){for(String id:ownWorkers){jdbc.update("DELETE FROM worker_instance WHERE worker_id=?",id);jdbc.update("DELETE FROM worker_session_history WHERE worker_id=?",id);}ownWorkers.clear();for(String id:ownJobs)jdbc.update("DELETE FROM analysis_job WHERE id=?",id);for(String id:ownVideos)jdbc.update("DELETE FROM video_asset WHERE id=?",id);ownJobs.clear();ownVideos.clear();}
     @AfterAll void stop(){if(app!=null)app.close();}
 
+    @Test void historyForNewSourceHasNoItemsCursorOrActiveRequests()throws Exception{
+        Fixture f=fixture();
+        for(String query:List.of("","?limit=1","?limit=30")){
+            var response=send("GET","/api/jobs/"+f.job()+"/clip-request-history"+query,null,null,false);assertEquals(200,response.statusCode());
+            JsonNode page=JSON.readTree(response.body());assertEquals("1.0",page.path("schema_version").asText());assertEquals(f.job(),page.path("job_id").asText());
+            assertTrue(page.path("items").isArray());assertTrue(page.path("items").isEmpty());assertTrue(page.path("next_cursor").isNull());assertEquals(0,page.path("active_count").asInt());
+            assertEquals(query.isEmpty()?20:Integer.parseInt(query.substring(7)),page.path("limit").asInt());
+        }
+        assertEquals(0,jdbc.queryForObject("SELECT COUNT(*) FROM clip_request WHERE job_id=?",Integer.class,f.job()));
+    }
+
+    @Test void historyTraversesBeyondLegacyLimitWithMicrosecondAndSameTimeTies()throws Exception{
+        Fixture f=fixture();var seed=create(f,4);var time=java.time.LocalDateTime.of(2026,11,7,12,0,0,123456000);
+        List<String> ids=new ArrayList<>();ids.add(seed.id());
+        for(int i=1;i<107;i++){String id=UUID.randomUUID().toString();cloneHistoryRow(seed.id(),id);ids.add(id);}
+        // Millisecond-equal rows exercise DATETIME(6), and tied microseconds exercise ascii_bin UUIDs.
+        Map<String,java.time.LocalDateTime> times=new HashMap<>();
+        for(int i=0;i<ids.size();i++){var created=time.plusNanos((i%3)*1000L);times.put(ids.get(i),created);jdbc.update("UPDATE clip_request SET created_at=?,updated_at=? WHERE id=?",created,created,ids.get(i));}
+        ids.sort(Comparator.<String,java.time.LocalDateTime>comparing(times::get).thenComparing(Comparator.naturalOrder()).reversed());
+        List<String> observed=new ArrayList<>();String cursor=null;int pages=0;
+        do{JsonNode page=history(f.job(),30,cursor);assertEquals("1.0",page.path("schema_version").asText());assertEquals(f.job(),page.path("job_id").asText());assertEquals(107,page.path("active_count").asInt());assertEquals(30,page.path("limit").asInt());for(JsonNode item:page.path("items")){assertEquals(f.job(),item.path("job_id").asText());observed.add(item.path("id").asText());}cursor=page.path("next_cursor").isNull()?null:page.path("next_cursor").asText();pages++;}while(cursor!=null);
+        assertEquals(ids,observed);assertEquals(4,pages);assertEquals(107,new HashSet<>(observed).size());
+    }
+
+    @Test void historyCeilingAndKeysetSurviveConcurrentInsertAndMutableStateChanges()throws Exception{
+        Fixture f=fixture();var seed=create(f,4);var time=java.time.LocalDateTime.of(2026,11,7,12,0,0,123456000);List<String> ids=new ArrayList<>(List.of(seed.id()));
+        for(int i=0;i<5;i++){String id=UUID.randomUUID().toString();cloneHistoryRow(seed.id(),id);ids.add(id);}
+        for(int i=0;i<ids.size();i++)jdbc.update("UPDATE clip_request SET created_at=?,updated_at=? WHERE id=?",time.plusSeconds(i),time,ids.get(i));Collections.reverse(ids);
+        JsonNode first=history(f.job(),2,null);String cursor=first.path("next_cursor").asText();
+        String newest=UUID.randomUUID().toString();CompletableFuture.runAsync(()->{cloneHistoryRow(seed.id(),newest);jdbc.update("UPDATE clip_request SET created_at=?,updated_at=? WHERE id=?",time.plusDays(1),time.plusDays(1),newest);}).join();
+        jdbc.update("UPDATE clip_request SET status='FAILED',state_version=state_version+1,updated_at=? WHERE id=?",time.plusDays(2),ids.getLast());
+        List<String> observed=new ArrayList<>();for(JsonNode item:first.path("items"))observed.add(item.path("id").asText());
+        do{JsonNode page=history(f.job(),2,cursor);assertEquals(6,page.path("active_count").asInt(),"count includes new active rows outside the fixed ceiling and excludes failed rows");for(JsonNode item:page.path("items"))observed.add(item.path("id").asText());cursor=page.path("next_cursor").isNull()?null:page.path("next_cursor").asText();}while(cursor!=null);
+        assertEquals(ids,observed);assertEquals(newest,history(f.job(),2,null).path("items").get(0).path("id").asText());
+    }
+
+    @Test void historyRejectsInvalidForeignForgedAndDeletedBoundariesWithoutWriting()throws Exception{
+        Fixture f=fixture();var a=create(f,4);var b=create(f,4);Fixture other=fixture();
+        JsonNode first=history(f.job(),1,null);String cursor=first.path("next_cursor").asText();
+        assertHistoryError(other.job(),"?cursor="+cursor,400,"INVALID_CLIP_HISTORY_CURSOR");
+        assertHistoryError(f.job(),"?cursor=",400,"INVALID_CLIP_HISTORY_CURSOR");
+        assertHistoryError(f.job(),"?cursor=%25",400,"INVALID_CLIP_HISTORY_CURSOR");
+        for(String limit:List.of("0","31","01","1.0","-1","","1,2"))assertHistoryError(f.job(),"?limit="+limit,400,"INVALID_CLIP_HISTORY_LIMIT");
+        assertHistoryError(UUID.randomUUID().toString(),"",404,"JOB_NOT_FOUND");
+        var decoded=ClipRequestHistoryService.decode(cursor,f.job());
+        var forged=new ClipRequestHistoryService.Cursor(f.job(),new ClipRequestHistoryService.Boundary(decoded.ceiling().createdAt().plusNanos(1000),decoded.ceiling().id()),decoded.after());
+        assertHistoryError(f.job(),"?cursor="+ClipRequestHistoryService.encode(forged),400,"INVALID_CLIP_HISTORY_CURSOR");
+        jdbc.update("DELETE FROM clip_request WHERE id=?",decoded.after().id());
+        assertHistoryError(f.job(),"?cursor="+cursor,400,"INVALID_CLIP_HISTORY_CURSOR");
+        assertEquals(1,jdbc.queryForObject("SELECT COUNT(*) FROM clip_request WHERE job_id=?",Integer.class,f.job()));
+        assertEquals(0,jdbc.queryForObject("SELECT COUNT(*) FROM model_call WHERE job_id IN (?,?)",Integer.class,f.job(),other.job()));
+    }
+
+    @Test void historyResponseDoesNotGrowWithFrozenTranscriptPlanOrAnswerDocuments()throws Exception{
+        Fixture f=fixture();var request=ready(f);String path="/api/jobs/"+f.job()+"/clip-request-history";
+        var before=send("GET",path,null,null,false);assertEquals(200,before.statusCode());
+        JsonNode page=JSON.readTree(before.body()),item=page.path("items").get(0);
+        assertEquals(Set.of("schema_version","job_id","items","limit","next_cursor","active_count"),page.propertyNames());
+        assertEquals(Set.of("id","job_id","video_id","instruction","status","state_version","created_at","updated_at","budget","source","revision","plan_hash","source_mode"),item.propertyNames());
+        assertEquals(20,page.path("limit").asInt());assertTrue(page.path("next_cursor").isNull());assertEquals(request.planHash(),item.path("plan_hash").asText());assertEquals("INSTRUCTION",item.path("source_mode").asText());
+        var huge=JSON.createArrayNode();for(int i=0;i<15000;i++)huge.addObject().put("utterance_id","large-"+i).put("text","合成转写仅测试摘要不读取全文".repeat(10));
+        String source=JSON.writeValueAsString(Map.of("utterances",huge)),plan=JSON.writeValueAsString(Map.of("test_padding","x".repeat(2_000_000)));
+        jdbc.update("UPDATE clip_request SET source_json=? WHERE id=?",source,request.id());jdbc.update("UPDATE clip_plan_revision SET plan_json=? WHERE request_id=?",plan,request.id());
+        var after=send("GET",path,null,null,false);assertEquals(200,after.statusCode());assertArrayEquals(before.body(),after.body(),"history must not serialize or validate full source or plan documents");assertTrue(after.body().length<2000);
+        jdbc.update("UPDATE clip_request SET source_answer_json=?,source_answer_hash=? WHERE id=?",plan,"a".repeat(64),request.id());
+        JsonNode anchored=history(f.job(),20,null).path("items").get(0);assertEquals("ANSWER_CITATIONS",anchored.path("source_mode").asText());assertFalse(anchored.has("source_answer"));
+        assertTrue(send("GET","/api/clip-requests/"+request.id(),null,null,false).statusCode()>=400,"selected detail still validates frozen provenance");
+    }
+
+    @Test void historyReadsDoNotAcquireAnalysisOrRequestWriteLocks()throws Exception{
+        Fixture f=fixture();var request=create(f,4);
+        var template=new org.springframework.transaction.support.TransactionTemplate(app.getBean(org.springframework.transaction.PlatformTransactionManager.class));
+        template.execute(status->{jdbc.queryForObject("SELECT id FROM analysis_job WHERE id=? FOR UPDATE",String.class,f.job());jdbc.queryForObject("SELECT id FROM clip_request WHERE id=? FOR UPDATE",String.class,request.id());
+            var result=CompletableFuture.supplyAsync(()->{try{return history(f.job(),20,null);}catch(Exception error){throw new RuntimeException(error);}});
+            assertDoesNotThrow(()->assertEquals(request.id(),result.get(5,java.util.concurrent.TimeUnit.SECONDS).path("items").get(0).path("id").asText()));return null;});
+    }
+
+    private void cloneHistoryRow(String seed,String id){jdbc.update("INSERT INTO clip_request (id,job_id,video_id,idempotency_key,request_hash,instruction,text_model_id,source_hash,transcript_hash,transcript_key,source_json,duration_ms,max_text_calls) SELECT ?,job_id,video_id,?,request_hash,instruction,text_model_id,source_hash,transcript_hash,transcript_key,source_json,duration_ms,max_text_calls FROM clip_request WHERE id=?",id,"history-"+id,seed);}
+    private JsonNode history(String job,int limit,String cursor)throws Exception{var response=send("GET","/api/jobs/"+job+"/clip-request-history?limit="+limit+(cursor==null?"":"&cursor="+cursor),null,null,false);assertEquals(200,response.statusCode(),()->new String(response.body(),StandardCharsets.UTF_8));return JSON.readTree(response.body());}
+    private void assertHistoryError(String job,String query,int status,String code)throws Exception{var response=send("GET","/api/jobs/"+job+"/clip-request-history"+query,null,null,false);assertEquals(status,response.statusCode());assertEquals(code,JSON.readTree(response.body()).path("error_code").asText());}
+
     @Test void requestsFreezeSourceAndIdempotencyWithoutTouchingAnalysisOrDraft() throws Exception {
         Fixture f=fixture();var before=jobs.get(f.job());String key="intent-"+UUID.randomUUID();
         var first=clips.create(f.job(),new ClipRequestModels.CreateRequest("分别找原因和方法",6),key);

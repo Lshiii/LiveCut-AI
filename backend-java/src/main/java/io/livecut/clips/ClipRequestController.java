@@ -9,11 +9,14 @@ import tools.jackson.databind.JsonNode;
 public class ClipRequestController {
     private final ClipRequestService requests;
     private final ExportService exports;
-    public ClipRequestController(ClipRequestService requests,ExportService exports){this.requests=requests;this.exports=exports;}
+    private final ClipRequestHistoryService history;
+    public ClipRequestController(ClipRequestService requests,ExportService exports,ClipRequestHistoryService history){this.requests=requests;this.exports=exports;this.history=history;}
     @PostMapping("/api/jobs/{jobId}/clip-requests")
     public ClipRequestModels.Snapshot create(@PathVariable String jobId,@RequestBody ClipRequestModels.CreateRequest request,@RequestHeader(value="Idempotency-Key",required=false) String key){return requests.create(jobId,request,key);}
     @GetMapping("/api/jobs/{jobId}/clip-requests")
     public ClipRequestModels.Page list(@PathVariable String jobId){return requests.list(jobId);}
+    @GetMapping("/api/jobs/{jobId}/clip-request-history")
+    public ClipRequestModels.HistoryPage history(@PathVariable String jobId,@RequestParam(required=false) String limit,@RequestParam(required=false) String cursor){return history.list(jobId,limit,cursor);}
     @GetMapping("/api/clip-requests/{id}")
     public ClipRequestModels.Snapshot get(@PathVariable String id){return requests.get(id);}
     @PostMapping("/api/clip-requests/{id}/cancel")

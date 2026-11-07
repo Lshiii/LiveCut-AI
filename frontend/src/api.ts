@@ -37,7 +37,7 @@ export interface ExportJob {
 }
 export interface Page<T> { items: T[]; limit: number; offset: number }
 export class ApiError extends Error {
-  constructor(public code: string, public requestId?: string) { super(code) }
+  constructor(public code: string, public requestId?: string, public status?: number) { super(code) }
 }
 export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   const controller = new AbortController()
@@ -48,7 +48,7 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   try {
     const response = await fetch(path, { cache: 'no-store', ...init, signal: controller.signal })
     const body = await response.json().catch(error => { if (controller.signal.aborted) throw error; return null })
-    if (!response.ok) throw new ApiError(body?.error_code ?? `HTTP_${response.status}`, body?.request_id)
+    if (!response.ok) throw new ApiError(body?.error_code ?? `HTTP_${response.status}`, body?.request_id, response.status)
     if (!body || typeof body !== 'object') throw new ApiError('INVALID_SERVER_RESPONSE')
     return body as T
   } catch (error) {

@@ -233,3 +233,7 @@
 .intent-answer-anchor blockquote strong { color: #9a4f32; font-size: 13px; font-weight: 500; }
 .intent-answer-anchor blockquote p { margin-top: 5px; color: #334155; font-size: 14px; }
 .intent-answer-anchor > button, .intent-anchor-receipt > button { min-height: 36px; margin-top: 8px; }
+
+.intent-panel .intent-history-hint { flex: none; margin: 6px 0; color: #64748b; font-size: 12px; line-height: 1.7; overflow-wrap: anywhere; }
+.intent-history-pagination { display: flex; flex: none; flex-wrap: wrap; justify-content: space-between; gap: 8px; padding-top: 12px; border-top: 1px solid #e2e8f0; }
+.intent-history-pagination > button { min-height: 36px; padding: 7px 10px; }
