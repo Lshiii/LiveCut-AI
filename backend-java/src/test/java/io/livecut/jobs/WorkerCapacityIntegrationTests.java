@@ -207,7 +207,8 @@ class WorkerCapacityIntegrationTests {
         HttpResponse<String> response = http.send(HttpRequest.newBuilder(URI.create(base + "/api/executors")).GET().build(), HttpResponse.BodyHandlers.ofString());
         assertEquals(200, response.statusCode()); assertEquals("no-store", response.headers().firstValue("Cache-Control").orElseThrow());
         assertFalse(response.body().contains(agent.session())); assertFalse(response.body().contains("session_id")); assertFalse(response.body().contains("run_token"));
-        assertEquals(5, JSON.readTree(response.body()).path("stages").size()); assertEquals(3, JSON.readTree(response.body()).path("resources").size());
+        Set<String> stageTypes=new HashSet<>();JSON.readTree(response.body()).path("stages").forEach(stage->stageTypes.add(stage.path("stage_type").asText()));
+        assertEquals(Set.of("MEDIA","ASR","SEGMENT","TIMELINE","EXPORT_CLIP","CAPTION_PROOFREAD"),stageTypes);assertEquals(3, JSON.readTree(response.body()).path("resources").size());
         HttpResponse<String> accepted = http.send(HttpRequest.newBuilder(URI.create(base + "/internal/workers/heartbeat")).header("Content-Type", "application/json").header("X-Worker-Key", KEY)
             .POST(HttpRequest.BodyPublishers.ofString(JSON.writeValueAsString(session(agent)))).build(), HttpResponse.BodyHandlers.ofString());
         assertEquals(200, accepted.statusCode());

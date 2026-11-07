@@ -40,7 +40,7 @@ public class ArtifactVerifier {
     private static final Map<String, Set<String>> REQUIRED_KINDS = Map.of(
             "MEDIA", Set.of("media_info", "audio"), "ASR", Set.of("transcript"),
             "SEGMENT", Set.of("analysis_result"), "TIMELINE", Set.of("analysis_result"),
-            "EXPORT_CLIP", Set.of("clip", "media_info"));
+            "EXPORT_CLIP", Set.of("clip", "media_info"), "CAPTION_PROOFREAD", Set.of("caption_proofread"));
     private static final JsonMapper JSON = JsonMapper.builder()
             .enable(StreamReadFeature.STRICT_DUPLICATE_DETECTION)
             .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS).build();
@@ -100,6 +100,10 @@ public class ArtifactVerifier {
     public VerifiedManifest verifyAgentAnswerManifest(String key,String hash,ManifestIdentity expected) {
         if(expected==null||!"SEGMENT".equals(expected.stageType()))throw invalidReference();
         return verifyManifest(key,hash,expected,null,"agent_answer");
+    }
+    public VerifiedManifest verifyCaptionProofreadManifest(String key,String hash,ManifestIdentity expected) {
+        if(expected==null||!"CAPTION_PROOFREAD".equals(expected.stageType()))throw invalidReference();
+        return verifyManifest(key,hash,expected,null,"caption_proofread");
     }
 
     public JsonNode readJsonArtifact(VerifiedArtifact artifact,ManifestIdentity expected) {

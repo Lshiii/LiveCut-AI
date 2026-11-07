@@ -14,6 +14,17 @@ function snapshot() {
     resources: [{ name: 'FFMPEG', limit: 1, in_use: 0 }, { name: 'ASR', limit: 2, in_use: 0 }, { name: 'TEXT', limit: 2, in_use: 0 }] }
 }
 
+test('proofreading capacity is distinct while a complete legacy executor report remains readable during upgrade', () => {
+  const current = snapshot()
+  assert.ok(parseExecutorSnapshot(current).stages.some(stage => stage.stage_type === 'CAPTION_PROOFREAD'))
+  const legacy = snapshot()
+  legacy.stages = legacy.stages.filter(stage => stage.stage_type !== 'CAPTION_PROOFREAD')
+  legacy.workers[0]!.stage_types = legacy.workers[0]!.stage_types.filter(type => type !== 'CAPTION_PROOFREAD')
+  assert.equal(parseExecutorSnapshot(legacy).stages.length, 5)
+  legacy.workers[0]!.stage_types.push('CAPTION_PROOFREAD')
+  assert.throws(() => parseExecutorSnapshot(legacy), ExecutorSnapshotError)
+})
+
 test('offline leases may occupy resources even when no executor is currently online', () => {
   const value = snapshot()
   value.online_workers = value.total_slots = value.available_slots = 0

@@ -39,6 +39,7 @@ class BudgetTransport(httpx.BaseTransport):
 
             inner = DeadlineHTTPTransport()
         self.inner = inner
+        self._caption_reserved: int | None = None
         self._asr_calls: dict[str, str] = {}
         self._recovery_path = context.directory / "model-call-recovery.json"
         if _native_path(self._recovery_path).exists():
@@ -55,6 +56,50 @@ class BudgetTransport(httpx.BaseTransport):
 
     def close(self) -> None:
         self.inner.close()
+
+    def caption_text_budget(self) -> int | None:
+        """Read the exact caption owner; an unavailable snapshot never opens tools."""
+        lease = self.context.lease
+        config = lease.config.get("agent_turn", {})
+        maximum = lease.config.get("max_text_calls")
+        self.context.guard.check()
+        try:
+            if (lease.stage_type != "CAPTION_PROOFREAD" or not isinstance(config, dict)
+                    or config.get("kind") != "CAPTION" or type(maximum) is not int
+                    or not 1 <= maximum <= 24):
+                return None
+            try:
+                turn = self.client.caption_proofread_turn(config.get("turn_id"))
+            except WorkerClientError:
+                return None
+            if not isinstance(turn, dict):
+                return None
+            stage, budget = turn.get("stage"), turn.get("budget")
+            if (turn.get("id") != config.get("turn_id")
+                    or turn.get("session_id") != config.get("session_id")
+                    or turn.get("job_id") != lease.job_id or not isinstance(stage, dict)
+                    or stage.get("id") != lease.stage_id
+                    or stage.get("stage_type") != "CAPTION_PROOFREAD"):
+                return None
+            if (not isinstance(turn.get("status"), str) or not isinstance(stage.get("status"), str)
+                    or type(stage.get("attempt")) is not int):
+                return None
+            if (turn["status"] != "RUNNING" or stage["status"] != "RUNNING"
+                    or stage["attempt"] != lease.attempt):
+                self.context.guard.lose()
+                self.context.guard.check()
+            if (not isinstance(budget, dict)
+                    or type(budget.get("max_text_calls")) is not int
+                    or budget["max_text_calls"] != maximum
+                    or type(budget.get("text_calls_reserved")) is not int
+                    or not 0 <= budget["text_calls_reserved"] <= maximum
+                    or self._caption_reserved is not None
+                    and budget["text_calls_reserved"] < self._caption_reserved):
+                return None
+            self._caption_reserved = budget["text_calls_reserved"]
+            return maximum - self._caption_reserved
+        finally:
+            self.context.guard.check()
 
     def _update(self, request_id: str, status: str, *, task_id: str | None = None,
                 usage: dict | None = None, response_key: str | None = None,
@@ -195,7 +240,8 @@ class BudgetTransport(httpx.BaseTransport):
             if request.method == "POST" and "/tasks/" in path:
                 return self._query(request)
             return self.inner.handle_request(request)
-        if self.context.lease.stage_type != {"ASR": "ASR", "TEXT": "SEGMENT"}[kind]:
+        allowed = {"ASR": {"ASR"}, "TEXT": {"SEGMENT", "CAPTION_PROOFREAD"}}
+        if self.context.lease.stage_type not in allowed[kind]:
             raise ModelBudgetError("MODEL_OPERATION_NOT_ALLOWED")
         try:
             body = json.loads(request.read())

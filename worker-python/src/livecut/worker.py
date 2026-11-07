@@ -35,7 +35,7 @@ from .topic_contracts import validate_topic_result
 from .topics import discover_topics
 from .worker_client import WorkerClient, WorkerClientError
 
-STAGES = ("MEDIA", "ASR", "SEGMENT", "TIMELINE", "EXPORT_CLIP")
+STAGES = ("MEDIA", "ASR", "SEGMENT", "CAPTION_PROOFREAD", "TIMELINE", "EXPORT_CLIP")
 
 
 class WorkerError(Exception):
@@ -1122,21 +1122,28 @@ class AnalysisStageExecutor:
         self.asr_reuse_source = deepcopy(asr_reuse_source)
 
     def _execute_agent(self, context: StageContext) -> dict:
+        from .caption_proofread import build_caption_proofread, validate_caption_context
         from .video_agent import build_video_answer
 
         lease, directory = context.lease, context.directory
         config = lease.config.get("agent_turn")
+        caption = lease.stage_type == "CAPTION_PROOFREAD"
         required = {"turn_id", "session_id", "question", "source_job_id", "source_transcript_key",
                     "source_transcript_hash", "source_analysis_key", "source_analysis_hash",
                     "duration_ms", "history", "max_tool_steps"}
         if (not isinstance(config, dict) or not required.issubset(config)
                 or config["source_job_id"] != lease.job_id
                 or type(config["duration_ms"]) is not int or config["duration_ms"] <= 0
-                or type(config["max_tool_steps"]) is not int or not 1 <= config["max_tool_steps"] <= 4
+                or type(config["max_tool_steps"]) is not int or not (0 if caption else 1) <= config["max_tool_steps"] <= 4
                 or type(lease.config.get("max_text_calls")) is not int
                 or not 1 <= lease.config["max_text_calls"] <= 24
                 or type(lease.config.get("max_asr_submissions")) is not int
                 or lease.config["max_asr_submissions"] != 0):
+            raise WorkerError("INVALID_AGENT_INPUT")
+        if caption:
+            if config.get("kind") != "CAPTION" or not isinstance(config.get("caption_context"), dict) or config["history"] != []:
+                raise WorkerError("INVALID_CAPTION_PROOFREAD_INPUT")
+        elif config.get("kind", "VIDEO") != "VIDEO" or "caption_context" in config:
             raise WorkerError("INVALID_AGENT_INPUT")
         sources = {}
         for name, stage, kind in (("transcript", "ASR", "transcript"),
@@ -1148,12 +1155,17 @@ class AnalysisStageExecutor:
             sources[name] = _read(path) if name == "analysis" else json.loads(
                 _native_path(path).read_text(encoding="utf-8"))
         analysis, transcript = sources["analysis"], sources["transcript"]
-        validate_topic_result(analysis)
+        if caption and analysis.get("analysis_mode") != "topics":
+            validate_analysis_result(analysis)
+        else:
+            validate_topic_result(analysis)
         if (analysis.get("job_id") != lease.job_id or analysis.get("video_id") != lease.video_id
                 or analysis.get("analysis_generation") != lease.generation
                 or analysis.get("duration_ms") != config["duration_ms"]
                 or analysis.get("utterances") != transcript):
             raise WorkerError("INVALID_AGENT_INPUT")
+        if caption:
+            validate_caption_context(config["caption_context"], transcript, config["duration_ms"], config["source_transcript_hash"])
         if self.transport_factory is None:
             raise WorkerError("DURABLE_BUDGET_REQUIRED")
         embedder = None
@@ -1175,18 +1187,25 @@ class AnalysisStageExecutor:
             from .text_resilience import ResilientTextTransport
 
             client.livecut_resumable_text = isinstance(text_transport, ResilientTextTransport)
-            build_video_answer(transcript, analysis["segments"], config["duration_ms"], config["question"],
-                _native_path(directory), session_id=config["session_id"], turn_id=config["turn_id"],
-                job_id=lease.job_id, video_id=lease.video_id, source_hash=lease.source_hash,
-                transcript_hash=config["source_transcript_hash"], history=config["history"],
+            options = dict(session_id=config["session_id"], turn_id=config["turn_id"], job_id=lease.job_id,
+                video_id=lease.video_id, source_hash=lease.source_hash, transcript_hash=config["source_transcript_hash"],
                 model=lease.config["text_model"], max_calls=lease.config["max_text_calls"],
-                max_tool_steps=config["max_tool_steps"], client=client,
-                base_url=os.environ.get("LIVECUT_TEXT_BASE_URL"), dense_embedder=embedder,
-                embedding_model_id=embedder.model_id if embedder else None,
-                index_cache_dir=_native_path(context.storage_root / "cache" / "intent-index-v1"),
-                guard=context.guard.check)
+                max_tool_steps=min(config["max_tool_steps"], lease.config["max_text_calls"] - 1) if caption else config["max_tool_steps"],
+                client=client, base_url=os.environ.get("LIVECUT_TEXT_BASE_URL"),
+                dense_embedder=embedder, embedding_model_id=embedder.model_id if embedder else None,
+                index_cache_dir=_native_path(context.storage_root / "cache" / "intent-index-v1"), guard=context.guard.check)
+            if caption:
+                budget_reader = getattr(text_transport, "caption_text_budget", None)
+                options["budget_remaining"] = budget_reader if callable(budget_reader) else lambda: None
+                options["max_request_attempts"] = text_transport.policy.max_attempts if isinstance(text_transport, ResilientTextTransport) else 1
+                build_caption_proofread(transcript, config["duration_ms"], config["question"], config["caption_context"],
+                                        _native_path(directory), **options)
+            else:
+                build_video_answer(transcript, analysis["segments"], config["duration_ms"], config["question"],
+                                   _native_path(directory), history=config["history"], **options)
         context.guard.check()
-        artifacts = [context.artifact("agent_answer", directory / "agent-answer.json")]
+        artifacts = [context.artifact("caption_proofread" if caption else "agent_answer",
+                                      directory / ("caption-proofread.json" if caption else "agent-answer.json"))]
         if _native_path(directory / "text-execution-trace.json").is_file():
             artifacts.append(context.artifact("text_execution_trace", directory / "text-execution-trace.json"))
         return {"schema_version": 1, "job_id": lease.job_id, "video_id": lease.video_id,
@@ -1277,6 +1296,10 @@ class AnalysisStageExecutor:
                 raise WorkerError("SOURCE_HASH_MISMATCH")
         if "agent_turn" in config and "clip_request" in config:
             raise WorkerError("INVALID_AGENT_INPUT")
+        if lease.stage_type == "CAPTION_PROOFREAD":
+            if "agent_turn" not in config or "clip_request" in config:
+                raise WorkerError("INVALID_CAPTION_PROOFREAD_INPUT")
+            return self._execute_agent(context)
         if lease.stage_type == "SEGMENT" and "clip_request" in config:
             return self._execute_intent(context)
         if lease.stage_type == "SEGMENT" and "agent_turn" in config:

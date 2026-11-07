@@ -292,6 +292,10 @@ def _digest(value):
 
 
 class ResilientTextTransport(httpx.BaseTransport):
+    def caption_text_budget(self) -> int | None:
+        read = getattr(self.inner, "caption_text_budget", None)
+        return read() if callable(read) else None
+
     def __init__(self, inner, context, *, policy=None, progress=None, sleep=time.sleep,
                  monotonic=time.monotonic, circuit_policy=None):
         self.inner, self.context = inner, context

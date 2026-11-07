@@ -4,6 +4,8 @@ import { api, ApiError, post } from './api'
 import CaptionRenderPanel from './CaptionRenderPanel.vue'
 import DraftBackupPanel from './DraftBackupPanel.vue'
 import CaptionTextTools from './CaptionTextTools.vue'
+import CaptionProofreadPanel from './CaptionProofreadPanel.vue'
+import { applyCaptionProofreadSuggestions, type CaptionProofreadSession, type CaptionProofreadTurn } from './captionProofread'
 import { applyCaptionTextReplacement, captionTextMatches, undoCaptionTextReplacement, type CaptionTextChange, type CaptionTextPreview } from './captionTextTools'
 import { assessCaptionDraft, captionDraftValue, captionSaveCheck, restoreCaptionDraft } from './captionDraft'
 import { captionBase, captionDraftInvalid, captionFileUrl, captionPayload, captionTime, captionValidation, copyCaptionCue, copyCaptionCues,
@@ -17,8 +19,9 @@ const snapshot = ref<CaptionSnapshot | null>(null), cues = ref<CaptionCue[]>([])
 const timeDrafts = ref<CaptionTimeDrafts>({}), action = ref(''), error = ref(''), notice = ref('')
 const saveNeedsCheck = ref(false)
 const onlyReview = ref(false), page = ref(0), acknowledged = ref(false), downloadRevision = ref<number | null>(null)
-const view = ref<'edit' | 'renders'>('edit'), renderEditor = ref<{ pending: boolean } | null>(null)
-const editTab = ref<HTMLButtonElement | null>(null), renderTab = ref<HTMLButtonElement | null>(null)
+const view = ref<'edit' | 'proofread' | 'renders'>('edit'), renderEditor = ref<{ pending: boolean } | null>(null)
+const proofreadEditor = ref<{ pending: boolean } | null>(null)
+const editTab = ref<HTMLButtonElement | null>(null), proofreadTab = ref<HTMLButtonElement | null>(null), renderTab = ref<HTMLButtonElement | null>(null)
 const selectedId = ref(''), playhead = ref(0), deleted = ref<{ cue: CaptionCue; index: number }[]>([])
 const searchQuery = ref(''), searchIgnoreCase = ref(true), textContextEpoch = ref(0)
 const cueList = ref<HTMLElement | null>(null)
@@ -28,7 +31,7 @@ const lastTextBatch = ref<{ contextKey: string; changes: CaptionTextChange[] } |
 let locateVersion = 0
 let stopped = false, version = 0, previewEnd: number | null = null, initialSeek: number | null = null
 const pageSize = 50
-const pending = computed(() => !!action.value || !!renderEditor.value?.pending)
+const pending = computed(() => !!action.value || !!renderEditor.value?.pending || !!proofreadEditor.value?.pending)
 const dirty = computed(() => !!snapshot.value && (saveNeedsCheck.value || JSON.stringify(captionPayload(cues.value)) !== baseline.value || captionDraftInvalid(timeDrafts.value)))
 const validation = computed(() => snapshot.value ? captionValidation(cues.value, snapshot.value.source.duration_ms, timeDrafts.value) : '')
 const requiresReview = computed(() => cues.value.filter(cue => cue.boundary_partial && !cue.reviewed).length)
@@ -216,6 +219,22 @@ function undoTextBatch() {
   if (changes[0]) void locateCue(changes[0].id)
   notice.value = `已撤销最近一次替换的 ${changes.length} 条字幕文字，其他修改保留。仍需核对并保存。`
 }
+function applyAiSuggestions(value: { session: CaptionProofreadSession; turn: CaptionProofreadTurn; cueIds: string[] }) {
+  if (!snapshot.value || pending.value || !props.active || view.value !== 'proofread' || !dialog.value?.open || stopped) return
+  error.value = ''; notice.value = ''
+  const result = applyCaptionProofreadSuggestions(snapshot.value, cues.value, value.session, value.turn, value.cueIds)
+  if (!result.cues) { error.value = result.error; return }
+  const current = new Map(cues.value.map(cue => [cue.id, cue.text]))
+  const selected = new Set(value.cueIds)
+  const changes = result.cues.filter(cue => selected.has(cue.id) && current.get(cue.id) !== cue.text)
+    .map(cue => ({ id: cue.id, before: current.get(cue.id)!, after: cue.text, occurrences: 1 }))
+  if (!changes.length) { error.value = '没有可采纳的字幕修改。'; return }
+  lastTextBatch.value = { contextKey: textContextKey.value, changes }
+  cues.value = result.cues; acknowledged.value = false
+  player.value?.pause(); previewEnd = null; initialSeek = null; view.value = 'edit'
+  void locateCue(changes[0]!.id)
+  notice.value = `已把 ${changes.length} 条 AI 建议采纳到本页草稿，尚未保存或确认。请回看核对；可撤销最近替换。`
+}
 async function locateCue(id: string) {
   const cue = cues.value.find(value => value.id === id)
   if (!cue || pending.value || !mediaActive()) return
@@ -248,12 +267,14 @@ function previewCue(cue: CaptionCue) {
   void video.play().then(() => { if (!mediaActive()) video.pause() }).catch(() => { if (!stopped) notice.value = '点击播放器播放按钮，可继续回看当前字幕。' })
 }
 function showDialog() { if (!stopped && props.active && dialog.value && !dialog.value.open) dialog.value.showModal() }
-function switchView(value: 'edit' | 'renders') { if (!pending.value) view.value = value }
+function switchView(value: 'edit' | 'proofread' | 'renders') { if (!pending.value) view.value = value }
 function viewKey(event: KeyboardEvent) {
   if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key) || pending.value) return
   event.preventDefault()
-  view.value = event.key === 'Home' ? 'edit' : event.key === 'End' ? 'renders' : view.value === 'edit' ? 'renders' : 'edit'
-  void nextTick(() => { if (!stopped && props.active) (view.value === 'edit' ? editTab.value : renderTab.value)?.focus() })
+  const tabs = ['edit', 'proofread', 'renders'] as const
+  const index = tabs.indexOf(view.value)
+  view.value = event.key === 'Home' ? 'edit' : event.key === 'End' ? 'renders' : tabs[(index + (event.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length]!
+  void nextTick(() => { if (!stopped && props.active) (view.value === 'edit' ? editTab.value : view.value === 'proofread' ? proofreadTab.value : renderTab.value)?.focus() })
 }
 function unload(event: BeforeUnloadEvent) { if (dirty.value || pending.value) { event.preventDefault(); event.returnValue = '' } }
 watch([onlyReview, searchQuery, searchIgnoreCase], () => { page.value = 0 }, { flush: 'sync' })
@@ -271,7 +292,7 @@ onBeforeUnmount(() => { stopped = true; version++; player.value?.pause(); dialog
     <p v-if="saveNeedsCheck" class="caption-message" role="status">前次保存结果尚未核对。本页草稿仍保留，核对前不会再次提交保存或确认。</p>
     <p v-if="!snapshot" class="caption-empty">{{ pending ? '正在从已有转写准备字幕，不会重新识别语音。' : '字幕暂不可用。' }}<button v-if="!pending" class="caption-button" @click="initialize">重新读取</button></p>
     <template v-if="snapshot">
-      <div class="caption-view-tabs" role="tablist" aria-label="字幕与带字幕视频" @keydown="viewKey"><button :id="`caption-tab-edit-${exportId}-${clipId}`" ref="editTab" role="tab" :aria-controls="`caption-page-edit-${exportId}-${clipId}`" :aria-selected="view === 'edit'" :tabindex="view === 'edit' ? 0 : -1" :disabled="pending" @click="switchView('edit')">校对字幕<span v-if="dirty" class="caption-draft-dot" aria-label="有未保存修改"></span></button><button :id="`caption-tab-renders-${exportId}-${clipId}`" ref="renderTab" role="tab" :aria-controls="`caption-page-renders-${exportId}-${clipId}`" :aria-selected="view === 'renders'" :tabindex="view === 'renders' ? 0 : -1" :disabled="pending" @click="switchView('renders')">带字幕视频</button></div>
+      <div class="caption-view-tabs" role="tablist" aria-label="字幕与带字幕视频" @keydown="viewKey"><button :id="`caption-tab-edit-${exportId}-${clipId}`" ref="editTab" role="tab" :aria-controls="`caption-page-edit-${exportId}-${clipId}`" :aria-selected="view === 'edit'" :tabindex="view === 'edit' ? 0 : -1" :disabled="pending" @click="switchView('edit')">校对字幕<span v-if="dirty" class="caption-draft-dot" aria-label="有未保存修改"></span></button><button :id="`caption-tab-proofread-${exportId}-${clipId}`" ref="proofreadTab" role="tab" :aria-controls="`caption-page-proofread-${exportId}-${clipId}`" :aria-selected="view === 'proofread'" :tabindex="view === 'proofread' ? 0 : -1" :disabled="pending" @click="switchView('proofread')">AI 校对建议</button><button :id="`caption-tab-renders-${exportId}-${clipId}`" ref="renderTab" role="tab" :aria-controls="`caption-page-renders-${exportId}-${clipId}`" :aria-selected="view === 'renders'" :tabindex="view === 'renders' ? 0 : -1" :disabled="pending" @click="switchView('renders')">带字幕视频</button></div>
       <div :id="`caption-page-edit-${exportId}-${clipId}`" v-show="view === 'edit'" class="caption-edit-page" role="tabpanel" :aria-labelledby="`caption-tab-edit-${exportId}-${clipId}`">
       <details class="caption-backup-tools"><summary><span>本机草稿与备份</span><span>恢复、导入与下载备份</span></summary><DraftBackupPanel kind="caption" :document-id="`${exportId}:${clipId}`" :value="backupValue" :blocked="pending || dirty || !props.active || view !== 'edit'" :assess="assessBackup" @restore="restoreBackup" /></details>
       <div class="caption-main"><details class="caption-watch" :open="previewExpanded" @toggle="previewExpanded = ($event.currentTarget as HTMLDetailsElement).open; if (!previewExpanded) player?.pause()"><summary class="caption-preview-heading"><span>成片预览</span><span>{{ previewExpanded ? '收起预览' : '展开回看' }}</span></summary><div class="caption-watch-content"><div class="caption-video"><video ref="player" :src="contentUrl" controls preload="metadata" playsinline @play="guardPlayback($event); if (!previewExpanded) player?.pause()" @timeupdate="updateTime" @seeking="seeking" @seeked="initialSeek = null"></video><p v-if="currentCue" class="caption-overlay" aria-live="off">{{ currentCue.text }}</p></div><label class="caption-seek">成片播放位置 {{ captionTime(playhead) }} / {{ captionTime(snapshot.source.duration_ms) }}<input type="range" min="0" :max="snapshot.source.duration_ms" :value="playhead" step="1" aria-label="字幕成片时间轴" @input="seek(Number(($event.target as HTMLInputElement).value))"></label><details class="caption-guide"><summary>字幕时间与预览说明</summary><p class="caption-help">字幕以成片开始为 00:00。按原句时间生成，边界截断句需逐条回看核对。</p><p class="caption-help">预览字幕只显示在本页，原 MP4 保持原样；下载包提供独立字幕文件。</p></details><details class="caption-downloads"><summary>下载已确认版本与素材包</summary><template v-if="snapshot.confirmed_revisions.length"><label>版本<select v-model.number="downloadRevision" aria-label="字幕下载版本"><option v-for="rev in snapshot.confirmed_revisions" :key="rev" :value="rev">r{{ rev }}</option></select></label><div v-if="downloadRevision !== null" class="caption-download-links"><a v-for="format in (['srt', 'vtt', 'txt', 'json'] as const)" :key="format" :href="captionFileUrl(snapshot, downloadRevision, format)" download target="_blank" rel="noopener">{{ format === 'json' ? '字幕 JSON' : format.toUpperCase() }}</a><a :href="captionFileUrl(snapshot, downloadRevision, 'package')" download target="_blank" rel="noopener">原视频＋字幕 ZIP</a></div><p v-if="dirty" class="caption-help">当前未保存修改不包含在下载内容中。</p></template><p v-else class="caption-help">保存并确认字幕后，可下载 SRT、VTT、TXT 和原视频素材包。</p></details></div></details>
@@ -296,6 +317,7 @@ onBeforeUnmount(() => { stopped = true; version++; player.value?.pause(); dialog
         </div>
       </footer>
       </div>
+      <div :id="`caption-page-proofread-${exportId}-${clipId}`" v-show="view === 'proofread'" class="caption-render-page" role="tabpanel" :aria-labelledby="`caption-tab-proofread-${exportId}-${clipId}`"><CaptionProofreadPanel ref="proofreadEditor" :snapshot="snapshot" :draft-cues="cues" :caption-dirty="dirty" :caption-pending="!!action || !!renderEditor?.pending" :active="props.active && view === 'proofread'" @apply="applyAiSuggestions" /></div>
       <div :id="`caption-page-renders-${exportId}-${clipId}`" v-show="view === 'renders'" class="caption-render-page" role="tabpanel" :aria-labelledby="`caption-tab-renders-${exportId}-${clipId}`"><CaptionRenderPanel ref="renderEditor" :snapshot="snapshot" :caption-dirty="dirty" :caption-pending="!!action" :active="props.active && view === 'renders'" /></div>
     </template>
   </dialog>
