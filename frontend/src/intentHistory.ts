@@ -1,4 +1,5 @@
 import { newestIntentSnapshot, parseIntentSnapshot, type IntentSnapshot } from './intentClips.ts'
+import { IntentManualReviewError, manualReviewVerified } from './intentManualReview.ts'
 
 export interface IntentHistorySummary {
   id: string; job_id: string; video_id: string; instruction: string; status: IntentSnapshot['status']; state_version: number
@@ -83,7 +84,9 @@ export function intentHistoryRouteMissing(error: unknown): boolean {
 }
 /** Metadata has no authority to populate the full-detail cache or acknowledge a saved draft. */
 export function mergeVerifiedIntentDetail(known: IntentSnapshot | null | undefined, raw: unknown, jobId: string, requestId?: string): IntentSnapshot {
-  return newestIntentSnapshot(known, parseIntentSnapshot(raw, jobId, requestId))
+  const incoming = parseIntentSnapshot(raw, jobId, requestId)
+  if (incoming.manual_review && !manualReviewVerified(incoming)) throw new IntentManualReviewError()
+  return newestIntentSnapshot(known, incoming)
 }
 export function cacheLegacyIntentDetails(known: ReadonlyMap<string, IntentSnapshot>, values: readonly unknown[], jobId: string): Map<string, IntentSnapshot> {
   const next = new Map(known)

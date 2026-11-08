@@ -19,6 +19,10 @@ public class ClipRequestController {
     public ClipRequestModels.HistoryPage history(@PathVariable String jobId,@RequestParam(required=false) String limit,@RequestParam(required=false) String cursor){return history.list(jobId,limit,cursor);}
     @GetMapping("/api/clip-requests/{id}")
     public ClipRequestModels.Snapshot get(@PathVariable String id){return requests.get(id);}
+    @PostMapping("/api/clip-requests/{id}/manual-reviews")
+    public JsonNode manualReview(@PathVariable String id,@RequestBody JsonNode request,@RequestHeader(value="Idempotency-Key",required=false) String key){return requests.createManualReview(id,request,key);}
+    @GetMapping("/api/clip-requests/{id}/manual-reviews/{reviewId}")
+    public JsonNode manualReview(@PathVariable String id,@PathVariable String reviewId){return requests.getManualReview(id,reviewId);}
     @PostMapping("/api/clip-requests/{id}/cancel")
     public ClipRequestModels.Snapshot cancel(@PathVariable String id){return requests.cancel(id);}
     @PostMapping("/api/clip-requests/{id}/resume")

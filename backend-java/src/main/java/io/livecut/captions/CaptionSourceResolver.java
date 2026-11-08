@@ -37,7 +37,7 @@ public class CaptionSourceResolver {
         var owner=jdbc.queryForMap("SELECT * FROM export_job WHERE id=?",exportId);
         if(!"CLEAN".equals(owner.get("render_mode")))throw invalid();
         var job=jdbc.queryForMap("SELECT * FROM analysis_job WHERE id=?",batch.jobId());
-        JsonNode frozen=JSON.readTree(String.valueOf(owner.get("frozen_json")));
+        JsonNode frozen=owner.get("clip_request_id")==null?JSON.readTree(String.valueOf(owner.get("frozen_json"))):exports.verifyClipRequestFrozen(owner);
         if(!ClipRequestService.sha(ClipRequestService.canonicalJson(frozen)).equals(batch.snapshotHash())
             ||!batch.jobId().equals(frozen.path("job_id").asText())||!batch.videoId().equals(frozen.path("video_id").asText())
             ||!frozen.path("generation").isIntegralNumber()||frozen.path("generation").longValue()!=((Number)job.get("generation")).longValue()
