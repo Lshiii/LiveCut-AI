@@ -133,8 +133,11 @@ export function newestAgentSession(known: AgentSession | undefined, incoming: Ag
 export function agentTurnReceipt(previous: AgentReceipt | null, question: string, maxCalls: number, newKey: () => string): AgentReceipt {
   if (!text(question, 2000) || question !== question.trim() || !integer(maxCalls, 1, 24)) invalid()
   const input = JSON.stringify({ question, max_text_calls: maxCalls })
-  return previous?.input === input && typeof previous.key === 'string' && /^[A-Za-z0-9_-]{1,100}$/.test(previous.key)
-    ? previous : { input, key: newKey() }
+  if (previous) {
+    if (previous.input !== input || typeof previous.key !== 'string' || !/^[A-Za-z0-9_-]{1,100}$/.test(previous.key)) invalid()
+    return previous
+  }
+  return { input, key: newKey() }
 }
 export function canPrefillClipInstruction(value: unknown, dirty: boolean, pending: boolean): value is string {
   return !dirty && !pending && text(value, 2000)
