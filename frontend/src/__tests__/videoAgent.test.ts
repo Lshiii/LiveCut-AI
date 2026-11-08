@@ -138,15 +138,16 @@ test('session merging rejects changed source identities and conflicting sequence
   const incoming = completeSession(); incoming.turns[0]!.id = VIDEO
   assert.throws(() => newestAgentSession(known, incoming), AgentResponseError)
 })
-test('same failed submission uses its receipt while changed question or budget gets a new identity', () => {
+test('an unresolved receipt keeps its original identity and refuses changes to question, budget or key', () => {
   let calls = 0
   const next = () => `new-${++calls}`
   const receipt = agentTurnReceipt(null, '缓存原因？', 8, next)
   assert.equal(agentTurnReceipt({ ...receipt }, '缓存原因？', 8, next).key, receipt.key)
-  assert.notEqual(agentTurnReceipt(receipt, '解决方法？', 8, next).key, receipt.key)
-  assert.notEqual(agentTurnReceipt(receipt, '缓存原因？', 4, next).key, receipt.key)
-  assert.notEqual(agentTurnReceipt({ ...receipt, key: 'https://secret' }, '缓存原因？', 8, next).key, receipt.key)
+  assert.throws(() => agentTurnReceipt(receipt, '解决方法？', 8, next), AgentResponseError)
+  assert.throws(() => agentTurnReceipt(receipt, '缓存原因？', 4, next), AgentResponseError)
+  assert.throws(() => agentTurnReceipt({ ...receipt, key: 'https://secret' }, '缓存原因？', 8, next), AgentResponseError)
   assert.throws(() => agentTurnReceipt(receipt, ' 缓存原因？', 8, next), AgentResponseError)
+  assert.equal(calls, 1, 'changed input never allocates a replacement key while the old outcome is unknown')
 })
 test('clip suggestions never overwrite an existing instruction or draft or submit automatically', () => {
   assert.equal(canPrefillClipInstruction('单独剪出原因', false, false), true)

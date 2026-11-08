@@ -57,6 +57,34 @@ public class AgentService {
     public Page list(String jobId){String parent=uuid(jobId);return tx.execute(status->{lockAnalysis(parent);return new Page(jdbc.queryForList("SELECT * FROM agent_session WHERE job_id=? AND kind='VIDEO' ORDER BY created_at DESC,id DESC LIMIT 100",parent).stream().map(this::sessionSnapshot).toList());});}
     public Session getSession(String id){return tx.execute(status->{var owner=lockPublicSession(uuid(id));requireKind(owner,false);return sessionSnapshot(owner);});}
     public Turn getTurn(String id){return tx.execute(status->{var owner=lockPublicOwner(uuid(id));requireKind(owner,false);return turnSnapshot(owner);});}
+    /** Resolves an original submission; business absence alone permits replay of its original key/body. */
+    public Session findSessionSubmission(String jobId,String submissionKey){
+        String parent=uuid(jobId);key(submissionKey);
+        return tx.execute(status->{
+            lockAnalysis(parent);
+            var rows=jdbc.queryForList("SELECT * FROM agent_session WHERE idempotency_key=?",submissionKey);
+            if(rows.isEmpty())throw missing("AGENT_SESSION_SUBMISSION_NOT_FOUND");var found=rows.getFirst();
+            if(!parent.equals(found.get("job_id"))||!"VIDEO".equals(found.get("kind")))throw conflict("IDEMPOTENCY_CONFLICT","Submission belongs to a different conversation owner");
+            var owner=lockSession(String.valueOf(found.get("id")),parent);
+            if(!"VIDEO".equals(owner.get("kind")))throw conflict("IDEMPOTENCY_CONFLICT","Submission belongs to a different conversation owner");
+            if(!sha("agent-session\n"+parent).equals(owner.get("request_hash")))throw invalidSubmission();
+            return sessionSnapshot(owner);
+        });
+    }
+    public Turn findTurnSubmission(String sessionId,String submissionKey){
+        String id=uuid(sessionId);key(submissionKey);
+        return tx.execute(status->{
+            var session=lockPublicSession(id);requireKind(session,false);String parent=String.valueOf(session.get("job_id"));
+            if(!sha("agent-session\n"+parent).equals(session.get("request_hash")))throw invalidSubmission();
+            var rows=jdbc.queryForList("SELECT * FROM agent_turn WHERE idempotency_key=?",submissionKey);
+            if(rows.isEmpty())throw missing("AGENT_TURN_SUBMISSION_NOT_FOUND");var found=rows.getFirst();
+            if(!id.equals(found.get("session_id"))||!parent.equals(found.get("job_id")))throw conflict("IDEMPOTENCY_CONFLICT","Submission belongs to a different conversation owner");
+            var owner=lockOwner(String.valueOf(found.get("id")),parent);requireKind(owner,false);
+            String question=String.valueOf(owner.get("question"));int limit=((Number)owner.get("max_text_calls")).intValue();
+            if(question.isBlank()||question.length()>2000||limit<1||limit>24||!sha("agent-turn\n"+id+"\n"+question+"\n"+limit).equals(owner.get("request_hash")))throw invalidSubmission();
+            return turnSnapshot(owner);
+        });
+    }
     public Turn createTurn(String sessionId,JsonNode input,String key){
         String id=uuid(sessionId);key(key);
         if(input==null||!input.isObject()||!input.has("question")||!Set.of("question","max_text_calls").containsAll(input.propertyNames()))throw bad("INVALID_AGENT_TURN","A question and optional text budget are required");
@@ -323,4 +351,5 @@ public class AgentService {
     private static JobException bad(String code,String message){return new JobException(HttpStatus.BAD_REQUEST,code,message);}
     private static JobException conflict(String code,String message){return new JobException(HttpStatus.CONFLICT,code,message);}
     private static JobException missing(String code){return new JobException(HttpStatus.NOT_FOUND,code,"Requested conversation resource was not found");}
+    private static JobException invalidSubmission(){return conflict("AGENT_SUBMISSION_INVALID","Stored conversation submission failed its original request fingerprint");}
 }

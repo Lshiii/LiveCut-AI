@@ -4,6 +4,8 @@
 
 [agent-answer.schema.json](./agent-answer.schema.json) 定义独立会话轮次的回答、原句引用、工具轨迹与来源身份。JSON Schema 检查固定结构；Java/Python 另行核验本轮实际观察、唯一源顺序、原文与毫秒时间、工具连续步骤、允许的来源及主模型。VIDEO 必须有原句引用，GENERAL/INSUFFICIENT 可无引用；只有实际调用 search_transcript 才记录检索模式。剪辑建议为纯文本，不能自动改审核或导出。接口、限制与恢复见[视频对话 Agent](../docs/45-视频对话Agent.md)。
 
+视频对话提交结果可按原 Idempotency-Key 只读查询，返回既有 Session / Turn 形状，不增加 Worker 字段。仅明确的业务不存在允许原 key/body 重试；未决本机 entry 不因改问题、预算或跨页面操作而覆盖。两个查询路由、旧槽迁移和恢复边界见[视频对话提交结果核对](../docs/62-视频对话提交结果核对.md)。
+
 ## 普通分析的准备产物复用
 
 `POST /api/jobs/{id}/resume-from-asr` 为已完成 MEDIA/ASR 的 topics 任务建立独立新轮次。公开快照的可选 `resumed_from_job_id` 表示来源；私有 `preparation_reuse` 只随认证 claim 下发，结构见 [preparation-reuse.schema.json](./preparation-reuse.schema.json)。Worker 另行核验源与目标身份、manifest、路径和字节哈希，失败不回退付费 ASR。完整状态、预算与并发约束见[执行说明](../docs/40-普通分析复用转写重新执行.md)。

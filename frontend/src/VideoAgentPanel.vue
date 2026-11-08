@@ -6,9 +6,12 @@ import TextRequestProgress from './TextRequestProgress.vue'
 import AgentAnswer from './AgentAnswer.vue'
 import { selectAnswerClip, type AnswerClipSelection } from './answerClip'
 import { topicTime } from './topics'
-import { AgentReadScope, AgentResponseError, agentTurnActive, agentTurnReceipt, canPrefillClipInstruction,
+import { AgentReadScope, AgentResponseError, agentTurnActive, canPrefillClipInstruction,
   newestAgentSession, newestAgentTurn, parseAgentSession, parseAgentTurn,
-  type AgentCitation, type AgentReceipt, type AgentSession, type AgentTurn } from './videoAgent'
+  type AgentCitation, type AgentSession, type AgentTurn } from './videoAgent'
+import { AgentSubmissionError, agentDraftAfterSubmission, agentSubmissionStorageKey, assertAgentSubmissionStored, createAgentSubmission, filterAcknowledgedAgentSubmissions, inspectAgentSubmissionLimit, mergeAgentSubmissionResult, parseAgentSubmissionResponse,
+  removeAgentSubmission, resolveAgentSubmission, restoreAgentSubmission, retainAgentSubmissions, scanAgentSubmissions,
+  type AgentSubmissionEntry, type AgentSubmissionIssue, type AgentSubmissionResult } from './agentSubmissionRecovery'
 
 const props = defineProps<{ jobId: string; videoId: string; videoHash: string; videoUrl: string; clipTargetBusy?: boolean; active?: boolean }>()
 const emit = defineEmits<{ clipInstruction: [instruction: string]; clipAnchor: [selection: AnswerClipSelection] }>()
@@ -21,7 +24,11 @@ const recentCitations = computed(() => recentAnswer.value?.result?.citations ?? 
 const allEvidenceVisible = ref(false)
 const visibleCitations = computed(() => allEvidenceVisible.value ? recentCitations.value : recentCitations.value.slice(0, 3))
 const anchorPreparing = ref(false), anchorChoices = ref<Record<string, string[]>>({})
-const pending = computed(() => !!action.value || anchorPreparing.value), dirty = computed(() => !!question.value.trim())
+const submissionEntries = ref<AgentSubmissionEntry[]>([]), submissionIssues = ref<AgentSubmissionIssue[]>([])
+const ownDurabilityLost = ref(false)
+const fullSessionConflicts = ref<Record<string, boolean>>({})
+const submissionBlocked = computed(() => !!submissionEntries.value.length || !!submissionIssues.value.length)
+const pending = computed(() => !!action.value || anchorPreparing.value), dirty = computed(() => !!question.value.trim() || ownDurabilityLost.value)
 const citation = ref<AgentCitation | null>(null), sourcePlayer = ref<HTMLVideoElement | null>(null), playbackError = ref('')
 const messageList = ref<HTMLOListElement | null>(null)
 const panel = ref<HTMLElement | null>(null), referenceDock = ref<HTMLElement | null>(null), referenceEvidence = ref<HTMLElement | null>(null)
@@ -46,7 +53,12 @@ function historyKey(event: KeyboardEvent) {
   if (event.shiftKey && document.activeElement === buttons[0]) { event.preventDefault(); buttons.at(-1)?.focus() }
   else if (!event.shiftKey && document.activeElement === buttons.at(-1)) { event.preventDefault(); buttons[0]?.focus() }
 }
-const scope = new AgentReadScope(), receiptCache = new Map<string, AgentReceipt>()
+const scope = new AgentReadScope()
+// Only actions this page started own an unacknowledged identity. Passive remote
+// entries remain visible/blocking without being re-created after their owner ACKs.
+const ownUnacknowledged = new Map<string, AgentSubmissionEntry>()
+const acknowledgedSubmissions = new Map<string, AgentSubmissionEntry>()
+let submissionVersion = 0
 let stopped = false, refreshing = false, timer: number | undefined, selectionVersion = 0, previewVersion = 0
 let referenceObserver: ResizeObserver | undefined, pendingCitationPlay: number | null = null, playIntentVersion: number | null = null
 let followLatest = true, initialScrollPending = false
@@ -57,11 +69,11 @@ const toolNames = { search_transcript: '检索视频原句', read_context: '补�
 defineExpose({ dirty, pending })
 
 function message(value: unknown) {
-  const rawCode = value instanceof ApiError ? value.code : value instanceof AgentResponseError ? 'INVALID_AGENT_RESPONSE' : 'CLIENT_ERROR'
+  const rawCode = value instanceof ApiError || value instanceof AgentSubmissionError ? value.code : value instanceof AgentResponseError ? 'INVALID_AGENT_RESPONSE' : 'CLIENT_ERROR'
   const code = typeof rawCode === 'string' && /^[A-Z][A-Z0-9_]{0,99}$/.test(rawCode) ? rawCode : 'CLIENT_ERROR'
   const known: Record<string, string> = {
     NETWORK_UNAVAILABLE: '暂时无法连接服务，输入和已有回答仍保留。',
-    REQUEST_TIMEOUT: '请求超时，问题输入仍保留。再次发送会沿用同一个请求标识，请先等状态刷新核对。',
+    REQUEST_TIMEOUT: '提交结果尚未确认，输入仍保留。请使用下方“核对原提交”，不会因修改问题或预算建立新请求。',
     INVALID_AGENT_RESPONSE: '返回的对话内容不完整或来源不匹配，已保留本页输入和已有回答。',
     AGENT_SESSION_BUSY: '本对话还有一轮正在执行，请等待回答或取消本轮后再提问。',
     AGENT_SESSION_LIMIT: '当前对话已达到轮数上限，请新建对话后继续。',
@@ -73,6 +85,17 @@ function message(value: unknown) {
     AGENT_TURN_NOT_CANCELLABLE: '本轮已结束，请等待状态刷新后再操作。',
     AGENT_STAGE_UNAVAILABLE: '本轮执行状态暂时不可用，请刷新后核对，当前输入仍保留。',
     IDEMPOTENCY_CONFLICT: '请求标识与此前输入不一致，请核对本页问题和已有记录。',
+    AGENT_SUBMISSION_PENDING: '存在尚未核对的原提交，请逐项核对后再新建对话或发送新问题。当前草稿保留。',
+    AGENT_SUBMISSION_STORAGE_UNAVAILABLE: '无法写入并复读本机回执，本次未发送新的请求。已有未决记录和当前草稿保留，请恢复浏览器存储后核对。',
+    AGENT_SUBMISSION_ENTRY_INVALID: '本机存在无法识别的提交回执，未把它当作空记录。请保留下载后核对，暂不能建立新请求。',
+    AGENT_SUBMISSION_LEGACY_INVALID: '旧提交回执格式不符合要求，原记录保留，未替换请求标识或直接重发。',
+    AGENT_SUBMISSION_LEGACY_CHANGED: '迁移期间另一个页面更新了旧回执，两份记录均保留。请刷新回执并逐项核对。',
+    AGENT_SUBMISSION_ENTRY_CONFLICT: '本机原回执已被其他页面移除或更改，尚未把它当作提交成功；请按原标识只读核对。',
+    AGENT_SUBMISSION_SOURCE_MISMATCH: '本机回执与当前视频来源不同，记录仍保留，不能替换原来源或建立新请求。',
+    INVALID_AGENT_SUBMISSION_RESPONSE: '原提交响应的来源、问题或预算不一致，原回执与本页草稿仍保留。',
+    AGENT_SUBMISSION_INVALID: '服务端原提交指纹未通过校验，原回执与本页草稿仍保留。',
+    HTTP_404: '当前服务未提供提交核对路由，请更新服务后重试；原回执保留，未直接重新提问。',
+    RESOURCE_NOT_FOUND: '当前服务未提供提交核对路由，请更新服务后重试；原回执保留，未直接重新提问。',
   }
   return known[code] ?? `对话操作未完成：${code}`
 }
@@ -138,6 +161,7 @@ async function refresh() {
     const incoming = raw.items.map(value => parseSession(value))
     if (new Set(incoming.map(value => value.id)).size !== incoming.length) throw new AgentResponseError()
     for (const value of incoming) upsertSession(value)
+    scanSubmissions()
     if (!selectedId.value && sessions.value[0] && !pending.value) selectedId.value = sessions.value[0].id
     const id = selectedId.value
     if (id) {
@@ -146,69 +170,188 @@ async function refresh() {
       upsertSession(parseSession(detail, id))
     }
     refreshError.value = ''
-  } catch (value) { if (read.current()) refreshError.value = message(value) }
+  } catch (value) {
+    if (read.current()) refreshError.value = value instanceof ApiError && ['NETWORK_UNAVAILABLE', 'REQUEST_TIMEOUT'].includes(value.code)
+      ? '暂时无法刷新对话，已有记录与输入保留。' : message(value)
+  }
   finally { read.release(); refreshing = false; loading.value = false }
 }
 async function poll() { await refresh(); if (!stopped) timer = window.setTimeout(() => { void poll() }, 4000) }
-function readReceipt(key: string): AgentReceipt | null {
-  if (receiptCache.has(key)) return receiptCache.get(key)!
+function submissionOwner() { return { job_id: props.jobId, video_id: props.videoId, video_sha256: props.videoHash } }
+function scanSubmissions() {
   try {
-    const value: unknown = JSON.parse(localStorage.getItem(key) ?? 'null')
-    if (value && typeof value === 'object' && 'input' in value && typeof value.input === 'string' && value.input.length <= 5000
-      && 'key' in value && typeof value.key === 'string' && /^[A-Za-z0-9_-]{1,100}$/.test(value.key)) return value as AgentReceipt
-  } catch { /* A corrupt receipt must not be used to identify a submission. */ }
-  return null
+    const own = [...ownUnacknowledged.values()]
+    const scanned = filterAcknowledgedAgentSubmissions(scanAgentSubmissions(localStorage, submissionOwner(), sessions.value), [...acknowledgedSubmissions.values()])
+    const result = retainAgentSubmissions(own, scanned, localStorage)
+    submissionEntries.value = result.entries; submissionIssues.value = result.issues
+    ownDurabilityLost.value = result.issues.some(issue => own.some(entry => issue.storage_key === agentSubmissionStorageKey(entry)))
+  } catch { submissionIssues.value = [{ storage_key: '', code: 'AGENT_SUBMISSION_STORAGE_UNAVAILABLE' }]; ownDurabilityLost.value = ownUnacknowledged.size > 0 }
 }
-function storeReceipt(key: string, value: AgentReceipt) {
-  receiptCache.set(key, value)
-  try { localStorage.setItem(key, JSON.stringify(value)) } catch { /* Keep the mounted-view receipt. */ }
+function requireNoSubmission() {
+  scanSubmissions()
+  if (submissionIssues.value.length) throw new AgentSubmissionError(submissionIssues.value[0]!.code)
+  if (submissionEntries.value.length) throw new AgentSubmissionError('AGENT_SUBMISSION_PENDING')
 }
-function clearReceipt(key: string, value: AgentReceipt) {
-  receiptCache.delete(key)
-  try { if (readReceipt(key)?.key === value.key) localStorage.removeItem(key) } catch { /* The accepted response remains visible. */ }
+function rememberSubmission(entry: AgentSubmissionEntry) {
+  ownUnacknowledged.set(agentSubmissionStorageKey(entry), entry)
+  submissionEntries.value = retainAgentSubmissions(submissionEntries.value, { entries: [entry], issues: [] }).entries
 }
-async function requestSession(version: number): Promise<AgentSession | null> {
-  const storageKey = `livecut-agent-session-${props.jobId}`, previous = readReceipt(storageKey)
-  const receipt = previous?.input === '{}' ? previous : { input: '{}', key: crypto.randomUUID() }
-  storeReceipt(storageKey, receipt)
-  const raw = await post<unknown>(`/api/jobs/${props.jobId}/agent-sessions`, {}, { 'Idempotency-Key': receipt.key })
-  if (!valid(version)) return null
-  const value = upsertSession(parseSession(raw))
+function acknowledgeSubmission(entry: AgentSubmissionEntry) {
+  removeAgentSubmission(localStorage, entry)
+  acknowledgedSubmissions.set(agentSubmissionStorageKey(entry), JSON.parse(JSON.stringify(entry)) as AgentSubmissionEntry)
+  ownUnacknowledged.delete(agentSubmissionStorageKey(entry))
+  submissionEntries.value = submissionEntries.value.filter(value => agentSubmissionStorageKey(value) !== agentSubmissionStorageKey(entry))
+  scanSubmissions()
+}
+function submissionCurrent(version: number, operation: number, owner: ReturnType<typeof submissionOwner>, sessionId?: string) {
+  return valid(version, sessionId) && operation === submissionVersion && props.active !== false && !document.hidden
+    && owner.job_id === props.jobId && owner.video_id === props.videoId && owner.video_sha256 === props.videoHash
+}
+function postSubmission(entry: AgentSubmissionEntry, posted: () => void = () => {}) {
+  assertAgentSubmissionStored(localStorage, entry)
+  posted()
+  return api<unknown>(entry.kind === 'SESSION' ? `/api/jobs/${entry.job_id}/agent-sessions` : `/api/agent-sessions/${entry.session_id}/turns`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json', 'Idempotency-Key': entry.key }, body: entry.input,
+  })
+}
+async function requestSession(version: number, operation: number): Promise<AgentSession | null> {
+  const owner = submissionOwner()
+  requireNoSubmission()
+  let entry: AgentSubmissionEntry
+  try { entry = createAgentSubmission(localStorage, owner, 'SESSION', '{}', () => crypto.randomUUID(), sessions.value, undefined, [...acknowledgedSubmissions.values()]) }
+  catch (value) { scanSubmissions(); throw value }
+  rememberSubmission(entry)
+  const raw = await postSubmission(entry)
+  if (!submissionCurrent(version, operation, owner)) return null
+  const result = parseAgentSubmissionResponse(raw, entry)
+  if (result.kind !== 'SESSION') throw new AgentSubmissionError()
+  adoptSubmissionResult(result)
+  acknowledgeSubmission(entry)
+  const value = sessions.value.find(session => session.id === result.session.id)!
   selectedId.value = value.id; closePreview()
-  clearReceipt(storageKey, receipt)
   return value
 }
 async function newSession() {
-  if (!canSwitch()) return
+  if (props.active === false || document.hidden || !canSwitch()) return
+  try { requireNoSubmission() } catch (value) { error.value = message(value); return }
   closeHistory(false)
-  scope.invalidate(); const version = ++selectionVersion
+  scope.invalidate(); const version = ++selectionVersion, operation = ++submissionVersion
   action.value = 'session'; error.value = ''; notice.value = ''
-  try { if (await requestSession(version)) notice.value = '新对话已创建，可以围绕这段视频提问。' }
-  catch (value) { if (valid(version)) error.value = message(value) }
-  finally { if (valid(version)) action.value = '' }
+  try { if (await requestSession(version, operation)) notice.value = '新对话已创建，可以围绕这段视频提问。' }
+  catch (value) { if (valid(version) && operation === submissionVersion) { scanSubmissions(); error.value = message(value) } }
+  finally { if (valid(version) && operation === submissionVersion) action.value = '' }
 }
 async function send() {
   const input = question.value.trim(), budget = maxCalls.value
-  if (pending.value || !input) return
+  if (pending.value || !input || props.active === false || document.hidden) return
+  try { requireNoSubmission() } catch (value) { error.value = message(value); return }
   if (input.length > 2000 || !Number.isInteger(budget) || budget < 1 || budget > 24) { error.value = '问题最多 2000 字，模型请求上限须为 1～24 的整数。'; return }
   if (activeTurn.value) { error.value = '本对话还有一轮正在执行，请等待回答或取消本轮后再提问。'; return }
-  scope.invalidate(); const version = ++selectionVersion
+  scope.invalidate(); const version = ++selectionVersion, operation = ++submissionVersion, owner = submissionOwner()
+  const draft = JSON.stringify({ question: question.value, budget: maxCalls.value })
   action.value = 'send'; error.value = ''; notice.value = ''
+  let submitted: AgentSubmissionEntry | null = null, posted = false
   try {
-    const session = selected.value ?? await requestSession(version)
-    if (!session || !valid(version, session.id)) return
-    const storageKey = `livecut-agent-turn-${session.id}`
-    const receipt = agentTurnReceipt(readReceipt(storageKey), input, budget, () => crypto.randomUUID())
-    storeReceipt(storageKey, receipt)
-    const raw = await post<unknown>(`/api/agent-sessions/${session.id}/turns`, { question: input, max_text_calls: budget }, { 'Idempotency-Key': receipt.key })
-    if (!valid(version, session.id)) return
-    const turn = parseAgentTurn(raw, session)
-    if (turn.question !== input || turn.budget.max_text_calls !== budget) throw new AgentResponseError()
-    upsertTurn(turn, session.id); clearReceipt(storageKey, receipt); question.value = ''; followLatest = true; scrollToLatest(true)
+    const session = selected.value ?? await requestSession(version, operation)
+    if (!session || !submissionCurrent(version, operation, owner, session.id)) return
+    requireNoSubmission()
+    let entry: AgentSubmissionEntry
+    try { entry = createAgentSubmission(localStorage, owner, 'TURN', JSON.stringify({ question: input, max_text_calls: budget }), () => crypto.randomUUID(), sessions.value, session, [...acknowledgedSubmissions.values()]) }
+    catch (value) { scanSubmissions(); throw value }
+    rememberSubmission(entry)
+    submitted = entry
+    const raw = await postSubmission(entry, () => { posted = true })
+    if (!submissionCurrent(version, operation, owner, session.id)) return
+    const result = parseAgentSubmissionResponse(raw, entry, session)
+    if (result.kind !== 'TURN') throw new AgentSubmissionError()
+    adoptSubmissionResult(result); acknowledgeSubmission(entry)
+    if (draft === JSON.stringify({ question: question.value, budget: maxCalls.value })) question.value = ''
+    followLatest = true; scrollToLatest(true)
     notice.value = '问题已保存，回答与引用会自动更新。'
-  } catch (value) { if (valid(version)) error.value = message(value) }
-  finally { if (valid(version)) action.value = '' }
+  } catch (value) {
+    const current = () => submissionCurrent(version, operation, owner)
+    if (current()) {
+      scanSubmissions(); error.value = message(value)
+      if (submitted && posted) await inspectLimitAfterPost(submitted, value, current)
+    }
+  }
+  finally { if (valid(version) && operation === submissionVersion) action.value = '' }
 }
+async function reconcileSubmission(entry: AgentSubmissionEntry) {
+  if (pending.value || stopped || props.active === false || document.hidden) return
+  scope.invalidate(); const version = ++selectionVersion, operation = ++submissionVersion, owner = submissionOwner()
+  rememberSubmission(entry)
+  const current = () => submissionCurrent(version, operation, owner)
+  action.value = `recover:${entry.key}`; error.value = ''; notice.value = ''
+  let posted = false
+  try {
+    const result = await resolveAgentSubmission(entry, {
+      get: () => api<unknown>(entry.kind === 'SESSION' ? `/api/jobs/${entry.job_id}/agent-session-submissions/${entry.key}` : `/api/agent-sessions/${entry.session_id}/turn-submissions/${entry.key}`),
+      readSession: () => api<unknown>(`/api/agent-sessions/${entry.session_id}`), current,
+      beforePost: () => { if (!current()) throw new AgentSubmissionError('AGENT_SUBMISSION_PENDING'); restoreAgentSubmission(localStorage, entry) },
+      post: () => postSubmission(entry, () => { posted = true }),
+    })
+    if (!result || !current()) return
+    adoptAcknowledgedSubmission(entry, result)
+    notice.value = entry.kind === 'SESSION' ? '原对话提交已核对，本页问题与预算保留，尚未自动提问。'
+      : '原问题提交已核对；成功、失败或取消均保留原轮次。本页问题与预算仍保留，不会自动再提问。'
+  } catch (value) { if (current()) { scanSubmissions(); error.value = message(value); if (posted) await inspectLimitAfterPost(entry, value, current) } }
+  finally { if (valid(version) && operation === submissionVersion) action.value = '' }
+}
+function adoptSubmissionResult(result: AgentSubmissionResult) {
+  const known = sessions.value.find(value => value.id === result.session.id)
+  upsertSession(mergeAgentSubmissionResult(known, result))
+  if (!selectedId.value) selectedId.value = result.session.id
+}
+function adoptAcknowledgedSubmission(entry: AgentSubmissionEntry, result: AgentSubmissionResult) {
+  const nextQuestion = agentDraftAfterSubmission(entry, { session_id: selectedId.value, question: question.value, budget: maxCalls.value })
+  adoptSubmissionResult(result); acknowledgeSubmission(entry); question.value = nextQuestion
+}
+function inspectLimit(entry: AgentSubmissionEntry, current: () => boolean) {
+  return inspectAgentSubmissionLimit(entry, {
+    get: () => api<unknown>(`/api/agent-sessions/${entry.session_id}/turn-submissions/${entry.key}`),
+    readSession: () => api<unknown>(`/api/agent-sessions/${entry.session_id}`), current,
+  })
+}
+async function inspectLimitAfterPost(entry: AgentSubmissionEntry, value: unknown, current: () => boolean) {
+  if (entry.kind !== 'TURN' || !(value instanceof ApiError) || value.status !== 409 || value.code !== 'AGENT_SESSION_LIMIT') return
+  try {
+    const result = await inspectLimit(entry, current)
+    if (!result || !current()) return
+    if (result.kind === 'completed') { adoptAcknowledgedSubmission(entry, result.result); notice.value = '原轮次已经找到并核对，未建立新请求。' }
+    else { fullSessionConflicts.value = { ...fullSessionConflicts.value, [agentSubmissionStorageKey(entry)]: true }; error.value = ''; notice.value = '原问题未落库，原会话已达到 100 轮。回执仍保留，可下载后明确解除本条阻塞。' }
+  } catch (failure) { if (current()) { scanSubmissions(); error.value = message(failure) } }
+}
+async function releaseFullSession(entry: AgentSubmissionEntry) {
+  if (pending.value || !fullSessionConflicts.value[agentSubmissionStorageKey(entry)] || props.active === false || document.hidden) return
+  const version = ++selectionVersion, operation = ++submissionVersion, owner = submissionOwner()
+  const current = () => submissionCurrent(version, operation, owner)
+  action.value = `release:${entry.key}`; error.value = ''; notice.value = ''
+  try {
+    const result = await inspectLimit(entry, current)
+    if (!result || !current()) return
+    if (result.kind === 'completed') { adoptAcknowledgedSubmission(entry, result.result); notice.value = '原轮次已经出现并核对，未按未落库删除。' }
+    else { upsertSession(result.session); acknowledgeSubmission(entry); notice.value = '已明确解除本条未落库提交，原草稿保留；尚未创建新对话或发送问题。' }
+    delete fullSessionConflicts.value[agentSubmissionStorageKey(entry)]
+  } catch (value) { if (current()) error.value = message(value) }
+  finally { if (valid(version) && operation === submissionVersion) action.value = '' }
+}
+function downloadSubmission(entry: AgentSubmissionEntry) {
+  const url = URL.createObjectURL(new Blob([JSON.stringify(entry, null, 2)], { type: 'application/json' }))
+  const link = document.createElement('a'); link.href = url; link.download = `agent-${entry.kind.toLowerCase()}-${entry.key}.json`; link.click()
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000)
+}
+function originalQuestion(entry: AgentSubmissionEntry): string { return entry.kind === 'TURN' ? JSON.parse(entry.input).question : '新建视频对话' }
+function originalBudget(entry: AgentSubmissionEntry): number | null { return entry.kind === 'TURN' ? JSON.parse(entry.input).max_text_calls : null }
+function submissionStorageChanged(event: StorageEvent) {
+  if (event.key === null || event.key.startsWith(`livecut-agent-submission-v1:${props.jobId}:`) || event.key === `livecut-agent-session-${props.jobId}`
+    || sessions.value.some(session => event.key === `livecut-agent-turn-${session.id}`)) scanSubmissions()
+}
+function invalidateSubmission() {
+  submissionVersion++
+  if (action.value === 'send' || action.value === 'session' || action.value.startsWith('recover:') || action.value.startsWith('release:')) action.value = ''
+}
+function submissionVisibilityChanged() { if (document.hidden) invalidateSubmission(); else scanSubmissions() }
 async function cancel(turn: AgentTurn) {
   const session = selected.value
   if (pending.value || !session || !agentTurnActive(turn)) return
@@ -278,8 +421,10 @@ function guardPlayback(event: Event) { if (!mediaActive()) (event.currentTarget 
 function closePreview() { pauseReference(); citation.value = null; playbackError.value = '' }
 function previewTime() { if (sourcePlayer.value && citation.value && sourcePlayer.value.currentTime >= citation.value.end_ms / 1000) sourcePlayer.value.pause() }
 function date(value: string) { return new Date(value).toLocaleString('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }) }
-function unload(event: BeforeUnloadEvent) { if (dirty.value || pending.value) { event.preventDefault(); event.returnValue = '' } }
+function unload(event: BeforeUnloadEvent) { scanSubmissions(); if (dirty.value || pending.value || submissionBlocked.value) { event.preventDefault(); event.returnValue = '' } }
 onMounted(() => {
+  scanSubmissions(); window.addEventListener('storage', submissionStorageChanged); window.addEventListener('focus', scanSubmissions)
+  document.addEventListener('visibilitychange', submissionVisibilityChanged)
   window.addEventListener('beforeunload', unload); void poll()
   referenceObserver = new ResizeObserver(entries => {
     const width = entries[0]?.contentRect.width
@@ -297,11 +442,11 @@ watch(() => {
   return `${selectedId.value}:${last?.id ?? ''}:${last?.state_version ?? 0}`
 }, () => { if (initialScrollPending || followLatest) scrollToLatest() }, { flush: 'post' })
 watch(() => props.active, value => {
-  if (value === false) { closeHistory(false); pauseReference() }
-  else if (initialScrollPending) scrollToLatest(true)
+  if (value === false) { invalidateSubmission(); closeHistory(false); pauseReference() }
+  else { scanSubmissions(); if (initialScrollPending) scrollToLatest(true) }
 }, { flush: 'sync' })
 watch(referenceVisible, value => { if (!value) pauseReference() }, { flush: 'sync' })
-onBeforeUnmount(() => { stopped = true; selectionVersion++; pauseReference(); referenceObserver?.disconnect(); scope.dispose(); window.clearTimeout(timer); window.removeEventListener('beforeunload', unload) })
+onBeforeUnmount(() => { scanSubmissions(); stopped = true; submissionVersion++; selectionVersion++; pauseReference(); referenceObserver?.disconnect(); scope.dispose(); window.clearTimeout(timer); window.removeEventListener('beforeunload', unload); window.removeEventListener('storage', submissionStorageChanged); window.removeEventListener('focus', scanSubmissions); document.removeEventListener('visibilitychange', submissionVisibilityChanged) })
 </script>
 
 <template>
@@ -309,6 +454,16 @@ onBeforeUnmount(() => { stopped = true; selectionVersion++; pauseReference(); re
     <div v-if="sessionListOpen" class="agent-history-backdrop" aria-hidden="true" @click="closeHistory()"></div>
     <p v-if="error" class="message error" role="alert">{{ error }}</p><p v-if="notice" class="message notice" role="status">{{ notice }}</p>
     <p v-if="refreshError" class="agent-refresh-error" role="status">{{ refreshError }} 已有记录与输入仍保留。</p>
+    <section v-if="submissionBlocked" class="agent-submission-recovery" aria-label="待核对的原提交">
+      <div class="agent-section-heading"><h3>原提交结果待核对 · {{ submissionEntries.length }} 条</h3><button class="text-button" :disabled="pending" @click="scanSubmissions">刷新本机回执</button></div>
+      <p>可继续编辑本页草稿；新对话和新提问暂时停止。逐项核对会使用原标识与原内容，不会自动再发其他问题。</p>
+      <p v-for="issue in submissionIssues" :key="issue.storage_key + issue.code" class="agent-submission-error" role="alert">{{ message(new AgentSubmissionError(issue.code)) }}</p>
+      <article v-for="entry in submissionEntries" :key="agentSubmissionStorageKey(entry)" class="agent-submission-entry">
+        <strong>{{ entry.kind === 'SESSION' ? '新建对话' : '提交问题' }} · #{{ entry.key.slice(0, 8) }}</strong><p class="agent-original-question">{{ originalQuestion(entry) }}</p><p v-if="entry.kind === 'TURN'">原预算上限 {{ originalBudget(entry) }} 次 · 原对话 #{{ entry.session_id?.slice(0, 8) }}</p>
+        <div class="agent-submission-actions"><button class="secondary" :disabled="pending || active === false" @click="reconcileSubmission(entry)">{{ action === `recover:${entry.key}` ? '正在核对…' : '核对原提交' }}</button><button class="text-button" @click="downloadSubmission(entry)">下载原回执</button></div>
+        <div v-if="fullSessionConflicts[agentSubmissionStorageKey(entry)]" class="agent-submission-limit"><p>已核对原标识仍不存在，原会话恰有 100 轮。解除前将再次只读核对，不会自动新建对话或提问。</p><button class="secondary" :disabled="pending || active === false" @click="releaseFullSession(entry)">解除本条未落库提交</button></div>
+      </article>
+    </section>
     <div class="agent-layout" :class="{ 'conversation-focused': conversationFocused && !compactReference }">
       <aside v-show="sessionListOpen" ref="historyPanel" role="dialog" aria-modal="true" @keydown="historyKey" :id="`agent-history-${jobId}`" class="agent-sessions" aria-label="视频对话列表"><div class="agent-section-heading"><h3>对话记录 · {{ sessions.length }}</h3><div class="agent-history-actions"><button class="text-button" @click="closeHistory()">关闭对话记录</button><button class="text-button" :disabled="pending" @click="refresh">刷新</button></div></div><p v-if="loading && !sessions.length" class="help">正在读取对话…</p><p v-else-if="!sessions.length" class="help">发送第一个问题，即可开始对话。</p><button v-for="session in sessions" :key="session.id" class="agent-session" :class="{ selected: selectedId === session.id }" :aria-pressed="selectedId === session.id" :disabled="pending || dirty" @click="session.id === selectedId ? closeHistory() : selectSession(session.id)"><strong>{{ session.turns[0]?.question ?? '新对话' }}</strong><small>{{ date(session.created_at) }} · {{ session.turns.length }} 轮</small></button></aside>
       <aside v-show="compactReference || !conversationFocused" ref="referenceDock" class="agent-reference" :inert="sessionListOpen ? true : undefined" aria-label="视频参考">
@@ -321,7 +476,7 @@ onBeforeUnmount(() => { stopped = true; selectionVersion++; pauseReference(); re
         </div>
       </aside>
       <div class="agent-conversation" :inert="sessionListOpen ? true : undefined">
-        <div class="agent-toolbar"><h2><span class="agent-ai-icon" aria-hidden="true">✦</span> 视频助手</h2><div class="agent-toolbar-actions"><button class="secondary agent-focus-toggle" :aria-pressed="conversationFocused" @click="toggleConversationFocus">{{ conversationFocused ? '并排回看' : '专注对话' }}</button><button ref="historyToggle" class="secondary" :aria-expanded="sessionListOpen" :aria-controls="`agent-history-${jobId}`" @click="toggleHistory">对话记录 <span>{{ sessions.length }}</span></button><button class="secondary" :disabled="pending || dirty" @click="newSession">＋ 新对话</button></div></div>
+        <div class="agent-toolbar"><h2><span class="agent-ai-icon" aria-hidden="true">✦</span> 视频助手</h2><div class="agent-toolbar-actions"><button class="secondary agent-focus-toggle" :aria-pressed="conversationFocused" @click="toggleConversationFocus">{{ conversationFocused ? '并排回看' : '专注对话' }}</button><button ref="historyToggle" class="secondary" :aria-expanded="sessionListOpen" :aria-controls="`agent-history-${jobId}`" @click="toggleHistory">对话记录 <span>{{ sessions.length }}</span></button><button class="secondary" :disabled="pending || dirty || submissionBlocked" @click="newSession">＋ 新对话</button></div></div>
         <div v-if="!selected?.turns.length" class="agent-welcome"><h3>从视频里找答案</h3><p>可以先概括内容，也可以沿着已有回答继续追问。证据不足时会明确说明。</p></div>
         <ol v-else ref="messageList" class="agent-turns" aria-label="对话记录" @scroll.passive="messageScroll"><li v-for="turn in selected.turns" :key="turn.id" class="agent-turn"><div class="agent-question"><span>你的问题 · 第 {{ turn.sequence }} 轮</span><p>{{ turn.question }}</p></div><div class="agent-answer"><div class="agent-answer-heading"><strong>视频助手</strong><span class="agent-status">{{ names[turn.status] }}</span><button v-if="agentTurnActive(turn)" class="text-button" :disabled="pending" @click="cancel(turn)">{{ action === 'cancel' ? '正在取消…' : '取消本轮' }}</button></div><TextRequestProgress :progress="turn.stage.text_progress" :terminal="!agentTurnActive(turn)" /><FailureDiagnostic :diagnostic="turn.stage.diagnostic" :error-code="turn.stage.error_code" :attempt="turn.stage.attempt" />
           <template v-if="turn.result"><span class="agent-scope" :class="turn.result.answer_scope.toLowerCase()">{{ scopes[turn.result.answer_scope] }}</span><AgentAnswer class="agent-answer-text" :text="turn.result.answer" /><p v-if="turn.result.answer_scope === 'GENERAL'" class="help">这部分是通用知识补充，不能当作视频中已经说过的话。</p><p v-else-if="turn.result.answer_scope === 'INSUFFICIENT'" class="help">当前视频证据不足，可换个说法，或补充想找的具体内容。</p>
@@ -334,7 +489,7 @@ onBeforeUnmount(() => { stopped = true; selectionVersion++; pauseReference(); re
         <form class="agent-compose" @submit.prevent="send">
           <div v-if="!selected?.turns.length" class="agent-examples"><button v-for="example in examples" :key="example" type="button" class="secondary" :disabled="pending || dirty" @click="chooseExample(example)">{{ example }}</button></div>
           <div class="agent-input-box"><label for="agent-question" class="visually-hidden">向视频助手提问</label><textarea id="agent-question" v-model="question" :disabled="pending" maxlength="2000" rows="2" placeholder="问问这段视频，例如：概括主要内容，列出关键观点。"></textarea>
-          <div class="agent-compose-actions"><details class="agent-options"><summary>回答设置 <span>· {{ maxCalls }} 次上限</span></summary><div class="agent-options-body"><label>本轮模型请求上限<input v-model.number="maxCalls" type="number" min="1" max="24" :disabled="pending" aria-label="对话模型请求上限"></label><p>自动重试计入此上限。只使用当前视频转写，剪辑建议需另行审核确认。</p></div></details><span class="agent-character-count">{{ question.length }} / 2000</span><button v-if="dirty" class="text-button" type="button" :disabled="pending" @click="discard">放弃输入</button><button class="primary" type="submit" :disabled="pending || !question.trim() || !!activeTurn">{{ action === 'send' ? '正在提交…' : selected ? '发送问题 ↑' : '开始提问 ↑' }}</button></div></div>
+          <div class="agent-compose-actions"><details class="agent-options"><summary>回答设置 <span>· {{ maxCalls }} 次上限</span></summary><div class="agent-options-body"><label>本轮模型请求上限<input v-model.number="maxCalls" type="number" min="1" max="24" :disabled="pending" aria-label="对话模型请求上限"></label><p>自动重试计入此上限。只使用当前视频转写，剪辑建议需另行审核确认。</p></div></details><span class="agent-character-count">{{ question.length }} / 2000</span><button v-if="dirty" class="text-button" type="button" :disabled="pending" @click="discard">放弃输入</button><button class="primary" type="submit" :disabled="pending || submissionBlocked || !question.trim() || !!activeTurn">{{ action === 'send' ? '正在提交…' : selected ? '发送问题 ↑' : '开始提问 ↑' }}</button></div></div>
           <p v-if="activeTurn" class="help" role="status">正在处理上一轮。你可以先编辑问题，等待回答或取消本轮后发送。</p>
         </form>
       </div>
@@ -344,6 +499,8 @@ onBeforeUnmount(() => { stopped = true; selectionVersion++; pauseReference(); re
 
 <style scoped>
 .agent-panel { container: agent / inline-size; position: relative; display: flex; flex-direction: column; height: 100%; min-height: 0; min-width: 0; margin: 0; padding: 0; overflow: hidden; border: 0; border-radius: 0; background: transparent; color: #1e293b; font-size: 14px; }
+.agent-submission-recovery { flex: none; max-height: min(32vh, 260px); overflow-y: auto; padding: 12px; margin-bottom: 10px; border: 1px solid #e7c895; border-radius: 8px; background: #fff9ef; font-size: 12px; line-height: 1.6; }
+.agent-submission-recovery h3 { font-size: 14px; }.agent-submission-entry { border-top: 1px solid #ead7b7; padding: 10px 0; }.agent-submission-entry:last-child { padding-bottom: 0; }.agent-original-question { white-space: pre-wrap; overflow-wrap: anywhere; }.agent-submission-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; }.agent-submission-error, .agent-submission-limit { color: #985c32; overflow-wrap: anywhere; }
 .agent-panel h2, .agent-panel h3, .agent-panel h4, .agent-panel p { margin: 0; }
 .agent-panel > .message, .agent-refresh-error { flex: none; max-height: 60px; overflow-y: auto; margin: 0 0 10px; padding: 9px 12px; font-size: 13px; line-height: 1.6; }
 .agent-refresh-error { color: #9a5a37; }
