@@ -10,6 +10,8 @@
 
 ## 按需求剪辑 v1.0
 
+人工核对批次使用 [clip-manual-review.schema.json](./clip-manual-review.schema.json)。自动 clip-plan 1.0 不变，NEEDS_REVIEW 始终 enabled=false；独立人工集合绑定实际方案、来源、r0 及新修订，确认与导出额外绑定 review_hash。普通保存不继承核对，摘要不授人工权限，Worker 私有 claim 不增加字段。输入幂等、丢回执核对及消费端失效约束见 [人工选用协议](../docs/61-待核对候选人工选用.md)。Schema 检查结构，Java/前端另查整批顺序、UTF-16、摘要和来源。
+
 只读分页历史使用 [clip-request-history.schema.json](./clip-request-history.schema.json)，独立于完整请求快照。摘要仅供浏览与刷新，不包含 ASR、方案、回答引用，也不能作为编辑/确认凭证；同任务 keyset 游标、微秒排序及兼容边界见 [轻量分页历史](../docs/60-轻量分页剪辑历史.md)。
 
 回答引用联动剪辑可在创建请求时携带 `source_answer:{turn_id,utterance_ids}`。Java 冻结的公开 `source_answer` 与私有 claim 的 `clip_request.answer_source` 使用 [answer-source.schema.json](./answer-source.schema.json)，旧普通请求为 null。冻结对象只接受同任务成功 VIDEO 回答的原引用，时间由原 ASR 映射；JSON Schema 之外另查 UTF-16 总长、摘要、顺序及完整原句。锚定使用专用 ANCHOR_CLIP/TEXT，`clip_plan` 仍为 v1.0、prompt_version 为 anchor-clips-v1，单目标候选完整保留全部锚句。普通请求仍用 intent-clips-v1 与 SEGMENT。恢复、人工修订及验收边界见 [回答原句联动剪辑](../docs/58-回答原句联动剪辑.md)。

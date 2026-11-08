@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:livecut:clip-manual-review:1.0",
+  "title": "Immutable human selection of saved NEEDS_REVIEW outputs",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "id", "request_id", "job_id", "video_id", "source_hash", "transcript_hash", "duration_ms", "automatic_plan_hash", "base_revision", "base_plan_hash", "revision", "plan_hash", "outputs", "created_at", "review_hash"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "id": {"$ref": "#/$defs/uuid"},
+    "request_id": {"$ref": "#/$defs/uuid"},
+    "job_id": {"$ref": "#/$defs/uuid"},
+    "video_id": {"$ref": "#/$defs/uuid"},
+    "source_hash": {"$ref": "#/$defs/hash"},
+    "transcript_hash": {"$ref": "#/$defs/hash"},
+    "duration_ms": {"type": "integer", "minimum": 1, "maximum": 9007199254740991},
+    "automatic_plan_hash": {"$ref": "#/$defs/hash"},
+    "base_revision": {"$ref": "#/$defs/revision"},
+    "base_plan_hash": {"$ref": "#/$defs/hash"},
+    "revision": {"type": "integer", "minimum": 1, "maximum": 9007199254740991},
+    "plan_hash": {"$ref": "#/$defs/hash"},
+    "outputs": {"type": "array", "maxItems": 6, "items": {"$ref": "#/$defs/reviewOutput"}},
+    "created_at": {"type": "string", "format": "date-time", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]{1,6})?Z$"},
+    "review_hash": {"$ref": "#/$defs/hash"}
+  },
+  "$defs": {
+    "uuid": {"type": "string", "format": "uuid", "pattern": "^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$"},
+    "hash": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "revision": {"type": "integer", "minimum": 0, "maximum": 9007199254740991},
+    "outputId": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$"},
+    "note": {"type": "string", "minLength": 1, "maxLength": 1000},
+    "requestOutput": {
+      "type": "object", "additionalProperties": false,
+      "required": ["output_id", "note", "accept_sentence_boundaries"],
+      "properties": {"output_id": {"$ref": "#/$defs/outputId"}, "note": {"$ref": "#/$defs/note"}, "accept_sentence_boundaries": {"const": true}}
+    },
+    "reviewOutput": {
+      "type": "object", "additionalProperties": false,
+      "required": ["output_id", "goal_id", "output_hash", "note", "accept_sentence_boundaries"],
+      "properties": {
+        "output_id": {"$ref": "#/$defs/outputId"},
+        "goal_id": {"type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$"},
+        "output_hash": {"$ref": "#/$defs/hash"},
+        "note": {"$ref": "#/$defs/note"},
+        "accept_sentence_boundaries": {"const": true}
+      }
+    },
+    "request": {
+      "type": "object", "additionalProperties": false,
+      "required": ["base_revision", "plan_hash", "outputs"],
+      "properties": {
+        "base_revision": {"$ref": "#/$defs/revision"},
+        "plan_hash": {"$ref": "#/$defs/hash"},
+        "outputs": {"type": "array", "maxItems": 6, "items": {"$ref": "#/$defs/requestOutput"}}
+      }
+    }
+  }
+}

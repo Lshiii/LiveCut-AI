@@ -31,7 +31,7 @@ public final class ClipRequestModels {
         @JsonProperty("plan_hash") String planHash,@JsonProperty("confirmed_revisions") List<Long> confirmedRevisions,
         JsonNode plan,JsonNode utterances,
         @JsonProperty("resumed_from_request_id") @JsonInclude(JsonInclude.Include.NON_NULL) String resumedFromRequestId,
-        @JsonProperty("source_answer") JsonNode sourceAnswer) {}
+        @JsonProperty("source_answer") JsonNode sourceAnswer,@JsonProperty("manual_review") JsonNode manualReview) {}
     public record Page(List<Snapshot> items) {}
     /** Metadata only: this is neither an editable plan nor proof of its frozen source. */
     public record HistoryItem(String id,@JsonProperty("job_id") String jobId,

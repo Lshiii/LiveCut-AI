@@ -9,6 +9,8 @@ import { IntentCreateError, intentCreatePayload, intentCreateReceipt, intentCrea
 import CaptionPanel from './CaptionPanel.vue'
 import TranscriptRangePicker from './TranscriptRangePicker.vue'
 import DraftBackupPanel from './DraftBackupPanel.vue'
+import IntentManualReviewPanel from './IntentManualReviewPanel.vue'
+import { effectiveIntentSelection, IntentManualReviewError, manualReviewConfirmation, manualReviewFreshConfirmation, manualReviewSelectedIds, manualReviewVerified, verifyIntentManualReviewSnapshot } from './intentManualReview'
 import { assessIntentDraft, captureIntentDraft, parseIntentDraft, restoreIntentDraft } from './intentDraft'
 import { CaptionBatchError, prepareCaptionBatch } from './captions'
 import { newestSnapshot, parseExportSnapshot, SnapshotError } from './snapshotStream'
@@ -41,6 +43,7 @@ const instructionInput = ref<HTMLTextAreaElement | null>(null)
 const exportPlayer = ref<HTMLVideoElement | null>(null)
 const captionTarget = ref<{ exportId: string; clipId: string; contentUrl: string } | null>(null)
 const captionEditor = ref<{ dirty: boolean; pending: boolean } | null>(null)
+const manualReviewEditor = ref<{ open: () => boolean; dirty: boolean; pending: boolean; needsCheck: boolean; opened: boolean } | null>(null)
 interface RangePickerTarget {
   token: number; requestId: string; selection: number; draftRevision: number | null; snapshotRevision: number
   planHash: string | null; videoUrl: string; videoHash: string; transcriptHash: string; durationMs: number
@@ -79,11 +82,13 @@ const pendingCreate = ref<IntentCreateReceipt | null>(null)
 const inputAnswerBinding = computed(() => answerSelection.value?.binding ?? pendingCreate.value?.source_answer ?? null)
 const pendingCreatePayload = computed(() => pendingCreate.value ? parseIntentCreatePayload(JSON.parse(pendingCreate.value.input)) : null)
 const pendingResumes = new Map<string, IntentResumeReceipt>()
-const pending = computed(() => !!action.value)
+const pending = computed(() => !!action.value || !!manualReviewEditor.value?.pending)
+const manualReviewBlocked = computed(() => !!action.value || planDirty.value || saveNeedsCheck.value || planRevisionConflict.value || !!rangePickerTarget.value
+  || !!captionTarget.value || !!captionEditor.value?.dirty || !!captionEditor.value?.pending || !!instruction.value.trim() || !!inputAnswerBinding.value || !!pendingCreate.value)
 const planDirty = computed(() => !!snapshot.value?.plan && JSON.stringify(intentPayload(outputs.value)) !== baseline.value)
 const planRevisionConflict = computed(() => draftRevision.value !== null && !!snapshot.value?.plan && snapshot.value.revision > draftRevision.value
   && JSON.stringify(intentPayload(outputs.value)) !== JSON.stringify(intentPayload(snapshot.value.plan.outputs)))
-const dirty = computed(() => planDirty.value || planRevisionConflict.value || saveNeedsCheck.value || !!instruction.value.trim() || !!inputAnswerBinding.value || !!pendingCreate.value || !!rangePickerEditor.value?.dirty)
+const dirty = computed(() => planDirty.value || planRevisionConflict.value || saveNeedsCheck.value || !!instruction.value.trim() || !!inputAnswerBinding.value || !!pendingCreate.value || !!rangePickerEditor.value?.dirty || !!manualReviewEditor.value?.dirty || !!manualReviewEditor.value?.needsCheck)
 const backupValue = computed(() => {
   const planChanged = planDirty.value || saveNeedsCheck.value || planRevisionConflict.value || action.value === 'save'
   if (!instruction.value.length && maxCalls.value === 6 && !planChanged && !inputAnswerBinding.value && !pendingCreate.value) return null
@@ -94,14 +99,16 @@ const backupValue = computed(() => {
   } : null, inputAnswerBinding.value, pendingCreate.value)
 })
 const backupBlocked = computed(() => loading.value || props.active === false || historyOpen.value || pending.value || dirty.value
-  || maxCalls.value !== 6 || !!rangePickerTarget.value || !!captionTarget.value || !!captionEditor.value?.dirty || !!captionEditor.value?.pending)
+  || maxCalls.value !== 6 || !!rangePickerTarget.value || !!captionTarget.value || !!captionEditor.value?.dirty || !!captionEditor.value?.pending || !!manualReviewEditor.value?.opened)
 const validation = computed(() => snapshot.value?.plan
   ? intentOutputValidation(outputs.value, snapshot.value.utterances, snapshot.value.source.duration_ms, snapshot.value.plan.goals, snapshot.value.source_answer) : '')
-const canConfirm = computed(() => !saveNeedsCheck.value && !planRevisionConflict.value && !rangePickerTarget.value && !instruction.value.trim() && !inputAnswerBinding.value && !pendingCreate.value && intentCanConfirm(snapshot.value, outputs.value, planDirty.value, pending.value))
-const canExport = computed(() => !saveNeedsCheck.value && !planRevisionConflict.value && !rangePickerTarget.value && !instruction.value.trim() && !inputAnswerBinding.value && !pendingCreate.value && intentCanExport(snapshot.value, planDirty.value, pending.value))
+const manualReviewProtected = computed(() => !!manualReviewEditor.value?.opened || !!manualReviewEditor.value?.needsCheck)
+const canConfirm = computed(() => !manualReviewProtected.value && !saveNeedsCheck.value && !planRevisionConflict.value && !rangePickerTarget.value && !instruction.value.trim() && !inputAnswerBinding.value && !pendingCreate.value && intentCanConfirm(snapshot.value, outputs.value, planDirty.value, pending.value))
+const canExport = computed(() => !manualReviewProtected.value && !saveNeedsCheck.value && !planRevisionConflict.value && !rangePickerTarget.value && !instruction.value.trim() && !inputAnswerBinding.value && !pendingCreate.value && intentCanExport(snapshot.value, planDirty.value, pending.value))
 const canCancel = computed(() => intentCanCancel(snapshot.value, planDirty.value, pending.value))
 const canResume = computed(() => intentCanResume(snapshot.value, dirty.value, pending.value))
-const selectedCount = computed(() => outputs.value.filter(value => value.enabled).length)
+const selectedCount = computed(() => snapshot.value ? effectiveIntentSelection(snapshot.value, outputs.value, planDirty.value || saveNeedsCheck.value || planRevisionConflict.value).length : 0)
+const manuallySelected = computed(() => new Set(manualReviewSelectedIds(snapshot.value, planDirty.value || saveNeedsCheck.value || planRevisionConflict.value)))
 const unresolved = computed(() => outputs.value.filter(value => value.status !== 'FOUND').length)
 const confirmed = computed(() => !!snapshot.value && snapshot.value.confirmed_revisions.includes(snapshot.value.revision))
 const completedClips = computed(() => batches.value.reduce((count, batch) => count + batch.clips.filter(clip => clip.status === 'SUCCEEDED').length, 0))
@@ -116,9 +123,9 @@ function windowFocused() {
   else void refreshScheduler.refresh()
 }
 const primaryAction = computed(() => saveNeedsCheck.value || planRevisionConflict.value
-  ? { label: action.value === 'check-save' ? '正在核对…' : '核对保存结果', enabled: !rangePickerTarget.value && !pending.value, run: checkSavedPlan }
+  ? { label: action.value === 'check-save' ? '正在核对…' : '核对保存结果', enabled: !manualReviewEditor.value?.opened && !rangePickerTarget.value && !pending.value, run: checkSavedPlan }
   : planDirty.value
-  ? { label: action.value === 'save' ? '正在保存…' : '保存方案', enabled: !rangePickerTarget.value && !pending.value && !validation.value, run: save }
+  ? { label: action.value === 'save' ? '正在保存…' : '保存方案', enabled: !manualReviewProtected.value && !rangePickerTarget.value && !pending.value && !validation.value, run: save }
   : confirmed.value
     ? { label: action.value === 'export' ? '正在创建…' : '生成独立 MP4', enabled: canExport.value, run: exportPlan }
     : { label: action.value === 'confirm' ? '正在确认…' : '确认所选目标', enabled: canConfirm.value, run: confirm })
@@ -174,7 +181,7 @@ function readCreateReceipt(protectInput = false): boolean {
 }
 
 function message(value: unknown) {
-  const code = value instanceof ApiError || value instanceof IntentCreateError ? value.code : value instanceof IntentHistoryError ? 'INVALID_CLIP_HISTORY_RESPONSE' : value instanceof AnswerClipError ? 'INVALID_ANSWER_SOURCE' : value instanceof IntentResponseError || value instanceof SnapshotError ? 'INVALID_CLIP_RESPONSE' : 'CLIENT_ERROR'
+  const code = value instanceof ApiError || value instanceof IntentCreateError || value instanceof IntentManualReviewError ? value.code : value instanceof IntentHistoryError ? 'INVALID_CLIP_HISTORY_RESPONSE' : value instanceof AnswerClipError ? 'INVALID_ANSWER_SOURCE' : value instanceof IntentResponseError || value instanceof SnapshotError ? 'INVALID_CLIP_RESPONSE' : 'CLIENT_ERROR'
   const messages: Record<string, string> = {
     NETWORK_UNAVAILABLE: '无法连接服务，本页输入和方案修改仍然保留。',
     REQUEST_TIMEOUT: '请求超时。创建或继续查找可再次点击，系统会复用同一个请求标识；其余操作请先重新读取核对服务端状态。',
@@ -185,6 +192,10 @@ function message(value: unknown) {
     INVALID_CLIP_PLAN: '标题、原句区间或证据不符合要求，请检查后再保存。',
     CLIP_PLAN_SOURCE_INVALID: '原自动方案校验未通过，请核对来源或重新查找片段。当前修改仍然保留。',
     INVALID_CLIP_RESPONSE: '返回的剪辑方案不完整、来源不匹配或版本过期，已保留本页内容。',
+    INVALID_CLIP_MANUAL_REVIEW_RESPONSE: '人工核对证明的来源、方案或摘要校验未通过，未授予确认或导出权限。',
+    CLIP_MANUAL_REVIEW_MISMATCH: '人工核对摘要与当前修订不符，请重新读取核对，当前修改仍保留。',
+    CLIP_MANUAL_REVIEW_INVALID: '服务端人工核对证明无效，请重新读取核对，当前修改仍保留。',
+    CLIP_PLAN_CONFIRMATION_CONFLICT: '当前版本已有不同的确认记录，请重新读取核对。',
     INVALID_CLIP_HISTORY_RESPONSE: '历史列表格式、来源或分页顺序不符合约定，已保留上次有效历史及当前草稿。',
     INVALID_CLIP_HISTORY_CURSOR: '历史分页标识已失效。当前内容保留，可点击“回到最新”重新读取。',
     INVALID_CLIP_HISTORY_LIMIT: '历史分页大小不符合服务要求，当前内容保留。',
@@ -212,6 +223,7 @@ async function requireAnchorProtocol(jobId: string) {
   catch { throw new ApiError('ANCHOR_CLIP_UNAVAILABLE') }
 }
 function upsert(value: IntentSnapshot) {
+  if (value.manual_review && !manualReviewVerified(value)) throw new IntentManualReviewError()
   const latest = mergeVerifiedIntentDetail(details.value.get(value.id), value, props.jobId, value.id)
   details.value = new Map(details.value).set(latest.id, latest)
   history.value.observeDetail(latest)
@@ -233,7 +245,16 @@ function accept(value: IntentSnapshot, force = false) {
   if (force || recovered) saveNeedsCheck.value = false
   if (recovered) { error.value = ''; notice.value = `已核对服务端 r${latest.revision} 与本页方案一致，无需重复保存。` }
 }
+function openManualReview() {
+  if (manualReviewBlocked.value && !manualReviewEditor.value?.needsCheck || pending.value) return
+  pauseMedia(); closeHistory(false); manualReviewEditor.value?.open()
+}
+function adoptManualReview(value: IntentSnapshot) {
+  if (stopped || value.id !== selectedId.value || value.job_id !== props.jobId || props.active === false || document.hidden) return
+  try { accept(newestIntentSnapshot(snapshot.value, upsert(value)), !planDirty.value && !saveNeedsCheck.value && !planRevisionConflict.value) } catch (value) { fail(value) }
+}
 function canChangeRequest() {
+  if (manualReviewEditor.value?.opened || manualReviewEditor.value?.dirty || manualReviewEditor.value?.needsCheck) { error.value = '请先关闭人工核对窗口，或核对原人工选用结果，再切换请求。'; return false }
   if (captionEditor.value?.dirty || captionEditor.value?.pending) { error.value = '请先保存或放弃字幕修改，等待提交完成后再切换剪辑请求。'; return false }
   if (rangePickerTarget.value) { error.value = '请先应用或取消当前原句选择，再切换剪辑请求。'; return false }
   if (pending.value) { error.value = '当前操作正在提交，请稍后切换请求。'; return false }
@@ -267,7 +288,9 @@ async function refreshHistory(navigation: IntentHistoryNavigation = 'refresh', p
     else {
       // The compatibility endpoint really contains complete snapshots. Validate
       // the entire merge before caching any item; summaries never take this path.
-      details.value = cacheLegacyIntentDetails(details.value, result.details, jobId)
+      const verified = await Promise.all(result.details.map(value => verifyIntentManualReviewSnapshot(value)))
+      if (!current()) return false
+      details.value = cacheLegacyIntentDetails(details.value, verified, jobId)
       history.value.acceptLegacy(result.rows, navigation)
     }
     return true
@@ -302,7 +325,9 @@ async function refreshNow(lease: IntentRefreshLease) {
     if (requestId) {
       const detail = await api<unknown>(`/api/clip-requests/${requestId}`, { signal: read.signal })
       if (!current() || selectedId.value !== requestId) return
-      accept(parseIntentSnapshot(detail, jobId, requestId))
+      const verified = await verifyIntentManualReviewSnapshot(parseIntentSnapshot(detail, jobId, requestId))
+      if (!current() || selectedId.value !== requestId) return
+      accept(verified)
       const exported = await api<{ items: unknown[] }>(`/api/clip-requests/${requestId}/exports`, { signal: read.signal })
       if (!current() || selectedId.value !== requestId) return
       if (!Array.isArray(exported.items)) throw new IntentResponseError()
@@ -323,7 +348,7 @@ async function refreshNow(lease: IntentRefreshLease) {
 }
 function validOperation(requestId: string, version: number) { return !stopped && selectedId.value === requestId && version === selectionVersion }
 async function create(reconcile = false) {
-  if (pending.value || rangePickerTarget.value || props.active === false) return
+  if (pending.value || manualReviewEditor.value?.opened || !reconcile && manualReviewProtected.value || rangePickerTarget.value || props.active === false) return
   if (saveNeedsCheck.value || planRevisionConflict.value || planDirty.value) { error.value = '请先核对、保存或放弃当前方案修改，再创建其他请求。'; return }
   if (!pendingCreate.value && !readCreateReceipt(true)) { error.value = '另一个页面有不同的未核对提交。本页新要求保留，请先在原页面核对，不能替换原请求标识。'; return }
   if (pendingCreate.value && !reconcile) { error.value = '原提交结果尚未核对，请使用“核对原提交”，原要求和锚定不会自动替换。'; return }
@@ -356,7 +381,8 @@ async function create(reconcile = false) {
     try { localStorage.setItem(storageKey, JSON.stringify(receipt)) } catch { /* Retain the same mounted receipt if storage fails. */ }
     const raw = await api<unknown>(`/api/jobs/${jobId}/clip-requests`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'Idempotency-Key': receipt.key }, body: receipt.input })
     if (stopped || version !== selectionVersion || jobId !== props.jobId) return
-    const value = parseIntentSnapshot(raw, jobId)
+    const value = await verifyIntentManualReviewSnapshot(parseIntentSnapshot(raw, jobId))
+    if (stopped || version !== selectionVersion || jobId !== props.jobId || !editorActive() || document.hidden) return
     if (!intentCreateResponseMatches(value, payload, binding)) throw new IntentResponseError()
     selectedId.value = value.id; snapshot.value = null; outputs.value = []; batches.value = []; previewUrl.value = ''
     instruction.value = ''; answerSelection.value = null; accept(value, true); defaultViewRequest = ''
@@ -381,7 +407,8 @@ async function cancelRequest() {
   try {
     const raw = await post<unknown>(`/api/clip-requests/${id}/cancel`, {})
     if (!validOperation(id, version)) return
-    const value = parseIntentSnapshot(raw, props.jobId, id)
+    const value = await verifyIntentManualReviewSnapshot(parseIntentSnapshot(raw, props.jobId, id))
+    if (!validOperation(id, version) || !editorActive() || document.hidden) return
     if (value.status !== 'CANCELLED') throw new IntentResponseError()
     accept(value)
     notice.value = '已取消后续处理，原视频、已完成转写和调用记录仍保留。已发出的模型请求可能仍由服务方处理。'
@@ -405,7 +432,8 @@ async function resumeRequest() {
     if (source.source_answer) { await requireAnchorProtocol(jobId); if (!validOperation(id, version) || props.jobId !== jobId || props.active === false) return }
     const raw = await post<unknown>(`/api/clip-requests/${id}/resume`, { max_text_calls: budget }, { 'Idempotency-Key': receipt.key })
     if (!validOperation(id, version) || props.jobId !== jobId) return
-    const value = parseResumedIntentSnapshot(raw, source, budget)
+    const value = await verifyIntentManualReviewSnapshot(parseResumedIntentSnapshot(raw, source, budget))
+    if (!validOperation(id, version) || props.jobId !== jobId || !editorActive() || document.hidden) return
     selectedId.value = value.id; snapshot.value = null; outputs.value = []; batches.value = []; previewUrl.value = ''
     accept(value, true)
     defaultViewRequest = ''
@@ -420,14 +448,17 @@ async function resumeRequest() {
   finally { if (!stopped && version === selectionVersion) action.value = '' }
 }
 async function save() {
-  if (!snapshot.value?.plan || pending.value || rangePickerTarget.value || saveNeedsCheck.value || planRevisionConflict.value || !planDirty.value || validation.value || draftRevision.value === null) return
+  if (!snapshot.value?.plan || pending.value || manualReviewProtected.value || rangePickerTarget.value || saveNeedsCheck.value || planRevisionConflict.value || !planDirty.value || validation.value || draftRevision.value === null) return
   const id = selectedId.value, version = selectionVersion, revision = draftRevision.value
   const body = { base_revision: revision, ...intentPayload(outputs.value) }
   action.value = 'save'; error.value = ''; notice.value = ''; scope.invalidate()
   try {
     const raw = await api<unknown>(`/api/clip-requests/${id}/plan`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
     if (!validOperation(id, version)) return
-    const value = parseIntentSnapshot(raw, props.jobId, id); accept(value, true)
+    const value = await verifyIntentManualReviewSnapshot(parseIntentSnapshot(raw, props.jobId, id))
+    if (!validOperation(id, version) || !editorActive() || document.hidden) return
+    if (value.manual_review) throw new IntentResponseError()
+    accept(value, true)
     notice.value = `方案 r${value.revision} 已保存，请核对所选目标后确认。`
   } catch (value) {
     if (validOperation(id, version)) {
@@ -440,13 +471,15 @@ async function save() {
   finally { if (validOperation(id, version)) action.value = '' }
 }
 async function checkSavedPlan() {
-  if (!snapshot.value?.plan || pending.value || rangePickerTarget.value) return
+  if (!snapshot.value?.plan || pending.value || manualReviewEditor.value?.opened || rangePickerTarget.value) return
   const id = selectedId.value, version = selectionVersion
   action.value = 'check-save'; error.value = ''; notice.value = ''; scope.invalidate()
   try {
     const raw = await api<unknown>(`/api/clip-requests/${id}`)
     if (!validOperation(id, version)) return
-    accept(parseIntentSnapshot(raw, props.jobId, id))
+    const value = await verifyIntentManualReviewSnapshot(parseIntentSnapshot(raw, props.jobId, id))
+    if (!validOperation(id, version) || !editorActive() || document.hidden) return
+    accept(value)
     saveNeedsCheck.value = false
     if (planRevisionConflict.value) notice.value = '服务端内容与本页草稿不同。本地修改仍保留，未使用新版本覆盖或重新保存。'
     else if (planDirty.value) notice.value = `服务端当前为 r${snapshot.value!.revision}，本页修改仍待保存。可稍后再核对，或重新保存。`
@@ -459,9 +492,13 @@ async function confirm() {
   const id = selectedId.value, version = selectionVersion, revision = snapshot.value.revision, planHash = snapshot.value.plan_hash
   action.value = 'confirm'; error.value = ''; notice.value = ''; scope.invalidate()
   try {
-    const raw = await post<unknown>(`/api/clip-requests/${id}/confirm`, { revision, plan_hash: planHash })
+    const source = await freshManualActionSnapshot(snapshot.value, id, version)
+    if (!source) return
+    const raw = await post<unknown>(`/api/clip-requests/${id}/confirm`, { revision, plan_hash: planHash, ...manualReviewConfirmation(source) })
     if (!validOperation(id, version)) return
-    const value = parseIntentSnapshot(raw, props.jobId, id); accept(value, true)
+    const value = await verifyIntentManualReviewSnapshot(parseIntentSnapshot(raw, props.jobId, id))
+    if (!validOperation(id, version) || !editorActive() || document.hidden) return
+    accept(value, true)
     notice.value = `方案 r${revision} 已确认，可将各目标分别生成独立 MP4。`
   } catch (value) { if (validOperation(id, version)) fail(value) }
   finally { if (validOperation(id, version)) action.value = '' }
@@ -471,7 +508,9 @@ async function exportPlan() {
   const id = selectedId.value, version = selectionVersion, navigation = navigationVersion, revision = snapshot.value.revision, planHash = snapshot.value.plan_hash
   action.value = 'export'; error.value = ''; notice.value = ''; scope.invalidate()
   try {
-    const raw = await post<unknown>(`/api/clip-requests/${id}/exports`, { revision, plan_hash: planHash, profile: 'h264-aac-v1' })
+    const source = await freshManualActionSnapshot(snapshot.value, id, version)
+    if (!source) return
+    const raw = await post<unknown>(`/api/clip-requests/${id}/exports`, { revision, plan_hash: planHash, ...manualReviewConfirmation(source), profile: 'h264-aac-v1' })
     if (!validOperation(id, version)) return
     if (!raw || typeof raw !== 'object' || !('id' in raw) || typeof raw.id !== 'string') throw new IntentResponseError()
     const value = parseExportSnapshot(raw, raw.id, props.jobId)
@@ -483,8 +522,17 @@ async function exportPlan() {
   } catch (value) { if (validOperation(id, version)) fail(value) }
   finally { if (validOperation(id, version)) action.value = '' }
 }
+async function freshManualActionSnapshot(expected: IntentSnapshot, id: string, version: number): Promise<IntentSnapshot | null> {
+  if (!expected.manual_review) return expected
+  const raw = await api<unknown>(`/api/clip-requests/${id}`)
+  if (!validOperation(id, version) || !editorActive() || document.hidden) return null
+  const latest = await verifyIntentManualReviewSnapshot(parseIntentSnapshot(raw, props.jobId, id))
+  if (!validOperation(id, version) || !editorActive() || document.hidden) return null
+  try { manualReviewFreshConfirmation(expected, latest) } catch (value) { accept(latest); throw value }
+  return latest
+}
 function discard() {
-  if (pending.value) return
+  if (pending.value || manualReviewEditor.value?.opened) return
   try {
     const latest = snapshot.value ? newestIntentSnapshot(snapshot.value, details.value.get(snapshot.value.id) ?? snapshot.value) : null
     if (latest) accept(latest, true)
@@ -536,7 +584,8 @@ async function restoreBackup(raw: unknown) {
       const id = requested.plan.request_id
       const response = await api<unknown>(`/api/clip-requests/${id}`)
       if (!current()) return
-      const fresh = parseIntentSnapshot(response, jobId, id)
+      const fresh = await verifyIntentManualReviewSnapshot(parseIntentSnapshot(response, jobId, id))
+      if (!current()) return
       draftReadResults.value = { ...draftReadResults.value, [id]: fresh }
       server = mergeVerifiedIntentDetail(details.value.get(id), fresh, jobId, id)
       details.value = new Map(details.value).set(id, server)
@@ -571,11 +620,11 @@ async function restoreBackup(raw: unknown) {
   finally { if (!stopped && operation === draftRestoreVersion) action.value = '' }
 }
 function addPart(output: IntentOutput) {
-  if (pending.value || output.parts.length >= 12) return
+  if (pending.value || manualReviewProtected.value || output.parts.length >= 12) return
   output.parts.push({ start_utterance_id: '', end_utterance_id: '', start_ms: -1, end_ms: -1 })
 }
-function removePart(output: IntentOutput, index: number) { output.parts.splice(index, 1); refreshIntentEvidence(output, snapshot.value?.utterances ?? []) }
-function unexclude(output: IntentOutput, index: number) { output.excluded.splice(index, 1) }
+function removePart(output: IntentOutput, index: number) { if (pending.value || manualReviewProtected.value) return; output.parts.splice(index, 1); refreshIntentEvidence(output, snapshot.value?.utterances ?? []) }
+function unexclude(output: IntentOutput, index: number) { if (!pending.value && !manualReviewProtected.value) output.excluded.splice(index, 1) }
 function sourceText(id: string) { return snapshot.value?.utterances.find(value => value.utterance_id === id)?.text ?? '原句不可用' }
 function sourceTime(id: string) { return snapshot.value?.utterances.find(value => value.utterance_id === id)?.start_ms ?? -1 }
 function rangeSignature(output: IntentOutput) { return JSON.stringify({ id: output.output_id, status: output.status, parts: output.parts, excluded: output.excluded }) }
@@ -589,7 +638,7 @@ function rangeContextCurrent(target: RangePickerTarget) {
 }
 function openRangePicker(output: IntentOutput, partIndex: number, initialField: 'start' | 'end', event: Event) {
   const value = snapshot.value
-  if (!value?.plan || pending.value || rangePickerTarget.value || !mediaActive('review') || !output.parts[partIndex] || output.status === 'NOT_FOUND') return
+  if (!value?.plan || pending.value || manualReviewProtected.value || rangePickerTarget.value || !mediaActive('review') || !output.parts[partIndex] || output.status === 'NOT_FOUND') return
   const initialTimeMs = sourcePlayer.value && sourcePlayer.value.currentTime > 0 ? sourcePlayer.value.currentTime * 1000 : undefined
   pauseMedia(); error.value = ''; rangePickerFailed.value = false
   rangePickerOpener = event.currentTarget instanceof HTMLElement ? event.currentTarget : null
@@ -719,7 +768,7 @@ function duration(output: IntentOutput) { return output.parts.reduce((sum, part)
 function date(value: string) { return new Date(value).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) }
 function unload(event: BeforeUnloadEvent) { if (dirty.value || pending.value) { event.preventDefault(); event.returnValue = '' } }
 function pauseMedia() { stopSequencePreview(); sourcePlayer.value?.pause(); exportPlayer.value?.pause() }
-function mediaActive(view: IntentView, allowRangePicker = false) { return props.active !== false && !stopped && (allowRangePicker || !rangePickerTarget.value) && !(captionTarget.value && intentView.value === 'deliveries') && !historyOpen.value && intentView.value === view }
+function mediaActive(view: IntentView, allowRangePicker = false) { return props.active !== false && !stopped && !manualReviewEditor.value?.opened && (allowRangePicker || !rangePickerTarget.value) && !(captionTarget.value && intentView.value === 'deliveries') && !historyOpen.value && intentView.value === view }
 function guardPlayback(event: Event) {
   const player = event.currentTarget as HTMLVideoElement
   if (!(player === sourcePlayer.value && sourceContextOpen.value && mediaActive('review')) && !(player === exportPlayer.value && mediaActive('deliveries'))) player.pause()
@@ -814,7 +863,7 @@ onBeforeUnmount(() => { stopped = true; historyVersion++; historyScope.dispose()
 
 <template>
   <section ref="intentPanel" class="panel intent-panel" aria-label="按需求找片段" @keydown.esc="closeHistory()">
-    <div class="intent-surface" :inert="historyOpen ? true : undefined">
+    <div class="intent-surface" :inert="historyOpen || manualReviewEditor?.opened ? true : undefined">
       <header class="intent-toolbar"><h2>按需剪辑 <span v-if="snapshot" class="status">{{ names[snapshot.status] }}</span></h2>
       <nav class="intent-view-tabs" role="tablist" aria-label="按需剪辑流程" @keydown="viewKey">
         <button :id="`intent-view-${jobId}-compose`" role="tab" :aria-controls="`intent-page-${jobId}-compose`" :aria-selected="intentView === 'compose'" :tabindex="intentView === 'compose' ? 0 : -1" @click="setView('compose')">剪辑要求<span v-if="instruction.trim()" class="draft-dot" aria-label="有未提交要求"></span></button>
@@ -828,8 +877,8 @@ onBeforeUnmount(() => { stopped = true; historyVersion++; historyScope.dispose()
         <div v-show="intentView === 'compose'" :id="`intent-page-${jobId}-compose`" class="intent-compose-view" role="tabpanel" :aria-labelledby="`intent-view-${jobId}-compose`">
           <div class="intent-compose-title"><h3>想从视频里剪出什么？</h3><p class="help">每个目标生成一个视频。先找候选，再由你核对、确认。</p></div>
           <div v-if="pendingCreate" class="intent-anchor-receipt" role="status"><strong>原提交结果待核对</strong><p>原要求：{{ pendingCreatePayload?.instruction }}</p><p>原预算上限 {{ pendingCreatePayload?.max_text_calls }} 次；{{ pendingCreate.source_answer ? `锚定回答 #${pendingCreate.source_answer.turn_id.slice(0, 8)} · ${pendingCreate.source_answer.utterance_ids.length} 条原句` : '普通文字要求' }}。不会自动换键或退回普通请求。</p><button class="secondary" :disabled="pending || active === false || planDirty || saveNeedsCheck || planRevisionConflict" @click="create(true)">核对原提交</button></div>
-          <details v-if="inputAnswerBinding" class="intent-answer-anchor" :open="inputAnswerBinding.utterance_ids.length <= 3"><summary>围绕所选原句剪辑 · 1 个目标 · {{ inputAnswerBinding.utterance_ids.length }} 句</summary><p>来自视频回答 #{{ inputAnswerBinding.turn_id.slice(0, 8) }}<template v-if="answerSelection"> · {{ answerSelection.question }}</template></p><p>这些原句位于视频中的具体位置，将共同组成一个片段。可补充前后解释，所选句会完整保留。初始候选仅核对这些原句及相邻上下文，不代表全文检索。</p><blockquote v-for="citation in answerSelection?.citations ?? []" :key="citation.utterance_id"><strong>原视频 {{ topicTime(citation.start_ms) }} → {{ topicTime(citation.end_ms) }}</strong><p>{{ citation.text }}</p></blockquote><p v-if="!answerSelection">原句标识：{{ inputAnswerBinding.utterance_ids.join('、') }}。核对原提交后显示冻结引用。</p><button class="text-button" :disabled="pending || !!pendingCreate" @click="removeAnswerAnchor">取消绑定，保留文字要求</button></details>
-          <div class="intent-compose"><label for="intent-instruction">剪辑要求<textarea id="intent-instruction" ref="instructionInput" v-model="instruction" :disabled="pending || !!pendingCreate" maxlength="2000" rows="4" placeholder="例如：把缓存失效原因和解决方法分别剪出来，保留完整解释，跳过关注引导。"></textarea></label><div class="intent-create-row"><label>模型请求上限<input v-model.number="maxCalls" type="number" min="1" max="24" :disabled="pending || !!pendingCreate" aria-label="剪辑模型请求上限"></label><span>复用现有转写，不重新提交 ASR。</span><button class="primary" :disabled="pending || !!pendingCreate || !instruction.trim() || planDirty || saveNeedsCheck || planRevisionConflict" @click="create()">{{ action === 'create' ? '正在创建…' : '查找片段' }}</button></div></div>
+          <details v-if="inputAnswerBinding" class="intent-answer-anchor" :open="inputAnswerBinding.utterance_ids.length <= 3"><summary>围绕所选原句剪辑 · 1 个目标 · {{ inputAnswerBinding.utterance_ids.length }} 句</summary><p>来自视频回答 #{{ inputAnswerBinding.turn_id.slice(0, 8) }}<template v-if="answerSelection"> · {{ answerSelection.question }}</template></p><p>这些原句位于视频中的具体位置，将共同组成一个片段。可补充前后解释，所选句会完整保留。初始候选仅核对这些原句及相邻上下文，不代表全文检索。</p><blockquote v-for="citation in answerSelection?.citations ?? []" :key="citation.utterance_id"><strong>原视频 {{ topicTime(citation.start_ms) }} → {{ topicTime(citation.end_ms) }}</strong><p>{{ citation.text }}</p></blockquote><p v-if="!answerSelection">原句标识：{{ inputAnswerBinding.utterance_ids.join('、') }}。核对原提交后显示冻结引用。</p><button class="text-button" :disabled="pending || !!pendingCreate || manualReviewProtected" @click="removeAnswerAnchor">取消绑定，保留文字要求</button></details>
+          <div class="intent-compose"><label for="intent-instruction">剪辑要求<textarea id="intent-instruction" ref="instructionInput" v-model="instruction" :disabled="pending || !!pendingCreate || manualReviewProtected" maxlength="2000" rows="4" placeholder="例如：把缓存失效原因和解决方法分别剪出来，保留完整解释，跳过关注引导。"></textarea></label><div class="intent-create-row"><label>模型请求上限<input v-model.number="maxCalls" type="number" min="1" max="24" :disabled="pending || !!pendingCreate || manualReviewProtected" aria-label="剪辑模型请求上限"></label><span>复用现有转写，不重新提交 ASR。</span><button class="primary" :disabled="pending || !!pendingCreate || manualReviewProtected || !instruction.trim() || planDirty || saveNeedsCheck || planRevisionConflict" @click="create()">{{ action === 'create' ? '正在创建…' : '查找片段' }}</button></div></div>
           <p v-if="saveNeedsCheck || planRevisionConflict" class="intent-draft-hint">当前方案的保存结果需要核对，新要求仍保留。<button class="text-button" @click="setView('review')">回到核对方案 →</button></p>
           <p v-else-if="planDirty" class="intent-draft-hint">当前方案有未保存修改。新要求会保留，先回到核对方案保存或放弃修改，再查找。<button class="text-button" @click="setView('review')">回到核对方案 →</button></p>
           <div v-if="instruction.length || maxCalls !== 6 || inputAnswerBinding" class="intent-compose-actions"><button class="text-button" :disabled="pending || !!pendingCreate" @click="discardInput">放弃新要求与请求上限修改</button></div>
@@ -855,7 +904,7 @@ onBeforeUnmount(() => { stopped = true; historyVersion++; historyScope.dispose()
         <div v-if="['FAILED', 'CANCELLED'].includes(snapshot.status)" class="intent-recovery-actions">
           <p class="help">继续查找会复用已完成转写，新建一次文本分析，使用下方设置的调用次数上限；旧请求与调用记录保留。</p>
           <p v-if="instruction.trim()" class="help">剪辑要求页有尚未提交的新要求，请先提交或放弃输入，再继续当前请求。</p>
-          <label class="intent-resume-budget">新请求模型上限<input v-model.number="maxCalls" type="number" min="1" max="24" :disabled="pending || !!pendingCreate" aria-label="继续查找模型请求上限"></label><button class="primary" :disabled="!canResume" @click="resumeRequest">{{ action === 'resume' ? '正在继续…' : '继续查找' }}</button>
+          <label class="intent-resume-budget">新请求模型上限<input v-model.number="maxCalls" type="number" min="1" max="24" :disabled="pending || !!pendingCreate || manualReviewProtected" aria-label="继续查找模型请求上限"></label><button class="primary" :disabled="!canResume" @click="resumeRequest">{{ action === 'resume' ? '正在继续…' : '继续查找' }}</button>
         </div>
         <TextRequestProgress :progress="snapshot.stage.text_progress" :terminal="['PLAN_READY', 'FAILED', 'CANCELLED'].includes(snapshot.status)" />
         <FailureDiagnostic v-if="snapshot.status !== 'CANCELLED'" :error-code="snapshot.stage.error_code" :attempt="snapshot.stage.attempt" />
@@ -864,19 +913,20 @@ onBeforeUnmount(() => { stopped = true; historyVersion++; historyScope.dispose()
             <div class="intent-output-list"><div class="intent-subheading"><h3>候选目标 <span v-if="snapshot.plan">{{ outputs.length }} 个 · 已选 {{ selectedCount }} 个 · r{{ draftRevision }}</span></h3><button v-if="planDirty || saveNeedsCheck || planRevisionConflict" class="text-button" :disabled="pending" @click="discard">放弃方案修改</button></div>
               <p v-if="!snapshot.plan" class="intent-empty">{{ snapshot.status === 'FAILED' ? '本次查找未完成。请查看执行原因，原视频和原话题结果仍保留。' : snapshot.status === 'CANCELLED' ? '本次请求已取消。' : snapshot.status === 'RUNNING' ? '正在查找候选片段，执行进度会自动更新。' : '正在等待执行服务生成候选方案。' }}</p>
               <template v-else>
-          <p v-if="unresolved" class="intent-warning">有 {{ unresolved }} 个目标未找到充分证据，不能勾选导出。你可以只确认已经核对的目标，或另建更明确的请求。</p>
+          <p v-if="unresolved" class="intent-warning">有 {{ unresolved }} 个目标仍需核对或未找到证据。待复核候选可通过独立人工核对批次选用；未找到目标不能选用。AI 分类保持不变。</p>
+          <div class="intent-recovery-actions"><button class="secondary" :disabled="manualReviewBlocked && !manualReviewEditor?.needsCheck || pending" @click="openManualReview">{{ manualReviewEditor?.needsCheck ? '核对原人工选用结果' : '批量人工核对与选用' }}</button><p v-if="snapshot.manual_review" class="help">当前 r{{ snapshot.revision }} 有独立人工核对记录，人工选用 {{ snapshot.manual_review.outputs.length }} 个待复核目标。修改方案后须重新核对；普通保存新版本不继承此记录。</p><p v-if="manualReviewEditor?.needsCheck" class="intent-warning" role="status">人工核对操作结果待确认，请先打开窗口核对原操作。暂不能保存其他方案、确认或导出。</p><p v-else-if="snapshot.manual_review && planDirty" class="intent-warning" role="status">本页方案已修改，原人工核对暂不授权当前草稿。保存后需重新人工核对。</p></div>
           <article v-for="(output, index) in outputs" :key="output.output_id" class="intent-output">
-            <div class="intent-output-heading"><label><input v-model="output.enabled" type="checkbox" :disabled="pending || output.status !== 'FOUND'" :aria-label="`选择剪辑目标 ${goal(output)}`">目标 {{ index + 1 }}：{{ goal(output) }}</label><div class="intent-output-actions"><span>{{ names[output.status] }}</span><button class="secondary" :disabled="!canPreviewSequence(output)" :aria-label="`${sequenceSelected(output) ? '停止预览' : '预览'}目标 ${index + 1} 全部区间`" @click="previewSequence(output)">{{ sequenceSelected(output) ? '停止预览' : '预览全部区间' }}</button></div></div>
+            <div class="intent-output-heading"><label><input v-if="output.status === 'FOUND'" v-model="output.enabled" type="checkbox" :disabled="pending || manualReviewProtected" :aria-label="`选择剪辑目标 ${goal(output)}`">目标 {{ index + 1 }}：{{ goal(output) }}</label><div class="intent-output-actions"><span>{{ names[output.status] }}</span><span v-if="manuallySelected.has(output.output_id)" class="status">人工已选用 · r{{ snapshot.revision }}</span><button class="secondary" :disabled="!canPreviewSequence(output)" :aria-label="`${sequenceSelected(output) ? '停止预览' : '预览'}目标 ${index + 1} 全部区间`" @click="previewSequence(output)">{{ sequenceSelected(output) ? '停止预览' : '预览全部区间' }}</button></div></div>
             <details class="intent-reason-details" :open="output.status !== 'FOUND'"><summary>AI 选段说明<span v-if="output.status !== 'FOUND'"> · 需要复核</span></summary><p class="intent-reason">{{ output.reason }}</p></details>
-            <label class="intent-title-label">成片标题<input v-model="output.title" maxlength="120" :disabled="pending" :aria-label="`剪辑标题 ${index + 1}`"></label>
+            <label class="intent-title-label">成片标题<input v-model="output.title" maxlength="120" :disabled="pending || manualReviewProtected" :aria-label="`剪辑标题 ${index + 1}`"></label>
             <div v-for="(part, partIndex) in output.parts" :key="partIndex" class="intent-part">
               <div class="intent-part-label"><b>保留第 {{ partIndex + 1 }} 段</b><div class="intent-part-actions"><button class="text-button" :disabled="!canPreviewSequence(output, partIndex)" :aria-label="`${sequenceSelected(output, partIndex) ? '停止预览' : '预览'}目标 ${index + 1} 第 ${partIndex + 1} 段`" @click="previewSequence(output, partIndex)">{{ sequenceSelected(output, partIndex) ? '停止本段' : '预览本段' }}</button><button class="text-button" :disabled="pending" @click="locate(part.start_utterance_id)">定位原视频 ↗</button></div></div>
-              <div class="intent-boundaries"><button class="intent-boundary-button" :disabled="pending || output.status === 'NOT_FOUND'" :aria-label="`调整目标 ${index + 1} 第 ${partIndex + 1} 段起始原句`" @click="openRangePicker(output, partIndex, 'start', $event)"><span>开始 <strong>{{ part.start_ms >= 0 ? topicTime(part.start_ms) : '未选择' }}</strong><small>调整 ↗</small></span><p>{{ part.start_utterance_id ? sourceText(part.start_utterance_id) : '选择要保留的第一句' }}</p></button><button class="intent-boundary-button" :disabled="pending || output.status === 'NOT_FOUND'" :aria-label="`调整目标 ${index + 1} 第 ${partIndex + 1} 段结束原句`" @click="openRangePicker(output, partIndex, 'end', $event)"><span>结束 <strong>{{ part.end_ms >= 0 ? topicTime(part.end_ms) : '未选择' }}</strong><small>调整 ↗</small></span><p>{{ part.end_utterance_id ? sourceText(part.end_utterance_id) : '选择要保留的最后一句' }}</p></button></div>
-              <button class="text-button intent-remove" :disabled="pending" @click="removePart(output, partIndex)">移除此段</button>
+              <div class="intent-boundaries"><button class="intent-boundary-button" :disabled="pending || manualReviewProtected || output.status === 'NOT_FOUND'" :aria-label="`调整目标 ${index + 1} 第 ${partIndex + 1} 段起始原句`" @click="openRangePicker(output, partIndex, 'start', $event)"><span>开始 <strong>{{ part.start_ms >= 0 ? topicTime(part.start_ms) : '未选择' }}</strong><small>调整 ↗</small></span><p>{{ part.start_utterance_id ? sourceText(part.start_utterance_id) : '选择要保留的第一句' }}</p></button><button class="intent-boundary-button" :disabled="pending || manualReviewProtected || output.status === 'NOT_FOUND'" :aria-label="`调整目标 ${index + 1} 第 ${partIndex + 1} 段结束原句`" @click="openRangePicker(output, partIndex, 'end', $event)"><span>结束 <strong>{{ part.end_ms >= 0 ? topicTime(part.end_ms) : '未选择' }}</strong><small>调整 ↗</small></span><p>{{ part.end_utterance_id ? sourceText(part.end_utterance_id) : '选择要保留的最后一句' }}</p></button></div>
+              <button class="text-button intent-remove" :disabled="pending || manualReviewProtected" @click="removePart(output, partIndex)">移除此段</button>
             </div>
-            <button v-if="output.status !== 'NOT_FOUND' && output.parts.length < 12" class="text-button" :disabled="pending" @click="addPart(output)">＋ 增加保留区间</button>
+            <button v-if="output.status !== 'NOT_FOUND' && output.parts.length < 12" class="text-button" :disabled="pending || manualReviewProtected" @click="addPart(output)">＋ 增加保留区间</button>
             <details v-if="output.evidence_utterance_ids.length" class="intent-evidence"><summary>依据原句 {{ output.evidence_utterance_ids.length }} 条</summary><button v-for="id in output.evidence_utterance_ids" :key="id" @click="locate(id)"><span>{{ topicTime(sourceTime(id)) }}</span>{{ sourceText(id) }}</button></details>
-            <details v-if="output.excluded.length" class="intent-excluded"><summary>排除内容 {{ output.excluded.length }} 条</summary><div v-for="(excluded, excludeIndex) in output.excluded" :key="excluded.utterance_id"><button class="text-button" @click="locate(excluded.utterance_id)">{{ topicTime(sourceTime(excluded.utterance_id)) }} {{ sourceText(excluded.utterance_id) }}</button><small>{{ excluded.reason }}</small><button class="text-button" :disabled="pending" @click="unexclude(output, excludeIndex)">取消排除</button></div></details>
+            <details v-if="output.excluded.length" class="intent-excluded"><summary>排除内容 {{ output.excluded.length }} 条</summary><div v-for="(excluded, excludeIndex) in output.excluded" :key="excluded.utterance_id"><button class="text-button" @click="locate(excluded.utterance_id)">{{ topicTime(sourceTime(excluded.utterance_id)) }} {{ sourceText(excluded.utterance_id) }}</button><small>{{ excluded.reason }}</small><button class="text-button" :disabled="pending || manualReviewProtected" @click="unexclude(output, excludeIndex)">取消排除</button></div></details>
             <p class="help">{{ output.parts.length }} 个连续区间 · 预计保留 {{ topicTime(duration(output)) }} · 导出时合成一个文件</p>
           </article>
               </template>
@@ -907,6 +957,7 @@ onBeforeUnmount(() => { stopped = true; historyVersion++; historyScope.dispose()
     </aside>
     <CaptionPanel v-if="captionTarget" :key="`${captionTarget.exportId}:${captionTarget.clipId}`" ref="captionEditor" :export-id="captionTarget.exportId" :clip-id="captionTarget.clipId" :content-url="captionTarget.contentUrl" :active="props.active !== false && intentView === 'deliveries' && !historyOpen" @close="captionTarget = null" />
     <TranscriptRangePicker v-if="rangePickerTarget" :key="rangePickerTarget.token" ref="rangePickerEditor" :output="rangePickerTarget.output" :part-index="rangePickerTarget.partIndex" :utterances="rangePickerTarget.utterances" :duration-ms="rangePickerTarget.durationMs" :initial-field="rangePickerTarget.initialField" :initial-time-ms="rangePickerTarget.initialTimeMs" :active="props.active !== false && intentView === 'review' && !historyOpen" :stale="rangePickerStale" @close="rangePickerCloseHandler" @apply="rangePickerApplyHandler" />
+    <IntentManualReviewPanel v-if="snapshot?.plan" :key="snapshot.id" ref="manualReviewEditor" :snapshot="snapshot" :video-url="videoUrl" :active="props.active !== false && intentView === 'review' && !historyOpen" :blocked="manualReviewBlocked" @snapshot="adoptManualReview" @saved="notice = $event" />
   </section>
 </template>
 

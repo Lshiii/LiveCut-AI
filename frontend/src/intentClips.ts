@@ -1,5 +1,6 @@
 import { parseTextProgress, type TextProgress } from './textProgress.ts'
 import { parseAnswerClipSource, sameAnswerClipSource, type AnswerClipSource } from './answerClip.ts'
+import { effectiveIntentSelection, manualReviewCanonical, manualReviewVerified, parseIntentManualReview, type IntentManualReview } from './intentManualReview.ts'
 
 export interface IntentUtterance { utterance_id: string; start_ms: number; end_ms: number; text: string }
 export interface IntentPart { start_utterance_id: string; end_utterance_id: string; start_ms: number; end_ms: number }
@@ -25,6 +26,7 @@ export interface IntentSnapshot {
   stage: { id: string; stage_type: string; status: string; attempt: number; error_code: string | null; text_progress?: TextProgress }
   source: { video_sha256: string; transcript_hash: string; duration_ms: number }
   source_answer?: AnswerClipSource | null
+  manual_review?: IntentManualReview | null
   revision: number; plan_hash: string | null; confirmed_revisions: number[]
   plan: IntentPlan | null; utterances: IntentUtterance[]
 }
@@ -150,7 +152,11 @@ export function parseIntentSnapshot(raw: unknown, jobId: string, requestId?: str
   const { text_progress: rawProgress, ...stage } = raw.stage
   const progress = parseTextProgress(rawProgress)
   const { resumed_from_request_id: resumedFrom, ...value } = raw
-  return { ...value, source_answer: sourceAnswer, ...(typeof resumedFrom === 'string' ? { resumed_from_request_id: resumedFrom } : {}),
+  let manualReview: IntentManualReview | null = null
+  try { if (raw.manual_review !== undefined && raw.manual_review !== null) manualReview = parseIntentManualReview(raw.manual_review, raw as unknown as IntentSnapshot, raw as unknown as IntentSnapshot) }
+  catch { invalid() }
+  if (Object.hasOwn(raw, 'manual_review') && raw.manual_review === undefined || manualReview && raw.status !== 'PLAN_READY') invalid()
+  return { ...value, source_answer: sourceAnswer, ...(Object.hasOwn(raw, 'manual_review') ? { manual_review: manualReview } : {}), ...(typeof resumedFrom === 'string' ? { resumed_from_request_id: resumedFrom } : {}),
     stage: { ...stage, ...(progress ? { text_progress: progress } : {}) } } as unknown as IntentSnapshot
 }
 
@@ -190,6 +196,12 @@ export function newestIntentSnapshot(known: IntentSnapshot | null | undefined, i
   if (incoming.state_version < known.state_version || incoming.revision < known.revision
     || (incoming.state_version === known.state_version && incoming.status !== known.status)
     || known.confirmed_revisions.some(value => !incoming.confirmed_revisions.includes(value))) return known
+  if (incoming.revision === known.revision) {
+    if (incoming.plan_hash !== known.plan_hash) invalid()
+    // A late/old backend response must never erase or replace an observed immutable proof.
+    if (known.manual_review && manualReviewCanonical(incoming.manual_review ?? null) !== manualReviewCanonical(known.manual_review)) return known
+    if (Object.hasOwn(known, 'manual_review') && known.manual_review === null && incoming.manual_review) invalid()
+  }
   return incoming
 }
 export function intentPayload(outputs: IntentOutput[]): { outputs: IntentOutput[] } {
@@ -203,11 +215,13 @@ export function intentPayload(outputs: IntentOutput[]): { outputs: IntentOutput[
 export function intentCanConfirm(snapshot: IntentSnapshot | null, outputs: IntentOutput[], dirty: boolean, pending: boolean): boolean {
   return !!snapshot?.plan && snapshot.status === 'PLAN_READY' && !dirty && !pending
     && !intentOutputValidation(outputs, snapshot.utterances, snapshot.source.duration_ms, snapshot.plan.goals, snapshot.source_answer)
-    && outputs.some(value => value.enabled)
+    && (!snapshot.manual_review || manualReviewVerified(snapshot) && manualReviewCanonical(outputs) === manualReviewCanonical(snapshot.plan.outputs))
+    && effectiveIntentSelection(snapshot, outputs).length > 0
 }
 export function intentCanExport(snapshot: IntentSnapshot | null, dirty: boolean, pending: boolean): boolean {
   return !!snapshot?.plan && !dirty && !pending && snapshot.plan_hash !== null
-    && snapshot.confirmed_revisions.includes(snapshot.revision) && snapshot.plan.outputs.some(value => value.enabled)
+    && snapshot.confirmed_revisions.includes(snapshot.revision) && (!snapshot.manual_review || manualReviewVerified(snapshot))
+    && effectiveIntentSelection(snapshot, snapshot.plan.outputs).length > 0
 }
 export function editIntentBoundary(output: IntentOutput, index: number, field: 'start_utterance_id' | 'end_utterance_id', value: string, utterances: IntentUtterance[]) {
   const part = output.parts[index]

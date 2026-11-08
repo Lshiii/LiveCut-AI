@@ -29,13 +29,14 @@ public class ClipRequestService {
     private final JdbcTemplate jdbc;
     private final ArtifactVerifier artifacts;
     private final TransactionTemplate tx;
+    private final ClipManualReview manual;
     @Value("${LIVECUT_TEXT_MODEL:}")
     private String preferredTextModel;
     @Value("${LIVECUT_TEXT_FALLBACK_MODELS:}")
     private String configuredFallbackModels;
     private record FrozenSource(String video,String hash,String transcriptKey,String transcriptHash,long duration,JsonNode utterances,String model) {}
-    public ClipRequestService(JdbcTemplate jdbc,ArtifactVerifier artifacts,PlatformTransactionManager manager){
-        this.jdbc=jdbc;this.artifacts=artifacts;tx=new TransactionTemplate(manager);tx.setIsolationLevel(TransactionDefinition.ISOLATION_READ_COMMITTED);
+    public ClipRequestService(JdbcTemplate jdbc,ArtifactVerifier artifacts,PlatformTransactionManager manager,ClipManualReview manual){
+        this.jdbc=jdbc;this.artifacts=artifacts;this.manual=manual;tx=new TransactionTemplate(manager);tx.setIsolationLevel(TransactionDefinition.ISOLATION_READ_COMMITTED);
     }
     public Snapshot create(String parentId,CreateRequest input,String key){
         String parent=uuid(parentId);String instruction=input==null?null:input.instruction();
@@ -58,6 +59,28 @@ public class ClipRequestService {
     }
     public Page list(String parentId){String parent=uuid(parentId);return tx.execute(status->{lockAnalysis(parent);return new Page(jdbc.queryForList("SELECT * FROM clip_request WHERE job_id=? ORDER BY created_at DESC,id DESC LIMIT 100",parent).stream().map(this::snapshot).toList());});}
     public Snapshot get(String id){return tx.execute(status->snapshot(lockPublicOwner(uuid(id))));}
+    public JsonNode createManualReview(String id,JsonNode body,String key){
+        String request=uuid(id);JsonNode input=ClipManualReview.input(body,key);String fingerprint=ClipManualReview.fingerprint(request,input);
+        try{return tx.execute(status->{
+            var owner=lockPublicOwner(request);var existing=jdbc.queryForList("SELECT * FROM clip_plan_manual_review WHERE id=?",key);
+            if(!existing.isEmpty()){
+                var row=existing.getFirst();if(!request.equals(row.get("request_id"))||!fingerprint.equals(row.get("request_hash")))throw conflict("IDEMPOTENCY_CONFLICT","Manual review key belongs to another immutable submission");
+                return manualAt(owner,((Number)row.get("revision")).longValue());
+            }
+            requireReady(owner);long base=number(input,"base_revision");requireCurrent(owner,base);
+            var current=planRow(owner,base);String expected=input.path("plan_hash").asText();JsonNode plan=checkedPlan(owner,current,expected),automatic=automaticPlan(owner);
+            manual.stored(owner,current,plan,automatic);manual.verifySource(owner);
+            long next=Math.addExact(base,1);JsonNode review=manual.build(owner,plan,automatic,input,key,next,ClipManualReview.now());String hash=review.path("review_hash").asText();
+            jdbc.update("INSERT INTO clip_plan_revision (request_id,revision,plan_hash,plan_json,manual_review_id,manual_review_hash) VALUES (?,?,?,?,?,?)",request,next,expected,canonicalJson(plan),key,hash);
+            jdbc.update("INSERT INTO clip_plan_manual_review (id,request_id,request_hash,base_revision,base_plan_hash,revision,plan_hash,review_hash,review_json,source_snapshot_hash,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",key,request,fingerprint,base,expected,next,expected,hash,canonicalJson(review),ClipManualReview.sourceHash(owner),Timestamp.from(Instant.parse(review.path("created_at").asText())));
+            jdbc.update("UPDATE clip_request SET latest_revision=?,state_version=state_version+1,updated_at=CURRENT_TIMESTAMP(6) WHERE id=?",next,request);
+            return review;
+        });}catch(DuplicateKeyException collision){throw conflict("IDEMPOTENCY_CONFLICT","Manual review key belongs to another immutable submission");}
+    }
+    public JsonNode getManualReview(String id,String reviewId){String request=uuid(id),key=uuid(reviewId);return tx.execute(status->{var owner=lockPublicOwner(request);var rows=jdbc.queryForList("SELECT revision FROM clip_plan_manual_review WHERE id=? AND request_id=?",Long.class,key,request);if(rows.isEmpty()){
+        if(!jdbc.queryForList("SELECT revision FROM clip_plan_revision WHERE request_id=? AND manual_review_id=?",request,key).isEmpty())throw ClipManualReview.invalid();
+        throw missing("CLIP_MANUAL_REVIEW_NOT_FOUND");
+    }JsonNode review=manualAt(owner,rows.getFirst());if(review==null||!key.equals(review.path("id").asText()))throw ClipManualReview.invalid();return review;});}
     /** Cancellation fences execution, while old dispatched calls may still settle their accounting. */
     public Snapshot cancel(String id){
         String requestId=uuid(id);
@@ -103,19 +126,22 @@ public class ClipRequestService {
     public Snapshot save(String id,JsonNode input){
         fields(input,Set.of("base_revision","outputs"));long base=number(input,"base_revision");
         return tx.execute(status->{var owner=lockPublicOwner(uuid(id));requireReady(owner);requireCurrent(owner,base);
-            JsonNode old=revision(owner,base);ObjectNode updated=(ObjectNode)old.deepCopy();updated.set("outputs",input.path("outputs").deepCopy());
+            var previous=planRow(owner,base);JsonNode old=JSON.readTree(String.valueOf(previous.get("plan_json")));
+            manual.stored(owner,previous,old,automaticPlan(owner));
+            ObjectNode updated=(ObjectNode)old.deepCopy();updated.set("outputs",input.path("outputs").deepCopy());
             validateReview(updated,owner,automaticPlan(owner));long next=Math.addExact(base,1);String serialized=canonicalJson(updated);
             jdbc.update("INSERT INTO clip_plan_revision (request_id,revision,plan_hash,plan_json) VALUES (?,?,?,?)",id,next,sha(serialized),serialized);
             jdbc.update("UPDATE clip_request SET latest_revision=?,state_version=state_version+1,updated_at=CURRENT_TIMESTAMP(6) WHERE id=?",next,id);
             return snapshot(lockOwner(id,String.valueOf(owner.get("job_id"))));});
     }
     public Snapshot confirm(String id,JsonNode input){
-        fields(input,Set.of("revision","plan_hash"));long rev=number(input,"revision");String expected=hash(text(input,"plan_hash",64));
+        fields(input,input.has("manual_review_hash")?Set.of("revision","plan_hash","manual_review_hash"):Set.of("revision","plan_hash"));long rev=number(input,"revision");String expected=hash(text(input,"plan_hash",64));String manualHash=manualHash(input);
         return tx.execute(status->{var owner=lockPublicOwner(uuid(id));requireReady(owner);requireCurrent(owner,rev);
-            JsonNode plan=confirmedCandidate(owner,rev,expected,false);
-            boolean selected=false;for(JsonNode output:plan.path("outputs"))if(output.path("enabled").asBoolean()){selected=true;if(!output.path("status").asText().equals("FOUND"))throw conflict("CLIP_PLAN_UNVERIFIED","Only found targets can be selected");}
-            if(!selected)throw conflict("CLIP_PLAN_EMPTY_SELECTION","Select at least one output before confirming");
-            jdbc.update("INSERT INTO clip_plan_confirmation (request_id,revision,plan_hash) VALUES (?,?,?) ON DUPLICATE KEY UPDATE plan_hash=plan_hash",id,rev,expected);
+            var selected=deliverySelection(owner,rev,expected,manualHash,false);
+            if(selected.outputs().isEmpty())throw conflict("CLIP_PLAN_EMPTY_SELECTION","Select at least one output before confirming");
+            var rows=jdbc.queryForList("SELECT plan_hash,manual_review_hash FROM clip_plan_confirmation WHERE request_id=? AND revision=?",id,rev);
+            if(!rows.isEmpty()){var previous=rows.getFirst();if(!expected.equals(previous.get("plan_hash"))||!Objects.equals(manualHash,previous.get("manual_review_hash")))throw conflict("CLIP_PLAN_CONFIRMATION_CONFLICT","Confirmation cannot be rewritten with different review authority");}
+            else jdbc.update("INSERT INTO clip_plan_confirmation (request_id,revision,plan_hash,manual_review_hash) VALUES (?,?,?,?)",id,rev,expected,manualHash);
             return snapshot(owner);});
     }
     public Map<String,Object> lockOwner(String id,String parent){var rows=jdbc.queryForList("SELECT * FROM clip_request WHERE id=? AND job_id=? FOR UPDATE",id,parent);if(rows.isEmpty())throw missing("CLIP_REQUEST_NOT_FOUND");return rows.getFirst();}
@@ -152,12 +178,26 @@ public class ClipRequestService {
         jdbc.update("INSERT INTO clip_plan_revision (request_id,revision,plan_hash,plan_json) VALUES (?,0,?,?)",stage.ownerId(),sha(serialized),serialized);
     }
     public JsonNode confirmedCandidate(Map<String,Object> owner,long rev,String expected,boolean confirmed){
-        var rows=jdbc.queryForList("SELECT plan_hash,plan_json FROM clip_plan_revision WHERE request_id=? AND revision=?",owner.get("id"),rev);
-        if(rows.isEmpty())throw missing("CLIP_PLAN_REVISION_NOT_FOUND");
-        var row=rows.getFirst();if(!expected.equals(row.get("plan_hash")))throw conflict("CLIP_PLAN_HASH_CONFLICT","Plan hash does not match this revision");
-        if(confirmed&&jdbc.queryForObject("SELECT COUNT(*) FROM clip_plan_confirmation WHERE request_id=? AND revision=? AND plan_hash=?",Integer.class,owner.get("id"),rev,expected)==0)throw conflict("EXPORT_REQUIRES_CONFIRMATION","Confirm this clipping plan first");
-        JsonNode plan=JSON.readTree(String.valueOf(row.get("plan_json")));return validateReview(plan,owner,automaticPlan(owner));
+        return deliverySelection(owner,rev,expected,null,confirmed).plan();
     }
+    public record DeliverySelection(JsonNode plan,JsonNode review,List<JsonNode> outputs) { public DeliverySelection{outputs=List.copyOf(outputs);} }
+    public DeliverySelection deliverySelection(Map<String,Object> owner,long revision,String planHash,String manualHash,boolean confirmed){
+        var row=planRow(owner,revision);JsonNode plan=checkedPlan(owner,row,planHash),review=manual.stored(owner,row,plan,automaticPlan(owner));
+        String actual=review==null?null:review.path("review_hash").asText();if(!Objects.equals(actual,manualHash))throw conflict("CLIP_MANUAL_REVIEW_MISMATCH","Supply this revision's exact manual review hash");
+        if(confirmed){var rows=jdbc.queryForList("SELECT plan_hash,manual_review_hash FROM clip_plan_confirmation WHERE request_id=? AND revision=?",owner.get("id"),revision);if(rows.size()!=1||!planHash.equals(rows.getFirst().get("plan_hash"))||!Objects.equals(actual,rows.getFirst().get("manual_review_hash")))throw conflict("EXPORT_REQUIRES_CONFIRMATION","Confirm this exact plan and manual review first");}
+        Set<String> human=new HashSet<>();if(review!=null)review.path("outputs").forEach(value->human.add(value.path("output_id").asText()));List<JsonNode> selected=new ArrayList<>();
+        for(JsonNode output:plan.path("outputs"))if(output.path("enabled").asBoolean()||human.contains(output.path("output_id").asText()))selected.add(output);
+        return new DeliverySelection(plan,review,selected);
+    }
+    public static String manualHash(JsonNode input){return input.has("manual_review_hash")?hash(text(input,"manual_review_hash",64)):null;}
+    private Map<String,Object> planRow(Map<String,Object> owner,long revision){var rows=jdbc.queryForList("SELECT * FROM clip_plan_revision WHERE request_id=? AND revision=?",owner.get("id"),revision);if(rows.size()!=1)throw missing("CLIP_PLAN_REVISION_NOT_FOUND");return rows.getFirst();}
+    private JsonNode checkedPlan(Map<String,Object> owner,Map<String,Object> row,String expected){if(!expected.equals(row.get("plan_hash")))throw conflict("CLIP_PLAN_HASH_CONFLICT","Plan hash does not match this revision");JsonNode plan=JSON.readTree(String.valueOf(row.get("plan_json")));if(!ClipManualReview.digest(plan).equals(expected))throw conflict("CLIP_PLAN_SOURCE_INVALID","Saved plan failed its canonical hash");return validateReview(plan,owner,automaticPlan(owner));}
+    private JsonNode manualAt(Map<String,Object> owner,long revision){var row=planRow(owner,revision);JsonNode plan=checkedPlan(owner,row,String.valueOf(row.get("plan_hash")));return manual.stored(owner,row,plan,automaticPlan(owner));}
+    private List<Long> effectiveConfirmations(Map<String,Object> owner){List<Long> result=new ArrayList<>();for(var row:jdbc.queryForList("SELECT c.revision,c.plan_hash,c.manual_review_hash,r.manual_review_id,r.manual_review_hash AS marker_hash FROM clip_plan_confirmation c JOIN clip_plan_revision r ON r.request_id=c.request_id AND r.revision=c.revision AND r.plan_hash=c.plan_hash WHERE c.request_id=? ORDER BY c.revision",owner.get("id"))){
+        if(row.get("manual_review_id")==null&&row.get("marker_hash")==null&&row.get("manual_review_hash")==null){
+            if(jdbc.queryForObject("SELECT COUNT(*) FROM clip_plan_manual_review WHERE request_id=? AND revision=?",Integer.class,owner.get("id"),row.get("revision"))==0)result.add(((Number)row.get("revision")).longValue());
+        }else if(Objects.equals(row.get("marker_hash"),row.get("manual_review_hash"))){try{JsonNode review=manualAt(owner,((Number)row.get("revision")).longValue());if(review!=null&&review.path("review_hash").asText().equals(row.get("manual_review_hash")))result.add(((Number)row.get("revision")).longValue());}catch(JobException invalid){/* Invalid historical proof cannot grant confirmation. */}}
+    }return result;}
     /** Revision zero is inserted only when the automatic stage succeeds; public review APIs never replace it. */
     private JsonNode automaticPlan(Map<String,Object> owner){
         var rows=jdbc.queryForList("SELECT plan_hash,plan_json FROM clip_plan_revision WHERE request_id=? AND revision=0",owner.get("id"));
@@ -172,13 +212,14 @@ public class ClipRequestService {
     private Snapshot snapshot(Map<String,Object> owner){
         var answer=AnswerClipSource.stored(owner);
         String id=String.valueOf(owner.get("id"));long rev=((Number)owner.get("latest_revision")).longValue();
-        var planRows=jdbc.queryForList("SELECT plan_hash,plan_json FROM clip_plan_revision WHERE request_id=? AND revision=?",id,rev);
+        var planRows=jdbc.queryForList("SELECT * FROM clip_plan_revision WHERE request_id=? AND revision=?",id,rev);
         JsonNode plan=planRows.isEmpty()?null:JSON.readTree(String.valueOf(planRows.getFirst().get("plan_json")));
+        JsonNode review=planRows.isEmpty()?null:manual.stored(owner,planRows.getFirst(),plan,planRows.getFirst().get("manual_review_id")==null?plan:automaticPlan(owner));
         var stages=jdbc.queryForList("SELECT * FROM job_stage WHERE owner_type='CLIP_REQUEST' AND owner_id=?",id);if(stages.size()!=1)throw conflict("CLIP_STAGE_UNAVAILABLE","Clipping stage is unavailable");var s=stages.getFirst();
         Stage stage=new Stage(String.valueOf(s.get("id")),String.valueOf(s.get("stage_type")),String.valueOf(s.get("status")),((Number)s.get("attempt")).intValue(),(String)s.get("error_code"),StageDiagnostics.read((String)s.get("diagnostic_json"),(String)s.get("error_code"),((Number)s.get("attempt")).intValue()),TextExecutionPolicy.readProgress(s.get("text_progress_json")));
         return new Snapshot(id,String.valueOf(owner.get("job_id")),String.valueOf(owner.get("video_id")),String.valueOf(owner.get("instruction")),String.valueOf(owner.get("status")),((Number)owner.get("state_version")).longValue(),instant(owner.get("created_at")),instant(owner.get("updated_at")),
             new Budget(((Number)owner.get("max_text_calls")).intValue(),((Number)owner.get("text_calls_reserved")).intValue()),stage,new Source(String.valueOf(owner.get("source_hash")),String.valueOf(owner.get("transcript_hash")),((Number)owner.get("duration_ms")).longValue()),rev,
-            planRows.isEmpty()?null:String.valueOf(planRows.getFirst().get("plan_hash")),jdbc.queryForList("SELECT revision FROM clip_plan_confirmation WHERE request_id=? ORDER BY revision",Long.class,id),plan,JSON.readTree(String.valueOf(owner.get("source_json"))).path("utterances"),(String)owner.get("resumed_from_request_id"),answer==null?null:answer.source());
+            planRows.isEmpty()?null:String.valueOf(planRows.getFirst().get("plan_hash")),effectiveConfirmations(owner),plan,JSON.readTree(String.valueOf(owner.get("source_json"))).path("utterances"),(String)owner.get("resumed_from_request_id"),answer==null?null:answer.source(),review);
     }
     private FrozenSource source(Map<String,Object> job){
         if(!"REVIEW_READY".equals(job.get("status"))||!"topics".equals(JSON.readTree(String.valueOf(job.get("config_json"))).path("analysis_mode").asText()))throw conflict("CLIP_SOURCE_NOT_READY","A completed topic analysis is required");

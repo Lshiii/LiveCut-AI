@@ -20,7 +20,7 @@ export function intentSaveRecovered(known: IntentSnapshot | null, incoming: Inte
     // This helper is safe to call independently of the caller's HTTP parsing.
     const previous = parseIntentSnapshot(known, known.job_id, known.id)
     const latest = parseIntentSnapshot(incoming, previous.job_id, previous.id)
-    if (!previous.plan || !latest.plan || previous.status !== 'PLAN_READY' || latest.status !== 'PLAN_READY'
+    if (!previous.plan || !latest.plan || latest.manual_review || previous.status !== 'PLAN_READY' || latest.status !== 'PLAN_READY'
       || previous.revision < draftRevision || latest.revision < previous.revision || latest.revision <= draftRevision
       || latest.state_version < previous.state_version
       || latest.revision > previous.revision && latest.state_version === previous.state_version
