@@ -305,8 +305,8 @@ class ResilientTextTransport(httpx.BaseTransport):
         self.inner, self.context = inner, context
         self.policy = policy or TextRetryPolicy.from_env()
         self.progress, self.sleep, self.monotonic = progress, sleep, monotonic
-        self.fallbacks = [] if getattr(context.lease, "stage_type", None) == "AGENT_VISUAL" else _fallbacks(context)
-        if getattr(context.lease, "stage_type", None) == "AGENT_VISUAL" and context.lease.config.get("text_fallback_models", []) != []:
+        self.fallbacks = [] if getattr(context.lease, "stage_type", None) in {"AGENT_VISUAL", "AGENT_VISUAL_FOCUS"} else _fallbacks(context)
+        if getattr(context.lease, "stage_type", None) in {"AGENT_VISUAL", "AGENT_VISUAL_FOCUS"} and context.lease.config.get("text_fallback_models", []) != []:
             raise TextRecoveryError("INVALID_VISUAL_FALLBACK_CONFIGURATION")
         self.circuit = TextCircuit(context, circuit_policy)
         self.trace = {"schema_version": 1, "job_id": context.lease.job_id,
@@ -501,6 +501,7 @@ class ResilientTextTransport(httpx.BaseTransport):
         profile = profiles[profile_index]
         last_code = "PROVIDER_UNAVAILABLE"
         expired = False
+        restricted_code = None
         if profile_index:
             self._emit("SWITCHING_PROVIDER", 1, profile, started, code="PROVIDER_CIRCUIT_OPEN")
         for slot in range(self.policy.max_attempts):
@@ -519,6 +520,13 @@ class ResilientTextTransport(httpx.BaseTransport):
                 extensions[ROUTED_IDENTITY] = True
             if expired:
                 extensions["livecut_text_replay_only"] = True
+            if getattr(self.context.lease, "stage_type", None) == "AGENT_VISUAL_FOCUS":
+                remaining_budget = self.visual_text_budget()
+                if type(remaining_budget) is not int or remaining_budget <= 0:
+                    extensions["livecut_text_replay_only"] = True
+                    restricted_code = "FOCUS_MODEL_BUDGET_UNAVAILABLE" if remaining_budget is None else "MODEL_BUDGET_EXHAUSTED"
+                else:
+                    restricted_code = None
             extensions["timeout"] = {name: min(value, timeout) if isinstance(value, (int, float)) else timeout
                                       for name, value in request.extensions.get("timeout", {}).items()}
             headers = {"Content-Type": "application/json"}
@@ -564,7 +572,7 @@ class ResilientTextTransport(httpx.BaseTransport):
             except ModelBudgetError as error:
                 if error.code not in {"TEXT_PREVIOUS_OUTCOME_UNKNOWN", "TEXT_RECOVERY_NOT_RECORDED"}:
                     raise
-                if error.code == "TEXT_RECOVERY_NOT_RECORDED" and not expired:
+                if error.code == "TEXT_RECOVERY_NOT_RECORDED" and not expired and restricted_code is None:
                     raise
                 last_code = "PREVIOUS_OUTCOME_UNKNOWN"
             finally:
@@ -582,13 +590,13 @@ class ResilientTextTransport(httpx.BaseTransport):
                 profile = profiles[profile_index]
                 self._emit("SWITCHING_PROVIDER", slot + 2, profile, started, code=last_code)
             delay = min(30, max(retry_after, self.policy.backoff_seconds * (2 ** slot)))
-            if expired:
+            if expired or restricted_code is not None:
                 continue
             if self.monotonic() + delay >= total_deadline:
                 self._emit("EXHAUSTED", slot + 1, profile, started, code="TEXT_RETRY_DEADLINE_EXCEEDED")
                 raise TextRecoveryError("TEXT_RETRY_DEADLINE_EXCEEDED")
             self._emit("RETRY_WAIT", slot + 1, profile, started, code=last_code, delay=delay)
             self._wait(delay)
-        terminal = "TEXT_RETRY_DEADLINE_EXCEEDED" if expired else "TEXT_RETRIES_EXHAUSTED"
+        terminal = restricted_code or ("TEXT_RETRY_DEADLINE_EXCEEDED" if expired else "TEXT_RETRIES_EXHAUSTED")
         self._emit("EXHAUSTED", self.policy.max_attempts, profile, started, code=terminal)
         raise TextRecoveryError(terminal)

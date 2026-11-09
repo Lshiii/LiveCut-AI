@@ -35,7 +35,8 @@ from .topic_contracts import validate_topic_result
 from .topics import discover_topics
 from .worker_client import WorkerClient, WorkerClientError
 
-STAGES = ("MEDIA", "ASR", "SEGMENT", "CAPTION_PROOFREAD", "ANCHOR_CLIP", "AGENT_VISUAL", "TIMELINE", "EXPORT_CLIP")
+STAGES = ("MEDIA", "ASR", "SEGMENT", "CAPTION_PROOFREAD", "ANCHOR_CLIP", "AGENT_VISUAL", "AGENT_VISUAL_FOCUS", "TIMELINE", "EXPORT_CLIP")
+VISUAL_STAGES = {"AGENT_VISUAL", "AGENT_VISUAL_FOCUS"}
 
 
 class WorkerError(Exception):
@@ -621,9 +622,9 @@ class StageWorker:
                 ready = True
             except Exception:
                 pass
-        if stage_type == "AGENT_VISUAL" and not ready:
+        if stage_type in VISUAL_STAGES and not ready:
             raise WorkerError("VISUAL_NOT_CONFIGURED")
-        return [stage_type] if stage_type is not None else [stage for stage in STAGES if stage != "AGENT_VISUAL" or ready]
+        return [stage_type] if stage_type is not None else [stage for stage in STAGES if stage not in VISUAL_STAGES or ready]
 
     @contextmanager
     def _registered(self, stage_type: str | None, *, candidate_session: str | None = None) -> Iterator[bool]:
@@ -843,7 +844,7 @@ class StageWorker:
                     self._ready_succeeded()
                     candidates = [item for item in candidates if (not isinstance(item, dict)
                                   or not isinstance(item.get("id"), str) or item["id"] not in attempted)
-                                  and (item.get("stage_type") != "AGENT_VISUAL" or "AGENT_VISUAL" in self._available_stages(stage_type))]
+                                  and (item.get("stage_type") not in VISUAL_STAGES or item["stage_type"] in self._available_stages(stage_type))]
                 item = candidates.pop(0)
                 if not isinstance(item, dict):
                     raise WorkerError("INVALID_JAVA_RESPONSE")
@@ -1146,7 +1147,8 @@ class AnalysisStageExecutor:
         lease, directory = context.lease, context.directory
         config = lease.config.get("agent_turn")
         caption = lease.stage_type == "CAPTION_PROOFREAD"
-        visual = lease.stage_type == "AGENT_VISUAL"
+        visual = lease.stage_type in VISUAL_STAGES
+        focus = lease.stage_type == "AGENT_VISUAL_FOCUS"
         required = {"turn_id", "session_id", "question", "source_job_id", "source_transcript_key",
                     "source_transcript_hash", "source_analysis_key", "source_analysis_hash",
                     "duration_ms", "history", "max_tool_steps"}
@@ -1171,6 +1173,10 @@ class AnalysisStageExecutor:
                 raise WorkerError("VISUAL_NOT_CONFIGURED")
         elif config.get("visual_mode", "none") != "none":
             raise WorkerError("INVALID_AGENT_VISUAL_INPUT")
+        if ((focus and (type(config.get("focus_timestamp_ms")) is not int
+                       or not 0 <= config["focus_timestamp_ms"] < min(config["duration_ms"], 2**53)))
+                or not focus and "focus_timestamp_ms" in config):
+            raise WorkerError("INVALID_AGENT_FOCUS_INPUT")
         sources = {}
         for name, stage, kind in (("transcript", "ASR", "transcript"),
                                    ("analysis", "TIMELINE", "analysis_result")):
@@ -1232,6 +1238,8 @@ class AnalysisStageExecutor:
                 options["ffmpeg_path"] = self.ffmpeg_path
                 options["ffprobe_path"] = self.ffprobe_path
                 options["media_info"] = _read(context.predecessor("MEDIA", "media_info"))
+                if focus:
+                    options["focus_timestamp_ms"] = config["focus_timestamp_ms"]
                 options["budget_remaining"] = getattr(text_transport, "visual_text_budget", lambda: None)
                 options["max_request_attempts"] = text_transport.policy.max_attempts if isinstance(text_transport, ResilientTextTransport) else 1
                 build_visual_answer(transcript, analysis["segments"], config["duration_ms"], config["question"],
@@ -1370,7 +1378,7 @@ class AnalysisStageExecutor:
             if "agent_turn" not in config or "clip_request" in config:
                 raise WorkerError("INVALID_CAPTION_PROOFREAD_INPUT")
             return self._execute_agent(context)
-        if lease.stage_type == "AGENT_VISUAL":
+        if lease.stage_type in VISUAL_STAGES:
             if "agent_turn" not in config or "clip_request" in config:
                 raise WorkerError("INVALID_AGENT_VISUAL_INPUT")
             return self._execute_agent(context)

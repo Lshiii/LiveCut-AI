@@ -79,7 +79,7 @@ def main(argv: list[str] | None = None) -> int:
     worker.add_argument("--once", action="store_true", help="Handle one stage or pending callback")
     worker.add_argument("--job-id", help="Only claim this analysis job, including fenced export stages")
     worker.add_argument("--reuse-asr-job", help="Explicitly reuse a verified successful ASR from this job")
-    worker.add_argument("--stage-type", choices=("MEDIA", "ASR", "SEGMENT", "CAPTION_PROOFREAD", "ANCHOR_CLIP", "AGENT_VISUAL", "TIMELINE", "EXPORT_CLIP"),
+    worker.add_argument("--stage-type", choices=("MEDIA", "ASR", "SEGMENT", "CAPTION_PROOFREAD", "ANCHOR_CLIP", "AGENT_VISUAL", "AGENT_VISUAL_FOCUS", "TIMELINE", "EXPORT_CLIP"),
                         help="Only claim this stage type; useful for a media-only smoke check")
     worker.add_argument("--poll-seconds", type=float, default=3)
     worker.add_argument("--registration-wait-seconds", default=45, metavar="SECONDS",

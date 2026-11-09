@@ -6,13 +6,14 @@ import TextRequestProgress from './TextRequestProgress.vue'
 import AgentAnswer from './AgentAnswer.vue'
 import AgentVisualEvidence from './AgentVisualEvidence.vue'
 import { parseAgentVisualCapability, type AgentVisualCapability } from './agentVisualEvidence'
+import { AgentFocusError, canCaptureAgentFocus, captureAgentFocus, focusHintMatches, parseAgentFocusCapability, type AgentFocusHint } from './agentFocus'
 import { SequencePreview } from './sequencePreview'
 import { selectAnswerClip, type AnswerClipSelection } from './answerClip'
 import { topicTime } from './topics'
 import { AgentReadScope, AgentResponseError, agentTurnActive, canPrefillClipInstruction,
   newestAgentSession, newestAgentTurn, parseAgentSession, parseAgentTurn,
   type AgentCitation, type AgentSession, type AgentTurn } from './videoAgent'
-import { AgentSubmissionError, agentDraftAfterSubmission, agentSubmissionStorageKey, assertAgentSubmissionStored, createAgentSubmission, filterAcknowledgedAgentSubmissions, inspectAgentSubmissionLimit, mergeAgentSubmissionResult, parseAgentSubmissionResponse,
+import { AgentSubmissionError, agentDraftAfterSubmission, agentDraftMatchesSubmission, agentSubmissionStorageKey, assertAgentSubmissionStored, createAgentSubmission, filterAcknowledgedAgentSubmissions, inspectAgentSubmissionLimit, mergeAgentSubmissionResult, parseAgentSubmissionResponse,
   removeAgentSubmission, resolveAgentSubmission, restoreAgentSubmission, retainAgentSubmissions, scanAgentSubmissions,
   type AgentSubmissionEntry, type AgentSubmissionIssue, type AgentSubmissionResult } from './agentSubmissionRecovery'
 
@@ -20,6 +21,7 @@ const props = defineProps<{ jobId: string; videoId: string; videoHash: string; v
 const emit = defineEmits<{ clipInstruction: [instruction: string]; clipAnchor: [selection: AnswerClipSelection] }>()
 const sessions = ref<AgentSession[]>([]), selectedId = ref(''), question = ref(''), maxCalls = ref(8)
 const visualMode = ref<'none' | 'frames'>('none'), visualCapability = ref<AgentVisualCapability | null>(null), capabilityLoading = ref(false), capabilityError = ref('')
+const focusHint = ref<AgentFocusHint | null>(null), focusSupported = ref(false), focusLoading = ref(false), focusError = ref(''), focusPlayerVersion = ref(0)
 const action = ref(''), error = ref(''), refreshError = ref(''), notice = ref(''), loading = ref(true)
 const selected = computed(() => sessions.value.find(session => session.id === selectedId.value) ?? null)
 const activeTurn = computed(() => selected.value?.turns.find(agentTurnActive))
@@ -34,7 +36,7 @@ const submissionEntries = ref<AgentSubmissionEntry[]>([]), submissionIssues = re
 const ownDurabilityLost = ref(false)
 const fullSessionConflicts = ref<Record<string, boolean>>({})
 const submissionBlocked = computed(() => !!submissionEntries.value.length || !!submissionIssues.value.length)
-const pending = computed(() => !!action.value || anchorPreparing.value), dirty = computed(() => !!question.value.trim() || ownDurabilityLost.value)
+const pending = computed(() => !!action.value || anchorPreparing.value), dirty = computed(() => !!question.value.trim() || !!focusHint.value || ownDurabilityLost.value)
 const citation = ref<AgentCitation | null>(null), sourcePlayer = ref<HTMLVideoElement | null>(null), playbackError = ref('')
 const frameLocation = ref<{ time: number; title: string } | null>(null)
 const messageList = ref<HTMLOListElement | null>(null)
@@ -67,7 +69,7 @@ const ownUnacknowledged = new Map<string, AgentSubmissionEntry>()
 const acknowledgedSubmissions = new Map<string, AgentSubmissionEntry>()
 let submissionVersion = 0
 let stopped = false, refreshing = false, timer: number | undefined, selectionVersion = 0, previewVersion = 0
-let referenceObserver: ResizeObserver | undefined, capabilityVersion = 0
+let referenceObserver: ResizeObserver | undefined, capabilityVersion = 0, focusCapabilityVersion = 0
 let preparedEvidence: { version: number; sessionId: string; turnId: string; videoUrl: string; sourceHash: string; start: number; end?: number } | null = null
 let evidenceTimer: number | undefined
 const evidenceSequence = new SequencePreview()
@@ -76,10 +78,12 @@ const examples = ['概括这段视频', '展开解释刚才提到的第二点', 
 const names: Record<string, string> = { QUEUED: '等待回答', RUNNING: '正在查找与回答', SUCCEEDED: '回答完成', FAILED: '本轮未完成', CANCELLED: '已取消' }
 const scopes = { VIDEO: '来自视频', GENERAL: '通用知识补充', INSUFFICIENT: '视频证据不足' }
 const toolNames = { search_transcript: '检索视频原句', read_context: '补读相邻内容', list_topics: '查看视频话题', inspect_frames: '查看指定画面', inspect_clip: '短片画面抽样' }
+const canAttachFocus = computed(() => { void focusPlayerVersion.value; return canCaptureAgentFocus(focusCaptureInput()) })
+const focusSubmissionBlocked = computed(() => !!focusHint.value && (visualMode.value !== 'frames' || !focusSupported.value || !focusHintMatches(focusHint.value, focusOwner())))
 defineExpose({ dirty, pending })
 
 function message(value: unknown) {
-  const rawCode = value instanceof ApiError || value instanceof AgentSubmissionError ? value.code : value instanceof AgentResponseError ? 'INVALID_AGENT_RESPONSE' : 'CLIENT_ERROR'
+  const rawCode = value instanceof ApiError || value instanceof AgentSubmissionError || value instanceof AgentFocusError ? value.code : value instanceof AgentResponseError ? 'INVALID_AGENT_RESPONSE' : 'CLIENT_ERROR'
   const code = typeof rawCode === 'string' && /^[A-Z][A-Z0-9_]{0,99}$/.test(rawCode) ? rawCode : 'CLIENT_ERROR'
   const known: Record<string, string> = {
     NETWORK_UNAVAILABLE: '暂时无法连接服务，输入和已有回答仍保留。',
@@ -107,6 +111,10 @@ function message(value: unknown) {
     HTTP_404: '当前服务未提供提交核对路由，请更新服务后重试；原回执保留，未直接重新提问。',
     RESOURCE_NOT_FOUND: '当前服务未提供提交核对路由，请更新服务后重试；原回执保留，未直接重新提问。',
     AGENT_VISUAL_UNAVAILABLE: '当前服务未确认可结合画面，尚未提交视觉请求。画面选择和问题保留，未降级为文本请求。',
+    AGENT_FOCUS_UNAVAILABLE: '当前服务尚未确认支持附加位置。定位提示与问题保留；未删除位置或改为无位置请求。',
+    AGENT_FOCUS_NOT_READY: '请先展开并加载当前原视频，等定位完成后再附加位置。当前草稿与原提交保持不变。',
+    AGENT_FOCUS_MODE_REQUIRED: '草稿包含定位提示。请移除提示或切回“结合画面”后再提交。',
+    AGENT_FOCUS_SOURCE_CHANGED: '定位提示的原视频来源已变化，请明确移除或重新附加当前位置。',
   }
   return known[code] ?? `对话操作未完成：${code}`
 }
@@ -123,6 +131,35 @@ async function loadVisualCapability(current: () => boolean = () => !stopped) {
     return null
   } finally { if (!stopped && version === capabilityVersion) capabilityLoading.value = false }
 }
+async function loadFocusCapability(current: () => boolean = () => !stopped) {
+  const version = ++focusCapabilityVersion
+  focusLoading.value = true; focusError.value = ''
+  try {
+    parseAgentFocusCapability(await api<unknown>('/api/agent-capabilities/focus'))
+    if (!current() || version !== focusCapabilityVersion) return false
+    focusSupported.value = true; return true
+  } catch {
+    if (current() && version === focusCapabilityVersion) { focusSupported.value = false; focusError.value = '暂不能附加位置；普通视觉提问仍可使用，现有定位提示保留。' }
+    return false
+  } finally { if (!stopped && version === focusCapabilityVersion) focusLoading.value = false }
+}
+function focusOwner() {
+  const duration = selected.value?.source.duration_ms ?? Math.floor((sourcePlayer.value?.duration ?? 0) * 1000)
+  return { job_id: props.jobId, video_id: props.videoId, source_hash: props.videoHash, duration_ms: duration }
+}
+function focusCaptureInput() {
+  let url = ''
+  try { url = new URL(props.videoUrl, document.baseURI).href } catch { /* An invalid current source cannot be captured. */ }
+  return { player: sourcePlayer.value, owner: focusOwner(), expectedSourceUrl: url, active: props.active !== false && !stopped,
+    visible: !document.hidden && referenceVisible.value && !sessionListOpen.value, frames: visualMode.value === 'frames', supported: focusSupported.value,
+    pending: pending.value, pendingPreview: preparedEvidence !== null }
+}
+function touchFocusPlayer() { focusPlayerVersion.value++ }
+function attachFocus() {
+  try { focusHint.value = captureAgentFocus(focusCaptureInput(), pauseReference); notice.value = '已暂停并附加定位提示；后续播放或拖动不会改变它，尚未获取或发送截图。'; error.value = '' }
+  catch (value) { error.value = message(value) }
+}
+function removeFocus() { if (!pending.value) { focusHint.value = null; notice.value = '已移除本页定位提示；未改变任何原提交。' } }
 function upsertSession(value: AgentSession) {
   const index = sessions.value.findIndex(session => session.id === value.id)
   const latest = newestAgentSession(index < 0 ? undefined : sessions.value[index], value)
@@ -266,12 +303,15 @@ async function newSession() {
 }
 async function send() {
   const input = question.value.trim(), budget = maxCalls.value, mode = visualMode.value
+  const focus = focusHint.value ? { ...focusHint.value } : null
   if (pending.value || !input || props.active === false || document.hidden) return
   try { requireNoSubmission() } catch (value) { error.value = message(value); return }
+  if (focus && mode !== 'frames') { error.value = message(new AgentFocusError('AGENT_FOCUS_MODE_REQUIRED')); return }
+  if (focus && !focusHintMatches(focus, focusOwner())) { error.value = message(new AgentFocusError('AGENT_FOCUS_SOURCE_CHANGED')); return }
   if (input.length > 2000 || !Number.isInteger(budget) || budget < 1 || budget > 24) { error.value = '问题最多 2000 字，模型请求上限须为 1～24 的整数。'; return }
   if (activeTurn.value) { error.value = '本对话还有一轮正在执行，请等待回答或取消本轮后再提问。'; return }
   scope.invalidate(); const version = ++selectionVersion, operation = ++submissionVersion, owner = submissionOwner()
-  const draft = JSON.stringify({ question: question.value, budget: maxCalls.value, visual_mode: visualMode.value })
+  const draft = JSON.stringify({ question: question.value, budget: maxCalls.value, visual_mode: visualMode.value, focus: focusHint.value })
   action.value = 'send'; error.value = ''; notice.value = ''
   let submitted: AgentSubmissionEntry | null = null, posted = false
   try {
@@ -280,11 +320,16 @@ async function send() {
       if (!submissionCurrent(version, operation, owner)) return
       if (capability?.visual_mode !== 'frames') throw new ApiError('AGENT_VISUAL_UNAVAILABLE')
     }
+    if (focus) {
+      const supported = await loadFocusCapability(() => submissionCurrent(version, operation, owner))
+      if (!submissionCurrent(version, operation, owner)) return
+      if (!supported) throw new AgentFocusError('AGENT_FOCUS_UNAVAILABLE')
+    }
     const session = selected.value ?? await requestSession(version, operation)
     if (!session || !submissionCurrent(version, operation, owner, session.id)) return
     requireNoSubmission()
     let entry: AgentSubmissionEntry
-    try { entry = createAgentSubmission(localStorage, owner, 'TURN', JSON.stringify({ question: input, max_text_calls: budget, ...(mode === 'frames' ? { visual_mode: 'frames' } : {}) }), () => crypto.randomUUID(), sessions.value, session, [...acknowledgedSubmissions.values()]) }
+    try { entry = createAgentSubmission(localStorage, owner, 'TURN', JSON.stringify({ question: input, max_text_calls: budget, ...(mode === 'frames' ? { visual_mode: 'frames' } : {}), ...(focus ? { focus_timestamp_ms: focus.timestamp_ms } : {}) }), () => crypto.randomUUID(), sessions.value, session, [...acknowledgedSubmissions.values()]) }
     catch (value) { scanSubmissions(); throw value }
     rememberSubmission(entry)
     submitted = entry
@@ -293,7 +338,7 @@ async function send() {
     const result = parseAgentSubmissionResponse(raw, entry, session)
     if (result.kind !== 'TURN') throw new AgentSubmissionError()
     adoptSubmissionResult(result); acknowledgeSubmission(entry)
-    if (draft === JSON.stringify({ question: question.value, budget: maxCalls.value, visual_mode: visualMode.value })) question.value = ''
+    if (draft === JSON.stringify({ question: question.value, budget: maxCalls.value, visual_mode: visualMode.value, focus: focusHint.value })) { question.value = ''; focusHint.value = null }
     followLatest = true; scrollToLatest(true)
     notice.value = '问题已保存，回答与引用会自动更新。'
   } catch (value) {
@@ -332,8 +377,10 @@ function adoptSubmissionResult(result: AgentSubmissionResult) {
   if (!selectedId.value) selectedId.value = result.session.id
 }
 function adoptAcknowledgedSubmission(entry: AgentSubmissionEntry, result: AgentSubmissionResult) {
-  const nextQuestion = agentDraftAfterSubmission(entry, { session_id: selectedId.value, question: question.value, budget: maxCalls.value, visual_mode: visualMode.value })
+  const draft = { session_id: selectedId.value, question: question.value, budget: maxCalls.value, visual_mode: visualMode.value, ...(focusHint.value ? { focus_timestamp_ms: focusHint.value.timestamp_ms } : {}) }
+  const matched = agentDraftMatchesSubmission(entry, draft), nextQuestion = agentDraftAfterSubmission(entry, draft)
   adoptSubmissionResult(result); acknowledgeSubmission(entry); question.value = nextQuestion
+  if (matched) focusHint.value = null
 }
 function inspectLimit(entry: AgentSubmissionEntry, current: () => boolean) {
   return inspectAgentSubmissionLimit(entry, {
@@ -372,6 +419,7 @@ function downloadSubmission(entry: AgentSubmissionEntry) {
 function originalQuestion(entry: AgentSubmissionEntry): string { return entry.kind === 'TURN' ? JSON.parse(entry.input).question : '新建视频对话' }
 function originalBudget(entry: AgentSubmissionEntry): number | null { return entry.kind === 'TURN' ? JSON.parse(entry.input).max_text_calls : null }
 function originalVisualMode(entry: AgentSubmissionEntry): string { return entry.kind === 'TURN' && JSON.parse(entry.input).visual_mode === 'frames' ? '结合画面' : '文本模式' }
+function originalFocus(entry: AgentSubmissionEntry): number | undefined { return entry.kind === 'TURN' ? JSON.parse(entry.input).focus_timestamp_ms : undefined }
 function submissionStorageChanged(event: StorageEvent) {
   if (event.key === null || event.key.startsWith(`livecut-agent-submission-v1:${props.jobId}:`) || event.key === `livecut-agent-session-${props.jobId}`
     || sessions.value.some(session => event.key === `livecut-agent-turn-${session.id}`)) scanSubmissions()
@@ -380,7 +428,7 @@ function invalidateSubmission() {
   submissionVersion++
   if (action.value === 'send' || action.value === 'session' || action.value.startsWith('recover:') || action.value.startsWith('release:')) action.value = ''
 }
-function submissionVisibilityChanged() { if (document.hidden) { invalidateSubmission(); pauseReference() } else scanSubmissions() }
+function submissionVisibilityChanged() { if (document.hidden) { invalidateSubmission(); pauseReference() } else scanSubmissions(); touchFocusPlayer() }
 async function cancel(turn: AgentTurn) {
   const session = selected.value
   if (pending.value || !session || !agentTurnActive(turn)) return
@@ -398,7 +446,7 @@ function chooseExample(value: string) {
   if (pending.value || dirty.value) { error.value = '请先发送或放弃当前问题，再选择示例。'; return }
   question.value = value; error.value = ''
 }
-function discard() { if (!pending.value) { question.value = ''; error.value = ''; notice.value = '' } }
+function discard() { if (!pending.value) { question.value = ''; focusHint.value = null; error.value = ''; notice.value = '' } }
 function suggest(value: string) {
   if (!canPrefillClipInstruction(value, !!props.clipTargetBusy, pending.value)) { error.value = '剪辑区域有未提交内容或正在提交，请先处理后再送入要求。'; return }
   emit('clipInstruction', value)
@@ -459,6 +507,7 @@ function seekCitation() {
   const player = sourcePlayer.value, value = preparedEvidence
   if (!player || !value || !evidenceCurrent(value)) return
   preparedEvidence = null; window.clearTimeout(evidenceTimer); evidenceTimer = undefined
+  touchFocusPlayer()
   try {
     if (value.end === undefined) { player.pause(); player.currentTime = value.start / 1000 }
     else void evidenceSequence.start(player, { id: `${value.turnId}:${value.version}`, parts: [{ start_ms: value.start, end_ms: value.end }] })
@@ -466,7 +515,7 @@ function seekCitation() {
   }
   catch { if (evidenceCurrent(value)) playbackError.value = '暂时无法定位，请检查原视频是否可播放。' }
 }
-function pauseReference() { previewVersion++; preparedEvidence = null; window.clearTimeout(evidenceTimer); evidenceTimer = undefined; evidenceSequence.cancel(); sourcePlayer.value?.pause() }
+function pauseReference() { previewVersion++; preparedEvidence = null; window.clearTimeout(evidenceTimer); evidenceTimer = undefined; evidenceSequence.cancel(); sourcePlayer.value?.pause(); touchFocusPlayer() }
 function toggleReference() { pauseReference(); referenceExpanded.value = !referenceExpanded.value }
 function toggleConversationFocus() { pauseReference(); conversationFocused.value = !conversationFocused.value }
 function guardPlayback(event: Event) { if (!mediaActive()) (event.currentTarget as HTMLVideoElement).pause() }
@@ -476,6 +525,7 @@ function unload(event: BeforeUnloadEvent) { scanSubmissions(); if (dirty.value |
 onMounted(() => {
   scanSubmissions(); window.addEventListener('storage', submissionStorageChanged); window.addEventListener('focus', scanSubmissions)
   void loadVisualCapability()
+  void loadFocusCapability()
   document.addEventListener('visibilitychange', submissionVisibilityChanged)
   window.addEventListener('beforeunload', unload); void poll()
   referenceObserver = new ResizeObserver(entries => {
@@ -501,7 +551,7 @@ watch(referenceVisible, value => { if (!value) pauseReference() }, { flush: 'syn
 watch(() => props.videoUrl, pauseReference, { flush: 'sync' })
 watch(() => props.videoHash, closePreview, { flush: 'sync' })
 watch(sessionListOpen, value => { if (value) pauseReference() }, { flush: 'sync' })
-onBeforeUnmount(() => { scanSubmissions(); stopped = true; capabilityVersion++; submissionVersion++; selectionVersion++; pauseReference(); referenceObserver?.disconnect(); scope.dispose(); window.clearTimeout(timer); window.removeEventListener('beforeunload', unload); window.removeEventListener('storage', submissionStorageChanged); window.removeEventListener('focus', scanSubmissions); document.removeEventListener('visibilitychange', submissionVisibilityChanged) })
+onBeforeUnmount(() => { scanSubmissions(); stopped = true; capabilityVersion++; focusCapabilityVersion++; submissionVersion++; selectionVersion++; pauseReference(); referenceObserver?.disconnect(); scope.dispose(); window.clearTimeout(timer); window.removeEventListener('beforeunload', unload); window.removeEventListener('storage', submissionStorageChanged); window.removeEventListener('focus', scanSubmissions); document.removeEventListener('visibilitychange', submissionVisibilityChanged) })
 </script>
 
 <template>
@@ -514,7 +564,7 @@ onBeforeUnmount(() => { scanSubmissions(); stopped = true; capabilityVersion++; 
       <p>可继续编辑本页草稿；新对话和新提问暂时停止。逐项核对会使用原标识与原内容，不会自动再发其他问题。</p>
       <p v-for="issue in submissionIssues" :key="issue.storage_key + issue.code" class="agent-submission-error" role="alert">{{ message(new AgentSubmissionError(issue.code)) }}</p>
       <article v-for="entry in submissionEntries" :key="agentSubmissionStorageKey(entry)" class="agent-submission-entry">
-        <strong>{{ entry.kind === 'SESSION' ? '新建对话' : '提交问题' }} · #{{ entry.key.slice(0, 8) }}</strong><p class="agent-original-question">{{ originalQuestion(entry) }}</p><p v-if="entry.kind === 'TURN'">原预算上限 {{ originalBudget(entry) }} 次 · {{ originalVisualMode(entry) }} · 原对话 #{{ entry.session_id?.slice(0, 8) }}</p>
+        <strong>{{ entry.kind === 'SESSION' ? '新建对话' : '提交问题' }} · #{{ entry.key.slice(0, 8) }}</strong><p class="agent-original-question">{{ originalQuestion(entry) }}</p><p v-if="entry.kind === 'TURN'">原预算上限 {{ originalBudget(entry) }} 次 · {{ originalVisualMode(entry) }} · 原对话 #{{ entry.session_id?.slice(0, 8) }}<template v-if="originalFocus(entry) !== undefined"> · 原定位提示 {{ topicTime(originalFocus(entry)!) }}</template></p>
         <div class="agent-submission-actions"><button class="secondary" :disabled="pending || active === false" @click="reconcileSubmission(entry)">{{ action === `recover:${entry.key}` ? '正在核对…' : '核对原提交' }}</button><button class="text-button" @click="downloadSubmission(entry)">下载原回执</button></div>
         <div v-if="fullSessionConflicts[agentSubmissionStorageKey(entry)]" class="agent-submission-limit"><p>已核对原标识仍不存在，原会话恰有 100 轮。解除前将再次只读核对，不会自动新建对话或提问。</p><button class="secondary" :disabled="pending || active === false" @click="releaseFullSession(entry)">解除本条未落库提交</button></div>
       </article>
@@ -522,10 +572,11 @@ onBeforeUnmount(() => { scanSubmissions(); stopped = true; capabilityVersion++; 
     <div class="agent-layout" :class="{ 'conversation-focused': conversationFocused && !compactReference }">
       <aside v-show="sessionListOpen" ref="historyPanel" role="dialog" aria-modal="true" @keydown="historyKey" :id="`agent-history-${jobId}`" class="agent-sessions" aria-label="视频对话列表"><div class="agent-section-heading"><h3>对话记录 · {{ sessions.length }}</h3><div class="agent-history-actions"><button class="text-button" @click="closeHistory()">关闭对话记录</button><button class="text-button" :disabled="pending" @click="refresh">刷新</button></div></div><p v-if="loading && !sessions.length" class="help">正在读取对话…</p><p v-else-if="!sessions.length" class="help">发送第一个问题，即可开始对话。</p><button v-for="session in sessions" :key="session.id" class="agent-session" :class="{ selected: selectedId === session.id }" :aria-pressed="selectedId === session.id" :disabled="pending || dirty" @click="session.id === selectedId ? closeHistory() : selectSession(session.id)"><strong>{{ session.turns[0]?.question ?? '新对话' }}</strong><small>{{ date(session.created_at) }} · {{ session.turns.length }} 轮</small></button></aside>
       <aside v-show="compactReference || !conversationFocused" ref="referenceDock" class="agent-reference" :inert="sessionListOpen ? true : undefined" aria-label="视频参考">
-        <div class="agent-reference-heading"><h3><span class="agent-video-icon" aria-hidden="true">▶</span> 原视频</h3><span class="agent-reference-caption">点击原句，定位回看</span><button class="text-button agent-reference-toggle" :aria-expanded="referenceVisible" :aria-controls="`agent-reference-${jobId}`" @click="toggleReference">{{ referenceVisible ? '收起视频' : '展开视频' }}</button></div>
+        <div class="agent-reference-heading"><h3><span class="agent-video-icon" aria-hidden="true">▶</span> 原视频</h3><span class="agent-reference-caption">点击原句，定位回看</span><button v-if="compactReference && referenceVisible" type="button" class="text-button agent-focus-compact" aria-label="附加当前画面位置" title="暂停并固定当前播放位置，仅作为查找提示，尚未取得截图。需结合画面且定位已完成。" :disabled="!canAttachFocus" @click="attachFocus">附加位置</button><button class="text-button agent-reference-toggle" :aria-expanded="referenceVisible" :aria-controls="`agent-reference-${jobId}`" @click="toggleReference">{{ referenceVisible ? '收起视频' : '展开视频' }}</button></div>
         <div v-show="referenceVisible" :id="`agent-reference-${jobId}`" class="agent-reference-body">
-          <div class="agent-reference-video"><video ref="sourcePlayer" :src="videoUrl" controls preload="metadata" playsinline @loadedmetadata="seekCitation" @timeupdate="evidenceSequence.timeUpdate($event.currentTarget as HTMLVideoElement)" @playing="evidenceSequence.timeUpdate($event.currentTarget as HTMLVideoElement)" @seeking="evidenceSequence.seeking($event.currentTarget as HTMLVideoElement)" @seeked="evidenceSequence.seeked($event.currentTarget as HTMLVideoElement)" @pause="evidenceSequence.pause($event.currentTarget as HTMLVideoElement)" @ended="evidenceSequence.ended($event.currentTarget as HTMLVideoElement)" @ratechange="evidenceSequence.rateChange($event.currentTarget as HTMLVideoElement)" @play="guardPlayback" @error="pauseReference()"></video></div>
+          <div class="agent-reference-video"><video :key="`${videoId}:${videoHash}`" ref="sourcePlayer" :src="videoUrl" controls preload="metadata" playsinline @loadedmetadata="touchFocusPlayer(); seekCitation()" @loadeddata="touchFocusPlayer" @canplay="touchFocusPlayer" @durationchange="touchFocusPlayer" @timeupdate="touchFocusPlayer(); evidenceSequence.timeUpdate($event.currentTarget as HTMLVideoElement)" @playing="evidenceSequence.timeUpdate($event.currentTarget as HTMLVideoElement)" @seeking="touchFocusPlayer(); evidenceSequence.seeking($event.currentTarget as HTMLVideoElement)" @seeked="touchFocusPlayer(); evidenceSequence.seeked($event.currentTarget as HTMLVideoElement)" @pause="touchFocusPlayer(); evidenceSequence.pause($event.currentTarget as HTMLVideoElement)" @ended="evidenceSequence.ended($event.currentTarget as HTMLVideoElement)" @ratechange="evidenceSequence.rateChange($event.currentTarget as HTMLVideoElement)" @play="touchFocusPlayer(); guardPlayback($event)" @error="pauseReference()"></video></div>
           <p v-if="playbackError" class="agent-reference-help" role="status">{{ playbackError }}</p>
+          <div v-if="!compactReference" class="agent-focus-controls"><button type="button" class="secondary" :disabled="!canAttachFocus" @click="attachFocus">附加当前画面位置</button><small>暂停并固定当前播放位置，仅作为查找提示，不代表已经取得截图。需结合画面、视频可见且定位已完成。</small><small v-if="focusError" role="status">{{ focusError }}</small></div>
           <p v-if="frameLocation" class="agent-reference-help" role="status">{{ frameLocation.title }} · 原视频 {{ topicTime(frameLocation.time) }}。单帧定位保持暂停，区间回看由你明确触发。</p>
           <div class="agent-evidence-heading"><h4>原句引用 <span v-if="referenceAnswer">第 {{ referenceAnswer.sequence }} 轮 · </span><span>{{ recentCitations.length }}</span></h4><button v-if="recentCitations.length > 3" class="text-button" :aria-expanded="allEvidenceVisible" :aria-controls="`agent-evidence-${jobId}`" @click="allEvidenceVisible = !allEvidenceVisible">{{ allEvidenceVisible ? '收起列表' : `查看全部 ${recentCitations.length} 条` }}</button></div>
           <div :id="`agent-evidence-${jobId}`" ref="referenceEvidence" class="agent-reference-evidence"><div v-if="citation" class="agent-current-citation"><strong>正在回看 {{ topicTime(citation.start_ms) }} → {{ topicTime(citation.end_ms) }}</strong><button class="text-button" @click="closePreview">关闭定位</button><p>{{ citation.text }}</p></div><p v-if="!recentCitations.length" class="agent-evidence-empty">{{ referenceAnswer ? '本轮未引用原句；可在回答下查看画面依据或回看原视频。' : '提问后，这里会列出回答引用的原句。' }}</p><button v-for="(source, index) in visibleCitations" :key="source.utterance_id" class="agent-evidence-item" :class="{ selected: citation?.utterance_id === source.utterance_id }" :title="source.text" @click="preview(source)"><span class="agent-evidence-number" aria-hidden="true">{{ String(index + 1).padStart(2, '0') }}</span><span class="agent-evidence-copy"><span class="agent-evidence-time">{{ topicTime(source.start_ms) }} → {{ topicTime(source.end_ms) }}</span><span class="agent-evidence-text">{{ source.text }}</span></span><span class="agent-evidence-play" aria-hidden="true">▶</span></button></div>
@@ -534,20 +585,21 @@ onBeforeUnmount(() => { scanSubmissions(); stopped = true; capabilityVersion++; 
       <div class="agent-conversation" :inert="sessionListOpen ? true : undefined">
         <div class="agent-toolbar"><h2><span class="agent-ai-icon" aria-hidden="true">✦</span> 视频助手</h2><div class="agent-toolbar-actions"><button class="secondary agent-focus-toggle" :aria-pressed="conversationFocused" @click="toggleConversationFocus">{{ conversationFocused ? '并排回看' : '专注对话' }}</button><button ref="historyToggle" class="secondary" :aria-expanded="sessionListOpen" :aria-controls="`agent-history-${jobId}`" @click="toggleHistory">对话记录 <span>{{ sessions.length }}</span></button><button class="secondary" :disabled="pending || dirty || submissionBlocked" @click="newSession">＋ 新对话</button></div></div>
         <div v-if="!selected?.turns.length" class="agent-welcome"><h3>从视频里找答案</h3><p>可以先概括内容，也可以沿着已有回答继续追问。证据不足时会明确说明。</p></div>
-        <ol v-else ref="messageList" class="agent-turns" aria-label="对话记录" @scroll.passive="messageScroll"><li v-for="turn in selected.turns" :key="turn.id" class="agent-turn"><div class="agent-question"><span>你的问题 · 第 {{ turn.sequence }} 轮</span><p>{{ turn.question }}</p></div><div class="agent-answer"><div class="agent-answer-heading"><strong>视频助手</strong><span class="agent-status">{{ names[turn.status] }}</span><button v-if="agentTurnActive(turn)" class="text-button" :disabled="pending" @click="cancel(turn)">{{ action === 'cancel' ? '正在取消…' : '取消本轮' }}</button></div><TextRequestProgress :progress="turn.stage.text_progress" :terminal="!agentTurnActive(turn)" /><FailureDiagnostic :diagnostic="turn.stage.diagnostic" :error-code="turn.stage.error_code" :attempt="turn.stage.attempt" />
+        <ol v-else ref="messageList" class="agent-turns" aria-label="对话记录" @scroll.passive="messageScroll"><li v-for="turn in selected.turns" :key="turn.id" class="agent-turn"><div class="agent-question"><span>你的问题 · 第 {{ turn.sequence }} 轮</span><p>{{ turn.question }}</p><small v-if="turn.focus_timestamp_ms !== undefined">附加定位提示 {{ topicTime(turn.focus_timestamp_ms) }}，不是已验证画面证据。</small></div><div class="agent-answer"><div class="agent-answer-heading"><strong>视频助手</strong><span class="agent-status">{{ names[turn.status] }}</span><button v-if="agentTurnActive(turn)" class="text-button" :disabled="pending" @click="cancel(turn)">{{ action === 'cancel' ? '正在取消…' : '取消本轮' }}</button></div><TextRequestProgress :progress="turn.stage.text_progress" :terminal="!agentTurnActive(turn)" /><FailureDiagnostic :diagnostic="turn.stage.diagnostic" :error-code="turn.stage.error_code" :attempt="turn.stage.attempt" />
           <template v-if="turn.result"><span class="agent-scope" :class="turn.result.answer_scope.toLowerCase()">{{ scopes[turn.result.answer_scope] }}</span><AgentAnswer class="agent-answer-text" :text="turn.result.answer" /><p v-if="turn.result.answer_scope === 'GENERAL'" class="help">这部分是通用知识补充，不能当作视频中已经说过的话。</p><p v-else-if="turn.result.answer_scope === 'INSUFFICIENT'" class="help">当前视频证据不足，可换个说法，或补充想找的具体内容。</p>
             <AgentVisualEvidence :key="turn.id" :turn="turn" :active="active !== false && !sessionListOpen" @locate="locateFrame(turn, $event)" @preview="previewVisualRange(turn, $event)" />
             <details v-if="turn.result.citations.length" class="agent-citations"><summary>视频原句依据 · {{ turn.result.citations.length }} 条</summary><p v-if="turn.result.answer_scope === 'VIDEO'" class="agent-anchor-help">从同一回答中选择要保留的原句，剪成一个片段；可以补充前后解释，所选句会完整保留。</p><div v-for="(source, sourceIndex) in turn.result.citations" :key="source.utterance_id" class="agent-citation-row"><label v-if="turn.result.answer_scope === 'VIDEO' && turn.status === 'SUCCEEDED'" class="agent-anchor-choice"><input type="checkbox" :checked="(anchorChoices[turn.id] ?? []).includes(source.utterance_id)" :disabled="pending || clipTargetBusy || active === false" :aria-label="`选择剪辑原句 第${sourceIndex + 1}条 ${topicTime(source.start_ms)}至${topicTime(source.end_ms)}`" @change="chooseAnchor(turn, source.utterance_id, $event)"><span>选择此原句</span></label><button class="agent-citation" :class="{ selected: citation?.utterance_id === source.utterance_id }" @click="preview(source, turn)"><span>回看 {{ topicTime(source.start_ms) }} → {{ topicTime(source.end_ms) }}</span><p>{{ source.text }}</p></button></div><div v-if="turn.result.answer_scope === 'VIDEO'" class="agent-anchor-actions"><span>已选 {{ (anchorChoices[turn.id] ?? []).length }} 条 · 来自第 {{ turn.sequence }} 轮视频回答</span><button class="secondary" :disabled="pending || clipTargetBusy || active === false || !(anchorChoices[turn.id] ?? []).length" @click="suggestAnchors(turn)">按所选原句剪辑</button><small>仅填入剪辑区，不创建请求；初始候选只核对所选句及相邻上下文，仍需人工回看。</small></div></details>
-            <details v-if="turn.result.tool_calls.length" class="agent-tools"><summary>查找过程 · {{ turn.result.tool_calls.length }} 步</summary><ol><li v-for="call in turn.result.tool_calls" :key="call.step"><strong>{{ call.step }}. {{ toolNames[call.tool_name] }}</strong><p v-if="call.tool_name === 'search_transcript'">查询：{{ call.arguments.query }}</p><p v-else-if="call.tool_name === 'read_context'">补读前 {{ call.arguments.before }} 句、后 {{ call.arguments.after }} 句</p><p v-else-if="call.tool_name === 'list_topics'">查看第 {{ Number(call.arguments.offset) + 1 }} 项起的话题，最多 {{ call.arguments.limit }} 项</p><p v-else-if="call.tool_name === 'inspect_frames'">请求时间：{{ (call.arguments.timestamps_ms as number[]).map(topicTime).join('、') }}</p><p v-else>短片抽样：{{ topicTime(Number(call.arguments.start_ms)) }} → {{ topicTime(Number(call.arguments.end_ms)) }} · 2fps、无原始音轨</p><small>返回 {{ call.result_utterance_ids.length }} 条原句依据<template v-if="call.result_frame_ids"> · {{ call.result_frame_ids.length }} 帧画面</template></small></li></ol></details>
+            <details v-if="turn.result.tool_calls.length" class="agent-tools"><summary>查找过程 · {{ turn.result.tool_calls.length }} 步</summary><ol><li v-for="call in turn.result.tool_calls" :key="call.step"><strong>{{ call.step }}. {{ toolNames[call.tool_name] }}<template v-if="call.origin"> · {{ call.origin === 'USER_FOCUS' ? '用户位置触发' : '模型选择' }}</template></strong><p v-if="call.tool_name === 'search_transcript'">查询：{{ call.arguments.query }}</p><p v-else-if="call.tool_name === 'read_context'">补读前 {{ call.arguments.before }} 句、后 {{ call.arguments.after }} 句</p><p v-else-if="call.tool_name === 'list_topics'">查看第 {{ Number(call.arguments.offset) + 1 }} 项起的话题，最多 {{ call.arguments.limit }} 项</p><p v-else-if="call.tool_name === 'inspect_frames'">请求时间：{{ (call.arguments.timestamps_ms as number[]).map(topicTime).join('、') }}</p><p v-else>短片抽样：{{ topicTime(Number(call.arguments.start_ms)) }} → {{ topicTime(Number(call.arguments.end_ms)) }} · 2fps、无原始音轨</p><small>返回 {{ call.result_utterance_ids.length }} 条原句依据<template v-if="call.result_frame_ids"> · {{ call.result_frame_ids.length }} 帧画面</template></small></li></ol></details>
             <div v-if="turn.result.suggested_clip_instruction" class="agent-clip-suggestion"><p>{{ turn.result.suggested_clip_instruction }}</p><button class="secondary" :disabled="pending || clipTargetBusy" @click="suggest(turn.result.suggested_clip_instruction)">送到剪辑要求</button><small v-if="clipTargetBusy">请先保存或放弃剪辑区域的未提交内容。</small><small v-else>仅填入要求，你仍需在剪辑区域点击查找、核对并确认。</small></div>
           </template><p v-else class="help">{{ turn.status === 'CANCELLED' ? '本轮已取消，已有对话和视频结果仍保留。' : turn.status === 'FAILED' ? '本轮未生成可用回答。请查看原因，原转写与此前回答仍保留。' : turn.status === 'QUEUED' ? '问题已保存，正在等待执行服务。' : '正在结合视频内容查找证据并回答，进度会自动更新。' }}</p>
         </div></li></ol>
         <div v-if="selected?.turns.length" class="agent-reading-actions"><span>当前视频 · {{ selected.turns.length }} 轮对话</span><button class="text-button" @click="scrollToLatest(true)">定位最新一轮 ↓</button></div>
         <form class="agent-compose" @submit.prevent="send">
-          <div class="agent-visual-option"><label><input v-model="visualMode" type="checkbox" true-value="frames" false-value="none" :disabled="pending || visualMode === 'none' && visualCapability?.visual_mode !== 'frames'">结合画面</label><span v-if="visualMode === 'frames'">本轮可按需抽帧；所有模型请求、重试及修复共用下方次数上限。</span><span v-else>默认只用视频转写。</span><button type="button" class="text-button" :disabled="capabilityLoading || pending" @click="loadVisualCapability()">{{ capabilityLoading ? '正在检查…' : '检查画面能力' }}</button><small v-if="capabilityError">{{ capabilityError }}</small><small v-else-if="visualCapability?.visual_mode === null">当前部署未配置视觉模型。</small><small v-else-if="visualCapability?.visual_mode === 'frames'">配置模型 {{ visualCapability.visual_model_id }}；配置可用不代表额度或识别效果已验证。</small></div>
+          <div class="agent-visual-option"><label><input v-model="visualMode" type="checkbox" true-value="frames" false-value="none" :disabled="pending || visualMode === 'none' && visualCapability?.visual_mode !== 'frames'">结合画面</label><span v-if="visualMode === 'frames'">本轮可按需抽帧；所有模型请求、重试及修复共用下方次数上限。</span><span v-else>默认只用视频转写。</span><button type="button" class="text-button" :disabled="capabilityLoading || focusLoading || pending" @click="loadVisualCapability(); loadFocusCapability()">{{ capabilityLoading ? '正在检查…' : '检查画面能力' }}</button><small v-if="capabilityError">{{ capabilityError }}</small><small v-else-if="visualCapability?.visual_mode === null">当前部署未配置视觉模型。</small><small v-else-if="visualCapability?.visual_mode === 'frames'">配置模型 {{ visualCapability.visual_model_id }}；配置可用不代表额度或识别效果已验证。</small></div>
+          <div v-if="focusHint" class="agent-focus-chip" role="status"><strong>定位提示 {{ topicTime(focusHint.timestamp_ms) }}</strong><span>播放或拖动不会改变此位置，尚不是画面证据。</span><div><button type="button" class="text-button" :disabled="pending" @click="removeFocus">移除定位提示</button><button type="button" class="text-button" :disabled="!canAttachFocus" @click="attachFocus">重新附加当前位置</button></div><p v-if="visualMode !== 'frames'">请移除提示或切回“结合画面”后再提交。</p><p v-else-if="!focusHintMatches(focusHint, focusOwner())">原视频来源已变化，请明确移除或重新附加。</p><p v-else-if="!focusSupported">位置支持尚未确认，提示仍保留；可点击“检查画面能力”重新核对。</p></div>
           <div v-if="!selected?.turns.length" class="agent-examples"><button v-for="example in examples" :key="example" type="button" class="secondary" :disabled="pending || dirty" @click="chooseExample(example)">{{ example }}</button></div>
           <div class="agent-input-box"><label for="agent-question" class="visually-hidden">向视频助手提问</label><textarea id="agent-question" v-model="question" :disabled="pending" maxlength="2000" rows="2" placeholder="问问这段视频，例如：概括主要内容，列出关键观点。"></textarea>
-          <div class="agent-compose-actions"><details class="agent-options"><summary>回答设置 <span>· {{ maxCalls }} 次上限</span></summary><div class="agent-options-body"><label>本轮模型请求上限<input v-model.number="maxCalls" type="number" min="1" max="24" :disabled="pending" aria-label="对话模型请求上限"></label><p>自动重试计入此上限。{{ visualMode === 'frames' ? '结合原句与实际抽查画面，画面采样不等于连续观看。' : '只使用当前视频转写。' }}剪辑建议需另行审核确认。</p></div></details><span class="agent-character-count">{{ question.length }} / 2000</span><button v-if="dirty" class="text-button" type="button" :disabled="pending" @click="discard">放弃输入</button><button class="primary" type="submit" :disabled="pending || submissionBlocked || !question.trim() || !!activeTurn">{{ action === 'send' ? '正在提交…' : selected ? '发送问题 ↑' : '开始提问 ↑' }}</button></div></div>
+          <div class="agent-compose-actions"><details class="agent-options"><summary>回答设置 <span>· {{ maxCalls }} 次上限</span></summary><div class="agent-options-body"><label>本轮模型请求上限<input v-model.number="maxCalls" type="number" min="1" max="24" :disabled="pending" aria-label="对话模型请求上限"></label><p>自动重试计入此上限。{{ visualMode === 'frames' ? '结合原句与实际抽查画面，画面采样不等于连续观看。' : '只使用当前视频转写。' }}剪辑建议需另行审核确认。</p></div></details><span class="agent-character-count">{{ question.length }} / 2000</span><button v-if="dirty" class="text-button" type="button" :disabled="pending" @click="discard">放弃输入</button><button class="primary" type="submit" :disabled="pending || submissionBlocked || focusSubmissionBlocked || !question.trim() || !!activeTurn">{{ action === 'send' ? '正在提交…' : selected ? '发送问题 ↑' : '开始提问 ↑' }}</button></div></div>
           <p v-if="activeTurn" class="help" role="status">正在处理上一轮。你可以先编辑问题，等待回答或取消本轮后发送。</p>
         </form>
       </div>
@@ -573,6 +625,7 @@ onBeforeUnmount(() => { scanSubmissions(); stopped = true; capabilityVersion++; 
 .agent-ai-icon { display: inline-flex; align-items: center; justify-content: center; width: 26px; height: 26px; border-radius: 8px; background: #fff0e8; color: #d26a44; font-size: 20px; }
 .agent-reference-caption { margin-left: auto; color: #8491a2; font-size: 11px; }
 .agent-reference-toggle { display: none; align-items: center; min-height: 30px; color: #475569; font-size: 13px; }
+.agent-focus-compact { flex: none; margin-left: auto; min-height: 30px; padding: 3px 0; color: #475569; font-size: 12px; white-space: nowrap; }
 .agent-reference-body { display: flex; flex-direction: column; flex: 1; min-height: 0; min-width: 0; gap: 0; padding: 0; overflow: hidden; }
 .agent-reference-video { position: relative; flex: none; width: 100%; aspect-ratio: 16/9; background: #101520; overflow: hidden; }
 .agent-reference-video video { position: absolute; inset: 0; display: block; width: 100%; height: 100%; object-fit: contain; }
@@ -670,6 +723,7 @@ onBeforeUnmount(() => { scanSubmissions(); stopped = true; capabilityVersion++; 
 .agent-options-body input { width: 60px; min-width: 0; border: 1px solid #cbd5e1; border-radius: 5px; padding: 7px; color: #334155; }
 .agent-options-body p { margin-top: 9px; font-size: 12px; line-height: 1.7; }
 .agent-visual-option{display:flex;flex-wrap:wrap;align-items:center;gap:4px 9px;margin-bottom:6px;font-size:11px;line-height:1.6;color:#64748b}.agent-visual-option label{display:flex;align-items:center;gap:5px;white-space:nowrap;color:#334155}.agent-visual-option input{margin:0}.agent-visual-option small{flex-basis:100%;overflow-wrap:anywhere}.agent-visual-option .text-button{padding:2px 0}
+.agent-focus-controls{display:flex;flex-wrap:wrap;align-items:center;gap:6px;padding:8px 12px;font-size:11px;color:#64748b;line-height:1.6}.agent-focus-controls small{flex-basis:100%;overflow-wrap:anywhere}.agent-focus-chip{margin:5px 0 8px;padding:8px 10px;background:#eef6fb;border:1px solid #cbdfea;border-radius:7px;font-size:11px;line-height:1.6;overflow-wrap:anywhere}.agent-focus-chip strong{margin-right:8px;color:#334155}.agent-focus-chip>div{display:flex;gap:12px;flex-wrap:wrap}.agent-focus-chip p{color:#985c32}
 .agent-examples { display: flex; gap: 8px; margin-bottom: 10px; padding-bottom: 3px; overflow-x: auto; scrollbar-width: thin; }
 .agent-examples button { flex: none; padding: 7px 9px; border-radius: 6px; color: #64748b; background: #fff; font-size: 12px; white-space: nowrap; }
 .agent-panel .help { color: #64748b; font-size: 13px; line-height: 1.7; }

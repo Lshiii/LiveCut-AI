@@ -1,5 +1,11 @@
 # 视频分析结果契约
 
+## 附加画面位置 v1.2
+
+[agent-answer-visual-focus.schema.json](./agent-answer-visual-focus.schema.json) 用于显式携带 `focus_timestamp_ms` 的 AGENT_VISUAL_FOCUS 轮次，旧1.1/1.0保留。1.2的首步必须是用户位置触发的 `USER_FOCUS` 取帧，之后工具才是 `MODEL`；位置、初步参数和真实首帧必须相符。Schema只查结构，三端另外校验位置、真实证据和来源；实际JPEG/PTS/manifest仍沿用视觉链路核验。
+
+位置是查找提示，不代表客户端上传了截图，也不能当作原句剪辑锚点。字段进入本轮指纹、消息、结果与不可变回执；无位置的旧请求不补null、不改原指纹。独立能力端点、预算和恢复见[附加位置协议](../docs/64-附加当前画面位置.md)。[1.2示例](../fixtures/agent-visual-focus.synthetic.json) 为明确的合成协议夹具。
+
 ## 视频对话画面观察 v1.1
 
 [agent-answer-visual.schema.json](./agent-answer-visual.schema.json) 仅用于显式 frames 模式的 AGENT_VISUAL 轮次，保留旧1.0协议。原句与视觉证据分别引用；VIDEO 至少有一类真实本轮引用。Schema 限定工具参数、帧元数据和引用结构，Java/Python/前端另外核验实际时间、源 PTS、工具与帧集合、连续 ID、范围及来源，Java/Worker 再核实际 JPEG 字节与 manifest。仅凭 JSON Schema 不能证明模型确实看图或解释正确。

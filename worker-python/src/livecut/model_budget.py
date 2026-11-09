@@ -107,7 +107,7 @@ class BudgetTransport(httpx.BaseTransport):
         config, maximum = lease.config.get("agent_turn", {}), lease.config.get("max_text_calls")
         self.context.guard.check()
         try:
-            if (lease.stage_type != "AGENT_VISUAL" or not isinstance(config, dict)
+            if (lease.stage_type not in {"AGENT_VISUAL", "AGENT_VISUAL_FOCUS"} or not isinstance(config, dict)
                     or config.get("visual_mode") != "frames" or type(maximum) is not int or not 1 <= maximum <= 24):
                 return None
             try:
@@ -119,7 +119,11 @@ class BudgetTransport(httpx.BaseTransport):
             stage, budget = turn["stage"], turn["budget"]
             if (turn.get("id") != config.get("turn_id") or turn.get("session_id") != config.get("session_id")
                     or turn.get("job_id") != lease.job_id or turn.get("visual_mode") != "frames"
-                    or stage.get("id") != lease.stage_id or stage.get("stage_type") != "AGENT_VISUAL"):
+                    or stage.get("id") != lease.stage_id or stage.get("stage_type") != lease.stage_type):
+                return None
+            if lease.stage_type == "AGENT_VISUAL_FOCUS" and (type(config.get("focus_timestamp_ms")) is not int
+                    or type(turn.get("focus_timestamp_ms")) is not int
+                    or turn["focus_timestamp_ms"] != config["focus_timestamp_ms"]):
                 return None
             if (not isinstance(turn.get("status"), str) or not isinstance(stage.get("status"), str)
                     or type(stage.get("attempt")) is not int):
@@ -268,7 +272,7 @@ class BudgetTransport(httpx.BaseTransport):
         if self.context.lease.stage_type == "EXPORT_CLIP":
             raise ModelBudgetError("MODEL_OPERATION_NOT_ALLOWED")
         path = request.url.path.rstrip("/")
-        if self.context.lease.stage_type == "AGENT_VISUAL" and (request.method != "POST" or not path.endswith("/chat/completions")):
+        if self.context.lease.stage_type in {"AGENT_VISUAL", "AGENT_VISUAL_FOCUS"} and (request.method != "POST" or not path.endswith("/chat/completions")):
             raise ModelBudgetError("MODEL_OPERATION_NOT_ALLOWED")
         kind = None
         if request.method == "POST" and path.endswith("/services/audio/asr/transcription"):
@@ -279,7 +283,7 @@ class BudgetTransport(httpx.BaseTransport):
             if request.method == "POST" and "/tasks/" in path:
                 return self._query(request)
             return self.inner.handle_request(request)
-        allowed = {"ASR": {"ASR"}, "TEXT": {"SEGMENT", "CAPTION_PROOFREAD", "ANCHOR_CLIP", "AGENT_VISUAL"}}
+        allowed = {"ASR": {"ASR"}, "TEXT": {"SEGMENT", "CAPTION_PROOFREAD", "ANCHOR_CLIP", "AGENT_VISUAL", "AGENT_VISUAL_FOCUS"}}
         if self.context.lease.stage_type not in allowed[kind]:
             raise ModelBudgetError("MODEL_OPERATION_NOT_ALLOWED")
         try:
