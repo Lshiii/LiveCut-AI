@@ -77,7 +77,7 @@ public class ModelCallService {
             }
             String expectedStage = "TEXT".equals(request.kind()) ? "SEGMENT" : "ASR";
             if(ownedText&&!"TEXT".equals(request.kind()))throw error(HttpStatus.CONFLICT,"MODEL_KIND_CONFLICT","Independent text operations cannot submit new ASR");
-            boolean captionText=agentTurn&&"TEXT".equals(request.kind())&&"CAPTION_PROOFREAD".equals(active.stage().stageType());
+            boolean captionText=agentTurn&&"TEXT".equals(request.kind())&&Set.of("CAPTION_PROOFREAD","AGENT_VISUAL").contains(active.stage().stageType());
             boolean anchorText=clipRequest&&"TEXT".equals(request.kind())&&"ANCHOR_CLIP".equals(active.stage().stageType());
             if (!expectedStage.equals(active.stage().stageType())&&!captionText&&!anchorText) {
                 throw error(HttpStatus.CONFLICT, "MODEL_KIND_CONFLICT", "Model operation is not allowed in this stage");
@@ -89,6 +89,10 @@ public class ModelCallService {
             if("TEXT".equals(request.kind())){
                 if(ownedText)fallbackModels=TextExecutionPolicy.storedFallbacks(jdbc.queryForObject("SELECT text_fallback_models_json FROM "+textTable+" WHERE id=?",String.class,active.stage().ownerId()));
                 else {var configured=json.readTree(configJson).path("text_fallback_models");if(configured.isArray())fallbackModels=TextExecutionPolicy.fallbackModels(json.readValue(configured.toString(),List.class));}
+            }
+            if("AGENT_VISUAL".equals(active.stage().stageType())&&(!agentTurn||!fallbackModels.isEmpty()
+                    ||!"frames".equals(jdbc.queryForObject("SELECT visual_mode FROM agent_turn WHERE id=?",String.class,active.stage().ownerId())))){
+                throw error(HttpStatus.CONFLICT,"MODEL_CONFIG_CONFLICT","Visual stages require their frozen planner without text fallback");
             }
             if (!request.modelId().equals(expectedModel)&&!fallbackModels.contains(request.modelId())) {
                 throw error(HttpStatus.CONFLICT, "MODEL_CONFIG_CONFLICT", "Model must match the immutable job configuration");
@@ -124,7 +128,7 @@ public class ModelCallService {
         return transactions.execute(transaction -> {
             var active=jobs.lockActiveStage(request.stageId(),new JobModels.Credential(request.attempt(),request.runToken()));
             if(!Set.of("ANALYSIS","CLIP_REQUEST","AGENT_TURN").contains(active.stage().ownerType())
-                    || !("SEGMENT".equals(active.stage().stageType())||"AGENT_TURN".equals(active.stage().ownerType())&&"CAPTION_PROOFREAD".equals(active.stage().stageType())||"CLIP_REQUEST".equals(active.stage().ownerType())&&"ANCHOR_CLIP".equals(active.stage().stageType())) || !"TEXT".equals(request.kind())) {
+                    || !("SEGMENT".equals(active.stage().stageType())||"AGENT_TURN".equals(active.stage().ownerType())&&Set.of("CAPTION_PROOFREAD","AGENT_VISUAL").contains(active.stage().stageType())||"CLIP_REQUEST".equals(active.stage().ownerType())&&"ANCHOR_CLIP".equals(active.stage().stageType())) || !"TEXT".equals(request.kind())) {
                 throw error(HttpStatus.CONFLICT,"MODEL_KIND_CONFLICT","Only active text stages may recover text responses");
             }
             List<CallRow> rows=find("request_id = ?",request.requestId());

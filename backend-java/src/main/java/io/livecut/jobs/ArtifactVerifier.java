@@ -40,7 +40,7 @@ public class ArtifactVerifier {
     private static final Map<String, Set<String>> REQUIRED_KINDS = Map.of(
             "MEDIA", Set.of("media_info", "audio"), "ASR", Set.of("transcript"),
             "SEGMENT", Set.of("analysis_result"), "TIMELINE", Set.of("analysis_result"),
-            "EXPORT_CLIP", Set.of("clip", "media_info"), "CAPTION_PROOFREAD", Set.of("caption_proofread"),"ANCHOR_CLIP",Set.of("clip_plan"));
+            "EXPORT_CLIP", Set.of("clip", "media_info"), "CAPTION_PROOFREAD", Set.of("caption_proofread"),"ANCHOR_CLIP",Set.of("clip_plan"),"AGENT_VISUAL",Set.of("agent_answer"));
     private static final JsonMapper JSON = JsonMapper.builder()
             .enable(StreamReadFeature.STRICT_DUPLICATE_DETECTION)
             .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS).build();
@@ -98,7 +98,7 @@ public class ArtifactVerifier {
     }
 
     public VerifiedManifest verifyAgentAnswerManifest(String key,String hash,ManifestIdentity expected) {
-        if(expected==null||!"SEGMENT".equals(expected.stageType()))throw invalidReference();
+        if(expected==null||!Set.of("SEGMENT","AGENT_VISUAL").contains(expected.stageType()))throw invalidReference();
         return verifyManifest(key,hash,expected,null,"agent_answer");
     }
     public VerifiedManifest verifyCaptionProofreadManifest(String key,String hash,ManifestIdentity expected) {
@@ -109,6 +109,12 @@ public class ArtifactVerifier {
     public JsonNode readJsonArtifact(VerifiedArtifact artifact,ManifestIdentity expected) {
         try{return JSON.readTree(verifiedBytes(artifact.key(),artifact.sha256(),expected.attemptPrefix(),MAX_ANALYSIS_BYTES));}
         catch(JobException error){throw error;}catch(RuntimeException error){throw invalidAnalysis();}
+    }
+
+    /** Bounded binary reader; the caller still validates business metadata and JPEG type. */
+    public byte[] readVisualFrame(VerifiedArtifact artifact,ManifestIdentity expected){
+        if(expected==null||!"AGENT_VISUAL".equals(expected.stageType())||!"agent_visual_frame".equals(artifact.kind()))throw invalidReference();
+        return verifiedBytes(artifact.key(),artifact.sha256(),expected.attemptPrefix()+"visual-frames/",1024*1024);
     }
 
     public VerifiedManifest verifyExportManifest(String key, String expectedHash, ManifestIdentity expected,
@@ -211,9 +217,10 @@ public class ArtifactVerifier {
             String kind = artifact.path("kind").stringValue();
             String artifactKey = artifact.path("key").stringValue();
             String artifactHash = artifact.path("sha256").stringValue();
-            if (!kind.matches("[a-z][a-z0-9_]{0,63}") || !kinds.add(kind) || !keys.add(artifactKey)
+            boolean repeatedVisual="AGENT_VISUAL".equals(expected.stageType())&&"agent_answer".equals(specialKind)&&"agent_visual_frame".equals(kind);
+            if (!kind.matches("[a-z][a-z0-9_]{0,63}") || !kinds.add(kind)&&!repeatedVisual || !keys.add(artifactKey)
                     || artifactKey.equals(key)) { throw invalidManifest(); }
-            long size = verifyFile(artifactKey, artifactHash, expected.attemptPrefix(), Long.MAX_VALUE);
+            long size = verifyFile(artifactKey, artifactHash, expected.attemptPrefix(), repeatedVisual?1024*1024:Long.MAX_VALUE);
             verified.add(new VerifiedArtifact(kind, artifactKey, artifactHash, size));
         }
         if (!kinds.containsAll(specialKind==null?REQUIRED_KINDS.get(expected.stageType()):Set.of(specialKind))) { throw invalidManifest(); }

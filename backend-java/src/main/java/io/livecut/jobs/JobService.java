@@ -261,7 +261,7 @@ public class JobService {
 
     public List<ReadyStage> ready(String stageType, int limit, String jobId) {
         if (limit < 1 || limit > 100) { throw bad("INVALID_ARGUMENT", "limit must be 1..100"); }
-        if (stageType != null && !FLOW.contains(stageType) && !Set.of("EXPORT_CLIP","CAPTION_PROOFREAD","ANCHOR_CLIP").contains(stageType)) { throw bad("INVALID_ARGUMENT", "Unknown stage type"); }
+        if (stageType != null && !FLOW.contains(stageType) && !Set.of("EXPORT_CLIP","CAPTION_PROOFREAD","ANCHOR_CLIP","AGENT_VISUAL").contains(stageType)) { throw bad("INVALID_ARGUMENT", "Unknown stage type"); }
         String targetJob = jobId == null ? null : uuid(jobId, "INVALID_JOB_ID");
         String predicate = stageType == null ? "" : " AND s.stage_type=?";
         List<Object> parameters = new ArrayList<>();
@@ -370,7 +370,7 @@ public class JobService {
         Map<String,Object> progress=TextExecutionPolicy.progress(request.progress());
         return transaction.execute(status->{
             LockedStage locked=lockActiveStage(stageId,request.credential());
-            if(!Set.of("SEGMENT","CAPTION_PROOFREAD","ANCHOR_CLIP").contains(locked.stage().stageType())||isExport(locked.stage()))throw conflict("MODEL_KIND_CONFLICT","Only text stages can publish recovery progress");
+            if(!Set.of("SEGMENT","CAPTION_PROOFREAD","ANCHOR_CLIP","AGENT_VISUAL").contains(locked.stage().stageType())||isExport(locked.stage()))throw conflict("MODEL_KIND_CONFLICT","Only text stages can publish recovery progress");
             String serialized=TextExecutionPolicy.serialize(progress);
             String existing=jdbc.queryForObject("SELECT text_progress_json FROM job_stage WHERE id=?",String.class,locked.stage().id());
             if(existing!=null&&progress.equals(TextExecutionPolicy.readProgress(existing)))return action("ALREADY_APPLIED",locked.stage().id());

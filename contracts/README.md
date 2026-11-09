@@ -1,5 +1,11 @@
 # 视频分析结果契约
 
+## 视频对话画面观察 v1.1
+
+[agent-answer-visual.schema.json](./agent-answer-visual.schema.json) 仅用于显式 frames 模式的 AGENT_VISUAL 轮次，保留旧1.0协议。原句与视觉证据分别引用；VIDEO 至少有一类真实本轮引用。Schema 限定工具参数、帧元数据和引用结构，Java/Python/前端另外核验实际时间、源 PTS、工具与帧集合、连续 ID、范围及来源，Java/Worker 再核实际 JPEG 字节与 manifest。仅凭 JSON Schema 不能证明模型确实看图或解释正确。
+
+`inspect_frames` 最多4个位置，`inspect_clip` 为12秒内每500ms抽帧，非连续视频或音轨理解；每轮最多32个不同帧、4次工具步骤。视觉模型直接执行本轮决策，全部 completion（含重试/修复）共用本轮请求上限；不同帧数量不是图像 token/金额上限。只读截图端点、独立配置与旧提交兼容见[完整协议](../docs/63-Agent按需画面观察.md)。[共享示例](../fixtures/agent-visual.synthetic.json) 是合成协议样例，其哈希不代表真实媒体。
+
 ## 视频对话 Agent v1.0
 
 [agent-answer.schema.json](./agent-answer.schema.json) 定义独立会话轮次的回答、原句引用、工具轨迹与来源身份。JSON Schema 检查固定结构；Java/Python 另行核验本轮实际观察、唯一源顺序、原文与毫秒时间、工具连续步骤、允许的来源及主模型。VIDEO 必须有原句引用，GENERAL/INSUFFICIENT 可无引用；只有实际调用 search_transcript 才记录检索模式。剪辑建议为纯文本，不能自动改审核或导出。接口、限制与恢复见[视频对话 Agent](../docs/45-视频对话Agent.md)。

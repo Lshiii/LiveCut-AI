@@ -270,6 +270,27 @@ class VisionTests(unittest.TestCase):
 FFMPEG = os.environ.get("LIVECUT_FFMPEG_PATH") or shutil.which("ffmpeg")
 
 
+class PreciseSourceTimestampTests(unittest.TestCase):
+    def test_long_video_uses_integer_pts_instead_of_rounded_log_pts_time(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source, frame = root / "source.mp4", root / "frame.jpg"
+            source.write_bytes(b"synthetic source; process output below is controlled")
+
+            def extract(command, **kwargs):
+                Path(command[-1]).write_bytes(b"\xff\xd8synthetic-jpeg\xff\xd9")
+                return subprocess.CompletedProcess(command, 0, "", "Duration: 03:00:00.00, start: 0.000000, bitrate: 1 kb/s\n"
+                    "[showinfo] config in time_base: 1/30000, frame_rate: 30/1\n"
+                    "[showinfo] n: 0 pts: 273004999 pts_time:9100.17 pos: 1\n")
+
+            with patch("livecut.vision._run_process", side_effect=extract):
+                info = vision._extract_frame(source, frame, 9100000, ffmpeg_path="synthetic-ffmpeg")
+            self.assertEqual(9100167, info["timestamp_ms"])
+            self.assertNotEqual(9100170, info["timestamp_ms"])
+            self.assertEqual(273004999, info["source_pts"])
+            self.assertIn("v2-exact-pts", vision._PROFILE)
+
+
 @unittest.skipUnless(FFMPEG, "Real FFmpeg missing; set LIVECUT_FFMPEG_PATH")
 class ActualSourceTimestampTests(unittest.TestCase):
     def test_non_frame_aligned_seek_records_real_pts_and_does_not_upscale(self):

@@ -13,7 +13,9 @@ public final class AgentAnswerValidator {
     private static final Set<String> ANSWER=Set.of("schema_version","session_id","turn_id","job_id","video_id",
         "source_hash","transcript_hash","question","answer","answer_scope","citations","tool_calls","provenance","suggested_clip_instruction");
     public static JsonNode validate(JsonNode answer,Map<String,Object> owner){
-        fields(answer,ANSWER);equal(answer,"schema_version","1.0");
+        boolean visual="frames".equals(owner.get("visual_mode"));
+        Set<String> expected=new HashSet<>(ANSWER);if(visual)expected.addAll(Set.of("visual_evidence","visual_citations"));
+        fields(answer,expected);equal(answer,"schema_version",visual?"1.1":"1.0");
         for(String name:List.of("session_id","job_id","video_id","source_hash","transcript_hash","question"))equal(answer,name,String.valueOf(owner.get(name)));
         equal(answer,"turn_id",String.valueOf(owner.get("id")));text(answer,"answer",6000);
         String scope=text(answer,"answer_scope",20);if(!Set.of("VIDEO","GENERAL","INSUFFICIENT").contains(scope))throw bad("Unknown answer scope");
@@ -22,7 +24,7 @@ public final class AgentAnswerValidator {
         for(JsonNode row:source){String id=text(row,"utterance_id",128);order.put(id,order.size());utterances.put(id,row);}
         Set<String> observed=new HashSet<>();int expectedStep=1;boolean searched=false;
         for(JsonNode call:array(answer,"tool_calls",0,4)){
-            fields(call,Set.of("step","tool_name","arguments","result_utterance_ids"));
+            fields(call,visual?Set.of("step","tool_name","arguments","result_utterance_ids","result_frame_ids"):Set.of("step","tool_name","arguments","result_utterance_ids"));
             if(number(call,"step")!=expectedStep++)throw bad("Tool steps must be contiguous");
             String tool=text(call,"tool_name",40);JsonNode args=call.path("arguments");
             switch(tool){
@@ -38,6 +40,7 @@ public final class AgentAnswerValidator {
                 case "list_topics" -> {
                     fields(args,Set.of("offset","limit"));range(args,"offset",0,20000);range(args,"limit",1,12);
                 }
+                case "inspect_frames", "inspect_clip" -> {if(!visual)throw bad("Unknown tool");}
                 default -> throw bad("Unknown tool");
             }
             int previous=-1;Set<String> seen=new HashSet<>();
@@ -47,7 +50,7 @@ public final class AgentAnswerValidator {
             }
         }
         Set<String> cited=new HashSet<>();int previous=-1;
-        for(JsonNode citation:array(answer,"citations",scope.equals("VIDEO")?1:0,24)){
+        for(JsonNode citation:array(answer,"citations",scope.equals("VIDEO")&&!visual?1:0,24)){
             fields(citation,Set.of("utterance_id","start_ms","end_ms","text"));
             String id=text(citation,"utterance_id",128);JsonNode original=utterances.get(id);
             if(original==null||!observed.contains(id)||!cited.add(id)||order.get(id)<=previous)throw bad("Citations must come from this turn's observed source");
@@ -56,11 +59,12 @@ public final class AgentAnswerValidator {
                     ||!text(citation,"text",100000).equals(original.path("text").asText()))throw bad("Citation must exactly match original ASR");
         }
         JsonNode provenance=answer.path("provenance");fields(provenance,Set.of("text_model_id","prompt_version","retrieval_mode"));
-        equal(provenance,"text_model_id",String.valueOf(owner.get("text_model_id")));equal(provenance,"prompt_version","video-agent-v1");
+        equal(provenance,"text_model_id",String.valueOf(owner.get("text_model_id")));equal(provenance,"prompt_version",visual?"video-agent-visual-v1":"video-agent-v1");
         String mode=text(provenance,"retrieval_mode",40);
         if(!Set.of("none","bm25","bm25_dense_rrf").contains(mode)||searched==mode.equals("none"))throw bad("Retrieval mode must describe the actual tools");
         JsonNode suggested=answer.path("suggested_clip_instruction");
         if(!suggested.isNull()&&(!suggested.isString()||suggested.stringValue().isBlank()||suggested.stringValue().length()>2000))throw bad("Invalid clipping suggestion");
+        if(visual)AgentVisualEvidence.validate(answer,((Number)owner.get("duration_ms")).longValue());
         return answer;
     }
     public static void fields(JsonNode node,Set<String> expected){if(node==null||!node.isObject()||!node.propertyNames().equals(expected))throw bad("Unexpected or missing fields");}

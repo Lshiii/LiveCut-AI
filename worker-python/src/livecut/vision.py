@@ -36,7 +36,7 @@ not_visible 时 presented_category 必须为 null。没有音轨，画面类别�
 格式：{"observations":[{"frame_id":"原样返回输入ID","presented_category":"类别或null",
 "observed_text":"原样可读文字或空字符串","visibility":"clear|blurred|not_visible"}]}。
 每个输入 frame_id 必须恰好返回一次，不添加时间字段或其他字段。"""
-_PROFILE = "copyts-showinfo-v1-scale-max360x640-no-upscale"
+_PROFILE = "copyts-showinfo-v2-exact-pts-scale-max360x640-no-upscale"
 
 
 class VisionError(Exception):
@@ -134,15 +134,19 @@ def _endpoint(value: str | None) -> str:
 
 
 def _extract_frame(source: Path, output: Path, requested_ms: int, *, ffmpeg_path: str | Path,
-                   guard: Callable[[], None] | None = None) -> dict:
+                   guard: Callable[[], None] | None = None, max_edge: int | None = None) -> dict:
     """Write a JPEG and report its first actual source PTS, not requested seek."""
     temporary = None
     try:
         with tempfile.NamedTemporaryFile(dir=output.parent, suffix=".jpg", delete=False) as handle:
             temporary = Path(handle.name)
+        if max_edge is not None and (type(max_edge) is not int or not 1 <= max_edge <= 1280):
+            raise VisionError("INVALID_CONFIGURATION", "Invalid bounded frame profile")
+        scale = (rf"showinfo,scale=w=min(iw\,{max_edge}):h=min(ih\,{max_edge}):force_original_aspect_ratio=decrease"
+                 if max_edge is not None else r"showinfo,scale=w=min(iw\,360):h=min(ih\,640):force_original_aspect_ratio=decrease")
         command = [str(ffmpeg_path), "-hide_banner", "-loglevel", "info", "-nostdin", "-y", "-copyts",
                    "-ss", f"{requested_ms / 1000:.3f}", "-i", str(source), "-map", "0:v:0", "-vf",
-                   r"showinfo,scale=w=min(iw\,360):h=min(ih\,640):force_original_aspect_ratio=decrease",
+                   scale,
                    "-frames:v", "1", "-q:v", "3", "-fps_mode", "passthrough", "-update", "1", str(temporary)]
         try:
             result = _run_process(command, timeout_seconds=60, failure_code="FRAME_EXTRACTION_FAILED",
@@ -162,7 +166,10 @@ def _extract_frame(source: Path, output: Path, requested_ms: int, *, ffmpeg_path
         try:
             if abs(Decimal(source_start.group(1))) > Decimal("0.000001"):
                 raise VisionError("UNSUPPORTED_TIMELINE", "Visual sampling requires a verified zero-start media timeline")
-            timestamp_ms = int((Decimal(frame.group(2)) * 1000).to_integral_value(rounding=ROUND_HALF_UP))
+            numerator, denominator = map(int, time_base.group(1).split("/"))
+            if numerator <= 0 or denominator <= 0:
+                raise InvalidOperation
+            timestamp_ms = int((Decimal(int(frame.group(1))) * numerator * 1000 / denominator).to_integral_value(rounding=ROUND_HALF_UP))
         except InvalidOperation:
             raise VisionError("FRAME_TIMESTAMP_MISSING", "FFmpeg reported an invalid frame timestamp") from None
         image = temporary.read_bytes()

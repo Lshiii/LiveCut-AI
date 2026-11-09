@@ -35,7 +35,7 @@ from .topic_contracts import validate_topic_result
 from .topics import discover_topics
 from .worker_client import WorkerClient, WorkerClientError
 
-STAGES = ("MEDIA", "ASR", "SEGMENT", "CAPTION_PROOFREAD", "ANCHOR_CLIP", "TIMELINE", "EXPORT_CLIP")
+STAGES = ("MEDIA", "ASR", "SEGMENT", "CAPTION_PROOFREAD", "ANCHOR_CLIP", "AGENT_VISUAL", "TIMELINE", "EXPORT_CLIP")
 
 
 class WorkerError(Exception):
@@ -608,16 +608,31 @@ class StageWorker:
                     return None
         return None
 
+    def _available_stages(self, stage_type: str | None) -> list[str]:
+        if stage_type is not None and stage_type not in STAGES:
+            raise WorkerError("INVALID_STAGE_TYPE")
+        from .agent_visual import endpoint
+
+        ready = False
+        key, base = os.environ.get("LIVECUT_AGENT_VISUAL_API_KEY", ""), os.environ.get("LIVECUT_AGENT_VISUAL_BASE_URL", "")
+        if key and "\r" not in key and "\n" not in key and base:
+            try:
+                endpoint(base)
+                ready = True
+            except Exception:
+                pass
+        if stage_type == "AGENT_VISUAL" and not ready:
+            raise WorkerError("VISUAL_NOT_CONFIGURED")
+        return [stage_type] if stage_type is not None else [stage for stage in STAGES if stage != "AGENT_VISUAL" or ready]
+
     @contextmanager
     def _registered(self, stage_type: str | None, *, candidate_session: str | None = None) -> Iterator[bool]:
+        capabilities = self._available_stages(stage_type)
         if not self.registry_enabled:
             yield True
             return
         # Never advertise capabilities we will not poll for. This process has
         # exactly one computation slot, independent of its heartbeat threads.
-        capabilities = [stage_type] if stage_type is not None else list(STAGES)
-        if any(value not in STAGES for value in capabilities):
-            raise WorkerError("INVALID_STAGE_TYPE")
         if any(thread is not None and thread.is_alive()
                for thread in (self._presence_thread, self._stage_thread)):
             raise WorkerError("WORKER_HEARTBEAT_NOT_STOPPED")
@@ -795,8 +810,9 @@ class StageWorker:
         if self.registry_enabled and stage_type is None:
             # Query each capability independently. Twenty old MEDIA stages must
             # not hide a runnable SEGMENT stage beyond the first global page.
-            query_stages = list(STAGES[self._ready_cursor:] + STAGES[:self._ready_cursor])
-            self._ready_cursor = (self._ready_cursor + 1) % len(STAGES)
+            available = self._available_stages(None)
+            query_stages = available[self._ready_cursor:] + available[:self._ready_cursor]
+            self._ready_cursor = (self._ready_cursor + 1) % len(available)
             page_size = 4
         else:
             query_stages, page_size = [stage_type], maximum_claims
@@ -825,8 +841,9 @@ class StageWorker:
                         if self.registry_enabled and query_stage is not None and row.get("stage_type") != query_stage:
                             raise WorkerError("CLAIM_STAGE_TYPE_CHANGED")
                     self._ready_succeeded()
-                    candidates = [item for item in candidates if not isinstance(item, dict)
-                                  or not isinstance(item.get("id"), str) or item["id"] not in attempted]
+                    candidates = [item for item in candidates if (not isinstance(item, dict)
+                                  or not isinstance(item.get("id"), str) or item["id"] not in attempted)
+                                  and (item.get("stage_type") != "AGENT_VISUAL" or "AGENT_VISUAL" in self._available_stages(stage_type))]
                 item = candidates.pop(0)
                 if not isinstance(item, dict):
                     raise WorkerError("INVALID_JAVA_RESPONSE")
@@ -1122,12 +1139,14 @@ class AnalysisStageExecutor:
         self.asr_reuse_source = deepcopy(asr_reuse_source)
 
     def _execute_agent(self, context: StageContext) -> dict:
+        from .agent_visual import build_visual_answer
         from .caption_proofread import build_caption_proofread, validate_caption_context
         from .video_agent import build_video_answer
 
         lease, directory = context.lease, context.directory
         config = lease.config.get("agent_turn")
         caption = lease.stage_type == "CAPTION_PROOFREAD"
+        visual = lease.stage_type == "AGENT_VISUAL"
         required = {"turn_id", "session_id", "question", "source_job_id", "source_transcript_key",
                     "source_transcript_hash", "source_analysis_key", "source_analysis_hash",
                     "duration_ms", "history", "max_tool_steps"}
@@ -1145,6 +1164,13 @@ class AnalysisStageExecutor:
                 raise WorkerError("INVALID_CAPTION_PROOFREAD_INPUT")
         elif config.get("kind", "VIDEO") != "VIDEO" or "caption_context" in config:
             raise WorkerError("INVALID_AGENT_INPUT")
+        if visual:
+            if config.get("visual_mode") != "frames" or lease.config.get("text_fallback_models", []) != []:
+                raise WorkerError("INVALID_AGENT_VISUAL_INPUT")
+            if not os.environ.get("LIVECUT_AGENT_VISUAL_API_KEY") or not os.environ.get("LIVECUT_AGENT_VISUAL_BASE_URL"):
+                raise WorkerError("VISUAL_NOT_CONFIGURED")
+        elif config.get("visual_mode", "none") != "none":
+            raise WorkerError("INVALID_AGENT_VISUAL_INPUT")
         sources = {}
         for name, stage, kind in (("transcript", "ASR", "transcript"),
                                    ("analysis", "TIMELINE", "analysis_result")):
@@ -1200,12 +1226,26 @@ class AnalysisStageExecutor:
                 options["max_request_attempts"] = text_transport.policy.max_attempts if isinstance(text_transport, ResilientTextTransport) else 1
                 build_caption_proofread(transcript, config["duration_ms"], config["question"], config["caption_context"],
                                         _native_path(directory), **options)
+            elif visual:
+                options["base_url"] = os.environ.get("LIVECUT_AGENT_VISUAL_BASE_URL")
+                options["api_key"] = os.environ.get("LIVECUT_AGENT_VISUAL_API_KEY")
+                options["ffmpeg_path"] = self.ffmpeg_path
+                options["ffprobe_path"] = self.ffprobe_path
+                options["media_info"] = _read(context.predecessor("MEDIA", "media_info"))
+                options["budget_remaining"] = getattr(text_transport, "visual_text_budget", lambda: None)
+                options["max_request_attempts"] = text_transport.policy.max_attempts if isinstance(text_transport, ResilientTextTransport) else 1
+                build_visual_answer(transcript, analysis["segments"], config["duration_ms"], config["question"],
+                                    _native_path(directory), source=_native_path(shared_path(context.storage_root, lease.source_key, must_exist=True)),
+                                    history=config["history"], **options)
             else:
                 build_video_answer(transcript, analysis["segments"], config["duration_ms"], config["question"],
                                    _native_path(directory), history=config["history"], **options)
         context.guard.check()
         artifacts = [context.artifact("caption_proofread" if caption else "agent_answer",
                                       directory / ("caption-proofread.json" if caption else "agent-answer.json"))]
+        if visual:
+            result = _read(directory / "agent-answer.json")
+            artifacts.extend(context.artifact("agent_visual_frame", directory / "visual-frames" / (frame["frame_id"] + ".jpg")) for frame in result["visual_evidence"])
         if _native_path(directory / "text-execution-trace.json").is_file():
             artifacts.append(context.artifact("text_execution_trace", directory / "text-execution-trace.json"))
         return {"schema_version": 1, "job_id": lease.job_id, "video_id": lease.video_id,
@@ -1329,6 +1369,10 @@ class AnalysisStageExecutor:
         if lease.stage_type == "CAPTION_PROOFREAD":
             if "agent_turn" not in config or "clip_request" in config:
                 raise WorkerError("INVALID_CAPTION_PROOFREAD_INPUT")
+            return self._execute_agent(context)
+        if lease.stage_type == "AGENT_VISUAL":
+            if "agent_turn" not in config or "clip_request" in config:
+                raise WorkerError("INVALID_AGENT_VISUAL_INPUT")
             return self._execute_agent(context)
         if lease.stage_type == "SEGMENT" and "clip_request" in config:
             return self._execute_intent(context)
