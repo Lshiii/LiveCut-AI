@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import { computed, createTextVNode, defineComponent, h, type PropType } from 'vue'
-import { parseAgentAnswer, type AgentAnswerRun } from './agentAnswer'
+import { parseAgentAnswer, parseEscapedAgentAnswer, type AgentAnswerRun } from './agentAnswer'
 
-const props = defineProps<{ text: string }>()
-const blocks = computed(() => parseAgentAnswer(props.text))
+const props = defineProps<{ text: string; escapedMarkdown?: boolean }>()
+const blocks = computed(() => props.escapedMarkdown ? parseEscapedAgentAnswer(props.text) : parseAgentAnswer(props.text))
 const InlineText = defineComponent({
   props: { runs: { type: Array as PropType<AgentAnswerRun[]>, required: true } },
   setup: props => () => props.runs.map(run => {

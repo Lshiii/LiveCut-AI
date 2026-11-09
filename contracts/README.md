@@ -1,5 +1,9 @@
 # 视频分析结果契约
 
+## 问答学习笔记
+
+[agent-note.schema.json](./agent-note.schema.json) 定义单个成功VIDEO轮次的只读笔记预览，下载ZIP包含Markdown、公开source.json和实际被引用的JPEG。三端另核同源身份、filename与turn绑定、字节上限及生命周期；Schema不能证明内容或图片来源有效。导出不新增模型/ASR请求，不包含原视频和完整转写。见[学习笔记协议](../docs/65-问答学习笔记.md)与[合成预览夹具](../fixtures/agent-note.synthetic.json)。
+
 ## 附加画面位置 v1.2
 
 [agent-answer-visual-focus.schema.json](./agent-answer-visual-focus.schema.json) 用于显式携带 `focus_timestamp_ms` 的 AGENT_VISUAL_FOCUS 轮次，旧1.1/1.0保留。1.2的首步必须是用户位置触发的 `USER_FOCUS` 取帧，之后工具才是 `MODEL`；位置、初步参数和真实首帧必须相符。Schema只查结构，三端另外校验位置、真实证据和来源；实际JPEG/PTS/manifest仍沿用视觉链路核验。

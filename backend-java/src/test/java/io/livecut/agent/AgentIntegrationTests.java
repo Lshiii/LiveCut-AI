@@ -50,6 +50,68 @@ class AgentIntegrationTests {
     @AfterEach void cleanup(){for(String id:ownJobs)jdbc.update("DELETE FROM analysis_job WHERE id=?",id);for(String id:ownVideos)jdbc.update("DELETE FROM video_asset WHERE id=?",id);for(String id:ownWorkers)jdbc.update("DELETE FROM worker_instance WHERE worker_id=?",id);ownJobs.clear();ownVideos.clear();ownWorkers.clear();}
     @AfterAll void stop(){if(app!=null)app.close();}
 
+    @Test void textNotePreviewAndDeterministicZipPreserveEvidenceWithoutAnyWrites()throws Exception{
+        var f=fixture();var request=turn(session(f).id(),"请解释缓存失效",4,"note-text");var lease=claim(request);jobs.complete(lease.stageId(),publish(f,request,lease,null));String before=scopedState(f.job());
+        var response=send("GET","/api/agent-turns/"+request.id()+"/note",null,null);assertEquals(200,response.statusCode());JsonNode preview=JSON.readTree(response.body());
+        assertEquals(Set.of("schema_version","turn_id","session_id","job_id","video_id","source_hash","transcript_hash","result_hash","source_filename","answer_scope","citation_count","image_count","markdown","download_filename"),preview.propertyNames());
+        assertEquals(1,preview.path("schema_version").intValue());assertEquals(request.id(),preview.path("turn_id").asText());assertEquals(request.sessionId(),preview.path("session_id").asText());assertEquals(f.hash(),preview.path("source_hash").asText());
+        assertEquals(1,preview.path("citation_count").intValue());assertEquals(0,preview.path("image_count").intValue());assertEquals("agent-synthetic.mp4",preview.path("source_filename").asText());assertTrue(preview.path("markdown").asText().contains("修改前缀会使缓存失效"));
+        var download=send("GET","/api/agent-turns/"+request.id()+"/note/download",null,null);assertEquals(200,download.statusCode());assertEquals("application/zip",download.headers().firstValue("Content-Type").orElseThrow());
+        assertEquals("attachment; filename=\"video-note-"+request.id()+".zip\"",download.headers().firstValue("Content-Disposition").orElseThrow());assertEquals(request.id(),download.headers().firstValue("X-LiveCut-Note-Turn-Id").orElseThrow());
+        assertEquals(preview.path("result_hash").asText(),download.headers().firstValue("X-LiveCut-Note-Result-Hash").orElseThrow());assertEquals(download.body().length,download.headers().firstValueAsLong("Content-Length").orElseThrow());
+        var files=noteZip(download.body());assertEquals(Set.of("note.md","source.json"),files.keySet());assertTrue(new String(files.get("note.md"),StandardCharsets.UTF_8).startsWith(preview.path("markdown").asText()));
+        assertNotePublicOnly(JSON.readTree(files.get("source.json")));assertArrayEquals(download.body(),send("GET","/api/agent-turns/"+request.id()+"/note/download",null,null).body());assertEquals(before,scopedState(f.job()));
+    }
+    @Test void generalAndInsufficientNotesKeepTheirScopeAndDoNotInventTranscriptQuotes()throws Exception{
+        var f=fixture();var owner=session(f);
+        for(String scope:List.of("GENERAL","INSUFFICIENT")){
+            var request=turn(owner.id(),"证据范围",4,"note-scope-"+scope);var lease=claim(request);jobs.complete(lease.stageId(),publish(f,request,lease,a->{a.put("answer_scope",scope).put("answer",scope.equals("GENERAL")?"这是通用知识补充。":"当前证据不足以回答。");a.putArray("citations");}));
+            String before=scopedState(f.job());var preview=app.getBean(AgentNoteService.class).preview(request.id());assertEquals(scope,preview.answerScope());assertEquals(0,preview.citationCount());assertEquals(0,preview.imageCount());
+            var files=noteZip(app.getBean(AgentNoteService.class).download(request.id()).bytes());assertFalse(new String(files.get("source.json"),StandardCharsets.UTF_8).contains("修改前缀会使缓存失效"));assertNotePublicOnly(JSON.readTree(files.get("source.json")));assertEquals(before,scopedState(f.job()));
+        }
+    }
+    @Test void visualAndFocusNotesIncludeOnlyActuallyCitedImagesEvenWhenIdsHaveGaps()throws Exception{
+        for(boolean focus:List.of(false,true)){
+            var f=fixture();configureVisual();var owner=session(f);var request=focus?focusTurn(owner.id(),"当前画面",4,0,"note-focus"):visualTurn(owner.id(),"画面说明",4,"note-visual");var lease=focus?claimFocus(request):claimVisual(request);
+            var complete=publishVisual(f,request,lease,a->{var frame=((ObjectNode)a.path("visual_evidence").get(0)).deepCopy();frame.put("frame_id","f0002").put("requested_ms",2000).put("timestamp_ms",2000).put("source_pts",2000);a.withArray("visual_evidence").add(frame);
+                if(focus){var call=a.withArray("tool_calls").addObject().put("step",2).put("tool_name","inspect_frames").put("origin","MODEL");call.putObject("arguments").putArray("timestamps_ms").add(2000);call.putArray("result_utterance_ids");call.putArray("result_frame_ids").add("f0002");}
+                else{((ObjectNode)a.path("tool_calls").get(0).path("arguments")).withArray("timestamps_ms").add(2000);((ObjectNode)a.path("tool_calls").get(0)).withArray("result_frame_ids").add("f0002");}
+                a.putArray("visual_citations").addObject().put("frame_id","f0002").put("explanation","只引用第二张已看过的合成图");});
+            String prefix=attemptPrefix(lease);byte[] jpeg=Files.readAllBytes(root.resolve(prefix+"visual-frames/f0001.jpg"));write(prefix+"visual-frames/f0002.jpg",jpeg);
+            var manifest=(ObjectNode)JSON.readTree(Files.readAllBytes(root.resolve(complete.manifestKey())));manifest.withArray("artifacts").addObject().put("kind","agent_visual_frame").put("key",prefix+"visual-frames/f0002.jpg").put("sha256",sha(jpeg));byte[] sealed=JSON.writeValueAsBytes(manifest);write(complete.manifestKey(),sealed);jobs.complete(lease.stageId(),new CompleteRequest(lease.attempt(),lease.runToken(),complete.manifestKey(),sha(sealed)));
+            String before=scopedState(f.job());var notes=app.getBean(AgentNoteService.class);var preview=notes.preview(request.id());var files=noteZip(notes.download(request.id()).bytes());assertEquals(0,preview.citationCount());assertEquals(1,preview.imageCount());
+            assertEquals(Set.of("note.md","source.json","images/f0002.jpg"),files.keySet());assertArrayEquals(jpeg,files.get("images/f0002.jpg"));assertEquals(sha(jpeg),agents.getTurn(request.id()).result().path("visual_evidence").get(1).path("sha256").asText());
+            String source=new String(files.get("source.json"),StandardCharsets.UTF_8);assertTrue(source.contains("f0002"));assertFalse(source.contains("f0001"));assertNotePublicOnly(JSON.readTree(files.get("source.json")));assertEquals(before,scopedState(f.job()));
+            write(prefix+"visual-frames/f0001.jpg",new byte[]{1,2,3});assertEquals("ARTIFACT_HASH_MISMATCH",failure(()->notes.download(request.id())));write(prefix+"visual-frames/f0001.jpg",jpeg);assertEquals(before,scopedState(f.job()));
+        }
+    }
+    @Test void notesRejectQueuedRunningFailedCancelledAndNonVideoOwnersWithoutWrites()throws Exception{
+        var f=fixture();var owner=session(f);var request=turn(owner.id(),"不可导出的状态",4,"note-status");var notes=app.getBean(AgentNoteService.class);
+        for(String state:List.of("QUEUED","RUNNING","FAILED","CANCELLED")){
+            jdbc.update("UPDATE agent_turn SET status=? WHERE id=?",state,request.id());String before=scopedState(f.job());assertEquals("AGENT_NOTE_NOT_READY",failure(()->notes.preview(request.id())));assertEquals("AGENT_NOTE_NOT_READY",failure(()->notes.download(request.id())));assertEquals(before,scopedState(f.job()));
+        }
+        jdbc.update("UPDATE agent_session SET kind='CAPTION',caption_export_id=?,caption_clip_id=? WHERE id=?",UUID.randomUUID().toString(),UUID.randomUUID().toString(),owner.id());String before=scopedState(f.job());var response=send("GET","/api/agent-turns/"+request.id()+"/note",null,null);assertError(response,404,"AGENT_SESSION_NOT_FOUND");assertFalse(new String(response.body(),StandardCharsets.UTF_8).contains(request.question()));assertEquals(before,scopedState(f.job()));
+    }
+    @Test void noteSnapshotRejectsTamperedStoredHashAnswerSourceAndManifestWithoutCachedFallback()throws Exception{
+        var f=fixture();var request=turn(session(f).id(),"核对来源",4,"note-tamper");var lease=claim(request);var complete=publish(f,request,lease,null);jobs.complete(lease.stageId(),complete);var notes=app.getBean(AgentNoteService.class);var original=notes.preview(request.id());
+        String resultHash=original.resultHash(),resultJson=jdbc.queryForObject("SELECT result_json FROM agent_turn WHERE id=?",String.class,request.id());jdbc.update("UPDATE agent_turn SET result_hash=? WHERE id=?","0".repeat(64),request.id());assertEquals("AGENT_RESULT_INVALID",failure(()->notes.preview(request.id())));assertEquals("AGENT_RESULT_INVALID",failure(()->notes.download(request.id())));jdbc.update("UPDATE agent_turn SET result_hash=? WHERE id=?",resultHash,request.id());
+        var altered=(ObjectNode)JSON.readTree(resultJson);altered.put("answer","已被修改但仍然结构有效的答案");String changed=io.livecut.clips.ClipRequestService.canonicalJson(altered);jdbc.update("UPDATE agent_turn SET result_json=?,result_hash=? WHERE id=?",changed,io.livecut.clips.ClipRequestService.sha(changed),request.id());assertEquals("AGENT_RESULT_INVALID",failure(()->notes.download(request.id())));jdbc.update("UPDATE agent_turn SET result_json=?,result_hash=? WHERE id=?",resultJson,resultHash,request.id());
+        String sourceKey=jdbc.queryForObject("SELECT manifest_key FROM job_stage WHERE job_id=? AND stage_type='ASR'",String.class,f.job());byte[] sourceBytes=Files.readAllBytes(root.resolve(sourceKey));write(sourceKey,"tamper".getBytes(StandardCharsets.UTF_8));assertEquals("ARTIFACT_HASH_MISMATCH",failure(()->notes.preview(request.id())));write(sourceKey,sourceBytes);
+        byte[] manifestBytes=Files.readAllBytes(root.resolve(complete.manifestKey()));write(complete.manifestKey(),"tamper".getBytes(StandardCharsets.UTF_8));assertEquals("ARTIFACT_HASH_MISMATCH",failure(()->notes.download(request.id())));write(complete.manifestKey(),manifestBytes);
+        String answerKey=attemptPrefix(lease)+"agent-answer.json";byte[] answerBytes=Files.readAllBytes(root.resolve(answerKey));write(answerKey,"tamper".getBytes(StandardCharsets.UTF_8));assertEquals("ARTIFACT_HASH_MISMATCH",failure(()->notes.preview(request.id())));write(answerKey,answerBytes);
+        String before=scopedState(f.job());assertEquals(original,notes.preview(request.id()));assertTrue(notes.download(request.id()).bytes().length>0);assertEquals(before,scopedState(f.job()));
+    }
+    @Test void visualNoteRejectsCorruptFrozenEvidenceAndDetachedSnapshotDoesNotRereadIt()throws Exception{
+        var f=fixture();configureVisual();var request=visualTurn(session(f).id(),"截图原始字节",4,"note-jpeg");var lease=claimVisual(request);jobs.complete(lease.stageId(),publishVisual(f,request,lease,null));var notes=app.getBean(AgentNoteService.class);var snapshot=agents.noteSnapshot(request.id());assertFalse(org.springframework.transaction.support.TransactionSynchronizationManager.isActualTransactionActive());
+        String image=attemptPrefix(lease)+"visual-frames/f0001.jpg";byte[] jpeg=Files.readAllBytes(root.resolve(image));var imageView=snapshot.images();imageView.get("f0001")[0]=0;((ObjectNode)snapshot.result()).put("answer","mutated detached caller view");assertFalse(snapshot.result().path("answer").asText().contains("mutated"));assertArrayEquals(jpeg,snapshot.images().get("f0001"));
+        write(image,new byte[]{1,2,3});String before=scopedState(f.job());assertEquals("ARTIFACT_HASH_MISMATCH",failure(()->notes.preview(request.id())));assertEquals("ARTIFACT_HASH_MISMATCH",failure(()->notes.download(request.id())));assertEquals(before,scopedState(f.job()));assertTrue(AgentNoteRenderer.render(snapshot).sourceJson().length>0);write(image,jpeg);assertEquals(1,notes.preview(request.id()).imageCount());
+    }
+    private static Map<String,byte[]> noteZip(byte[] bytes)throws Exception{
+        Map<String,byte[]> result=new LinkedHashMap<>();try(var zip=new java.util.zip.ZipInputStream(new java.io.ByteArrayInputStream(bytes),StandardCharsets.UTF_8)){java.util.zip.ZipEntry entry;while((entry=zip.getNextEntry())!=null){assertEquals(java.time.LocalDateTime.of(1980,1,1,0,0),entry.getTimeLocal());assertFalse(entry.isDirectory());assertNull(result.put(entry.getName(),zip.readAllBytes()));}}
+        return result;
+    }
+    private static void assertNotePublicOnly(JsonNode source){String text=source.toString();for(String privateField:List.of("run_token","manifest_key","source_key","transcript_key","analysis_key","provider_response","operation_key","idempotency_key","tool_calls"))assertFalse(text.contains(privateField));}
+
     @Test void focusCapabilityIsSeparateReadOnlyAndZeroIsAnImmutableRequestIdentity()throws Exception{
         var f=fixture();configureVisual();var session=session(f);String before=scopedState(f.job());
         var capability=send("GET","/api/agent-capabilities/focus",null,null);assertEquals(200,capability.statusCode());assertEquals(Set.of("focus_timestamp_supported"),JSON.readTree(capability.body()).propertyNames());assertTrue(JSON.readTree(capability.body()).path("focus_timestamp_supported").booleanValue());assertEquals(5,JSON.readTree(send("GET","/api/agent-capabilities",null,null).body()).size());assertEquals(before,scopedState(f.job()));

@@ -58,6 +58,41 @@ public class AgentService {
     public Page list(String jobId){String parent=uuid(jobId);return tx.execute(status->{lockAnalysis(parent);return new Page(jdbc.queryForList("SELECT * FROM agent_session WHERE job_id=? AND kind='VIDEO' ORDER BY created_at DESC,id DESC LIMIT 100",parent).stream().map(this::sessionSnapshot).toList());});}
     public Session getSession(String id){return tx.execute(status->{var owner=lockPublicSession(uuid(id));requireKind(owner,false);return sessionSnapshot(owner);});}
     public Turn getTurn(String id){return tx.execute(status->{var owner=lockPublicOwner(uuid(id));requireKind(owner,false);return turnSnapshot(owner);});}
+    /** Freeze verified public note material under the existing owner lock order. No writes or model calls. */
+    AgentNoteModels.Snapshot noteSnapshot(String id){
+        return tx.execute(status->{
+            var owner=lockPublicOwner(uuid(id));requireKind(owner,false);
+            if(!"VIDEO".equals(owner.get("kind")))throw missing("AGENT_SESSION_NOT_FOUND");
+            if(!"SUCCEEDED".equals(owner.get("status")))throw conflict("AGENT_NOTE_NOT_READY","Only a successful video answer can become a study note");
+            var job=lockAnalysis(String.valueOf(owner.get("job_id")));sameSource(owner,source(job));
+            var stages=jdbc.queryForList("SELECT * FROM job_stage WHERE owner_type='AGENT_TURN' AND owner_id=? FOR UPDATE",id);
+            if(stages.size()!=1||!"SUCCEEDED".equals(stages.getFirst().get("status"))
+                    ||!Objects.equals(owner.get("job_id"),stages.getFirst().get("job_id"))
+                    ||!AgentFocus.stage(owner).equals(stages.getFirst().get("stage_type")))throw conflict("AGENT_STAGE_UNAVAILABLE","The successful answer execution is unavailable");
+            var stage=stages.getFirst();var identity=identity(stage,job,String.valueOf(owner.get("source_hash")));
+            JsonNode answer;
+            try{answer=AgentAnswerValidator.JSON.readTree(String.valueOf(owner.get("result_json")));}
+            catch(RuntimeException malformed){throw conflict("AGENT_RESULT_INVALID","Stored answer failed integrity validation");}
+            String resultHash=String.valueOf(owner.get("result_hash"));
+            if(answer==null||!resultHash.matches("[a-f0-9]{64}")||!sha(canonical(answer)).equals(resultHash))throw conflict("AGENT_RESULT_INVALID","Stored answer failed integrity validation");
+            AgentAnswerValidator.validate(answer,owner);
+            var manifest=artifacts.verifyAgentAnswerManifest(String.valueOf(stage.get("manifest_key")),String.valueOf(stage.get("manifest_hash")),identity);
+            var ref=manifest.artifacts().stream().filter(a->a.kind().equals("agent_answer")).findFirst().orElseThrow(()->conflict("AGENT_RESULT_INVALID","The answer artifact is unavailable"));
+            if(!canonical(answer).equals(canonical(artifacts.readJsonArtifact(ref,identity))))throw conflict("AGENT_RESULT_INVALID","Stored answer no longer matches its artifact");
+            Map<String,byte[]> images=new LinkedHashMap<>();
+            if("frames".equals(visualMode(owner))){
+                var verified=AgentVisualArtifacts.verify(jdbc,artifacts,job,owner,answer,manifest,identity);
+                for(JsonNode citation:answer.path("visual_citations")){
+                    String frame=citation.path("frame_id").asText();byte[] bytes=verified.get(frame);
+                    if(bytes==null||images.put(frame,bytes)!=null)throw conflict("AGENT_NOTE_SOURCE_INVALID","The note image references are invalid");
+                }
+            }
+            String filename=jdbc.queryForObject("SELECT original_filename FROM video_asset WHERE id=?",String.class,owner.get("video_id"));
+            return new AgentNoteModels.Snapshot(String.valueOf(owner.get("id")),String.valueOf(owner.get("session_id")),String.valueOf(owner.get("job_id")),
+                String.valueOf(owner.get("video_id")),String.valueOf(owner.get("source_hash")),String.valueOf(owner.get("transcript_hash")),resultHash,
+                filename,((Number)owner.get("duration_ms")).longValue(),answer,images);
+        });
+    }
     public Capabilities capabilities(){String model=configuredVisualModel.trim();boolean configured=validModel(model);return new Capabilities(configured?"frames":null,configured?model:null,32,12000,500);}
     public byte[] visualFrame(String id,String frameId){
         if(frameId==null||!frameId.matches("f00(?:0[1-9]|[12][0-9]|3[0-2])"))throw missing("AGENT_VISUAL_FRAME_NOT_FOUND");

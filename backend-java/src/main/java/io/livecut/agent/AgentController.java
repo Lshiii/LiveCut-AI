@@ -9,7 +9,22 @@ import tools.jackson.databind.JsonNode;
 @RestController
 public class AgentController {
     private final AgentService agents;
-    public AgentController(AgentService agents){this.agents=agents;}
+    private final AgentNoteService notes;
+    public AgentController(AgentService agents,AgentNoteService notes){this.agents=agents;this.notes=notes;}
+    @GetMapping("/api/agent-turns/{id}/note")
+    public ResponseEntity<AgentNoteModels.Preview> note(@PathVariable String id){
+        return ResponseEntity.ok().contentType(MediaType.APPLICATION_JSON).cacheControl(CacheControl.noStore())
+            .header("X-Content-Type-Options","nosniff").body(notes.preview(id));
+    }
+    @GetMapping("/api/agent-turns/{id}/note/download")
+    public ResponseEntity<byte[]> noteDownload(@PathVariable String id){
+        var download=notes.download(id);byte[] bytes=download.bytes();
+        return ResponseEntity.ok().contentType(MediaType.parseMediaType("application/zip")).cacheControl(CacheControl.noStore())
+            .header("X-Content-Type-Options","nosniff")
+            .header("Content-Disposition","attachment; filename=\""+download.filename()+"\"")
+            .header("X-LiveCut-Note-Turn-Id",download.turnId()).header("X-LiveCut-Note-Result-Hash",download.resultHash())
+            .contentLength(bytes.length).body(bytes);
+    }
     @GetMapping("/api/agent-capabilities")
     public AgentModels.Capabilities capabilities(){return agents.capabilities();}
     @GetMapping("/api/agent-capabilities/focus")

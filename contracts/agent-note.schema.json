@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://livecut.local/contracts/agent-note.schema.json",
+  "title": "Verified single-answer study note preview",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "turn_id", "session_id", "job_id", "video_id", "source_hash", "transcript_hash", "result_hash", "source_filename", "answer_scope", "citation_count", "image_count", "markdown", "download_filename"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "turn_id": {"$ref": "#/$defs/id"},
+    "session_id": {"$ref": "#/$defs/id"},
+    "job_id": {"$ref": "#/$defs/id"},
+    "video_id": {"$ref": "#/$defs/id"},
+    "source_hash": {"$ref": "#/$defs/hash"},
+    "transcript_hash": {"$ref": "#/$defs/hash"},
+    "result_hash": {"$ref": "#/$defs/hash"},
+    "source_filename": {"type": "string", "minLength": 1, "maxLength": 1000, "pattern": "\\S"},
+    "answer_scope": {"enum": ["VIDEO", "GENERAL", "INSUFFICIENT"]},
+    "citation_count": {"type": "integer", "minimum": 0, "maximum": 24},
+    "image_count": {"type": "integer", "minimum": 0, "maximum": 32},
+    "markdown": {"type": "string", "minLength": 1, "maxLength": 2097152, "pattern": "\\S"},
+    "download_filename": {"type": "string", "pattern": "^video-note-[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}\\.zip$"}
+  },
+  "$defs": {
+    "id": {"type": "string", "pattern": "^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$"},
+    "hash": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+  }
+}
