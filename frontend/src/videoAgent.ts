@@ -207,12 +207,14 @@ export class AgentReadScope {
   private epoch = 0
   private stopped = false
   private controllers = new Set<AbortController>()
-  begin() {
+  begin(parent?: AbortSignal) {
     const controller = new AbortController(), epoch = this.epoch
-    if (this.stopped) controller.abort()
+    const abort = () => controller.abort()
+    if (this.stopped || parent?.aborted) controller.abort()
+    else parent?.addEventListener('abort', abort, { once: true })
     this.controllers.add(controller)
     return { signal: controller.signal, current: () => !this.stopped && epoch === this.epoch && !controller.signal.aborted,
-      release: () => { this.controllers.delete(controller) } }
+      release: () => { this.controllers.delete(controller); parent?.removeEventListener('abort', abort) } }
   }
   invalidate() { this.epoch++; for (const controller of this.controllers) controller.abort(); this.controllers.clear() }
   dispose() { this.stopped = true; this.invalidate() }

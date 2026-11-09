@@ -6,6 +6,7 @@ import TextRequestProgress from './TextRequestProgress.vue'
 import AgentAnswer from './AgentAnswer.vue'
 import AgentVisualEvidence from './AgentVisualEvidence.vue'
 import AgentNotePanel from './AgentNotePanel.vue'
+import { AgentForegroundRefresh, agentHasActiveWork, type AgentRefreshLease } from './agentRefresh'
 import { parseAgentVisualCapability, type AgentVisualCapability } from './agentVisualEvidence'
 import { AgentFocusError, canCaptureAgentFocus, captureAgentFocus, focusHintMatches, parseAgentFocusCapability, type AgentFocusHint } from './agentFocus'
 import { SequencePreview } from './sequencePreview'
@@ -24,6 +25,7 @@ const sessions = ref<AgentSession[]>([]), selectedId = ref(''), question = ref('
 const visualMode = ref<'none' | 'frames'>('none'), visualCapability = ref<AgentVisualCapability | null>(null), capabilityLoading = ref(false), capabilityError = ref('')
 const focusHint = ref<AgentFocusHint | null>(null), focusSupported = ref(false), focusLoading = ref(false), focusError = ref(''), focusPlayerVersion = ref(0)
 const action = ref(''), error = ref(''), refreshError = ref(''), notice = ref(''), loading = ref(true)
+const pageVisible = ref(!document.hidden), refreshing = ref(false)
 const selected = computed(() => sessions.value.find(session => session.id === selectedId.value) ?? null)
 const activeTurn = computed(() => selected.value?.turns.find(agentTurnActive))
 const recentAnswer = computed(() => [...(selected.value?.turns ?? [])].reverse().find(turn => !!turn.result))
@@ -70,7 +72,7 @@ const scope = new AgentReadScope()
 const ownUnacknowledged = new Map<string, AgentSubmissionEntry>()
 const acknowledgedSubmissions = new Map<string, AgentSubmissionEntry>()
 let submissionVersion = 0
-let stopped = false, refreshing = false, timer: number | undefined, selectionVersion = 0, previewVersion = 0
+let stopped = false, mounted = false, refreshVersion = 0, selectionVersion = 0, previewVersion = 0
 let referenceObserver: ResizeObserver | undefined, capabilityVersion = 0, focusCapabilityVersion = 0
 let preparedEvidence: { version: number; sessionId: string; turnId: string; videoUrl: string; sourceHash: string; start: number; end?: number } | null = null
 let evidenceTimer: number | undefined
@@ -82,6 +84,17 @@ const scopes = { VIDEO: '来自视频', GENERAL: '通用知识补充', INSUFFICI
 const toolNames = { search_transcript: '检索视频原句', read_context: '补读相邻内容', list_topics: '查看视频话题', inspect_frames: '查看指定画面', inspect_clip: '短片画面抽样' }
 const canAttachFocus = computed(() => { void focusPlayerVersion.value; return canCaptureAgentFocus(focusCaptureInput()) })
 const focusSubmissionBlocked = computed(() => !!focusHint.value && (visualMode.value !== 'frames' || !focusSupported.value || !focusHintMatches(focusHint.value, focusOwner())))
+const hasActiveRefreshWork = computed(() => agentHasActiveWork(sessions.value))
+const foregroundRefresh = new AgentForegroundRefresh({ refresh: refreshNow, hasActiveWork: () => hasActiveRefreshWork.value,
+  capabilities: async lease => { await Promise.all([loadVisualCapability(lease.current, lease.signal), loadFocusCapability(lease.current, lease.signal)]) } })
+function foregroundReadable() { return !stopped && props.active !== false && !document.hidden }
+function syncRefreshLifecycle() {
+  if (!mounted) return
+  if (!foregroundReadable() || pending.value) { refreshVersion++; scope.invalidate(); refreshing.value = false }
+  foregroundRefresh.update({ active: props.active !== false, visible: pageVisible.value && !document.hidden, blocked: pending.value })
+}
+function windowFocused() { scanSubmissions(); pageVisible.value = !document.hidden; syncRefreshLifecycle(); foregroundRefresh.focus() }
+function refresh() { return foregroundRefresh.refresh() }
 defineExpose({ dirty, pending })
 
 function message(value: unknown) {
@@ -121,27 +134,33 @@ function message(value: unknown) {
   return known[code] ?? `对话操作未完成：${code}`
 }
 function parseSession(raw: unknown, id?: string) { return parseAgentSession(raw, props.jobId, props.videoId, props.videoHash, id) }
-async function loadVisualCapability(current: () => boolean = () => !stopped) {
+async function loadVisualCapability(current: () => boolean = foregroundReadable, signal?: AbortSignal) {
+  if (!foregroundReadable() || !current() || signal?.aborted) return null
   const version = ++capabilityVersion
+  const owner = `${props.jobId}:${props.videoId}:${props.videoHash}`
+  const validRead = () => foregroundReadable() && current() && !signal?.aborted && owner === `${props.jobId}:${props.videoId}:${props.videoHash}` && version === capabilityVersion
   capabilityLoading.value = true; capabilityError.value = ''
   try {
-    const value = parseAgentVisualCapability(await api<unknown>('/api/agent-capabilities'))
-    if (!current() || version !== capabilityVersion) return null
+    const value = parseAgentVisualCapability(await api<unknown>('/api/agent-capabilities', { signal }))
+    if (!validRead()) return null
     visualCapability.value = value; return value
   } catch {
-    if (current() && version === capabilityVersion) { visualCapability.value = null; capabilityError.value = '暂时无法确认画面能力；普通文本提问仍可使用。' }
+    if (validRead()) { visualCapability.value = null; capabilityError.value = '暂时无法确认画面能力；普通文本提问仍可使用。' }
     return null
   } finally { if (!stopped && version === capabilityVersion) capabilityLoading.value = false }
 }
-async function loadFocusCapability(current: () => boolean = () => !stopped) {
+async function loadFocusCapability(current: () => boolean = foregroundReadable, signal?: AbortSignal) {
+  if (!foregroundReadable() || !current() || signal?.aborted) return false
   const version = ++focusCapabilityVersion
+  const owner = `${props.jobId}:${props.videoId}:${props.videoHash}`
+  const validRead = () => foregroundReadable() && current() && !signal?.aborted && owner === `${props.jobId}:${props.videoId}:${props.videoHash}` && version === focusCapabilityVersion
   focusLoading.value = true; focusError.value = ''
   try {
-    parseAgentFocusCapability(await api<unknown>('/api/agent-capabilities/focus'))
-    if (!current() || version !== focusCapabilityVersion) return false
+    parseAgentFocusCapability(await api<unknown>('/api/agent-capabilities/focus', { signal }))
+    if (!validRead()) return false
     focusSupported.value = true; return true
   } catch {
-    if (current() && version === focusCapabilityVersion) { focusSupported.value = false; focusError.value = '暂不能附加位置；普通视觉提问仍可使用，现有定位提示保留。' }
+    if (validRead()) { focusSupported.value = false; focusError.value = '暂不能附加位置；普通视觉提问仍可使用，现有定位提示保留。' }
     return false
   } finally { if (!stopped && version === focusCapabilityVersion) focusLoading.value = false }
 }
@@ -210,15 +229,16 @@ async function selectSession(id: string) {
   closeHistory()
   scope.invalidate(); selectionVersion++; selectedId.value = id; closePreview()
   error.value = ''; notice.value = ''; playbackError.value = ''
-  await refresh()
+  await foregroundRefresh.restart()
 }
-async function refresh() {
-  if (stopped || refreshing) return
-  refreshing = true
-  const read = scope.begin(), jobId = props.jobId
+async function refreshNow(lease: AgentRefreshLease) {
+  const read = scope.begin(lease.signal), jobId = props.jobId, videoHash = props.videoHash, version = ++refreshVersion
+  const current = () => foregroundReadable() && !pending.value && lease.current() && read.current() && version === refreshVersion && jobId === props.jobId && videoHash === props.videoHash
+  if (!current()) { read.release(); return }
+  refreshing.value = true
   try {
     const raw = await api<{ items: unknown[] }>(`/api/jobs/${jobId}/agent-sessions`, { signal: read.signal })
-    if (!read.current() || jobId !== props.jobId) return
+    if (!current()) return
     if (!Array.isArray(raw.items)) throw new AgentResponseError()
     const incoming = raw.items.map(value => parseSession(value))
     if (new Set(incoming.map(value => value.id)).size !== incoming.length) throw new AgentResponseError()
@@ -228,17 +248,17 @@ async function refresh() {
     const id = selectedId.value
     if (id) {
       const detail = await api<unknown>(`/api/agent-sessions/${id}`, { signal: read.signal })
-      if (!read.current() || selectedId.value !== id) return
+      if (!current() || selectedId.value !== id) return
       upsertSession(parseSession(detail, id))
     }
     refreshError.value = ''
   } catch (value) {
-    if (read.current()) refreshError.value = value instanceof ApiError && ['NETWORK_UNAVAILABLE', 'REQUEST_TIMEOUT'].includes(value.code)
-      ? '暂时无法刷新对话，已有记录与输入保留。' : message(value)
+    if (current()) refreshError.value = value instanceof ApiError && ['NETWORK_UNAVAILABLE', 'REQUEST_TIMEOUT'].includes(value.code)
+      ? '暂时无法刷新对话，请稍后重试。' : '对话返回的来源或内容无法核对，请稍后刷新。'
+    throw value
   }
-  finally { read.release(); refreshing = false; loading.value = false }
+  finally { read.release(); if (version === refreshVersion) { refreshing.value = false; loading.value = false } }
 }
-async function poll() { await refresh(); if (!stopped) timer = window.setTimeout(() => { void poll() }, 4000) }
 function submissionOwner() { return { job_id: props.jobId, video_id: props.videoId, video_sha256: props.videoHash } }
 function scanSubmissions() {
   try {
@@ -430,7 +450,7 @@ function invalidateSubmission() {
   submissionVersion++
   if (action.value === 'send' || action.value === 'session' || action.value.startsWith('recover:') || action.value.startsWith('release:')) action.value = ''
 }
-function submissionVisibilityChanged() { if (document.hidden) { invalidateSubmission(); pauseReference() } else scanSubmissions(); touchFocusPlayer() }
+function submissionVisibilityChanged() { pageVisible.value = !document.hidden; if (document.hidden) { invalidateSubmission(); pauseReference() } else scanSubmissions(); touchFocusPlayer(); syncRefreshLifecycle() }
 async function cancel(turn: AgentTurn) {
   const session = selected.value
   if (pending.value || !session || !agentTurnActive(turn)) return
@@ -525,11 +545,10 @@ function closePreview() { pauseReference(); citation.value = null; frameLocation
 function date(value: string) { return new Date(value).toLocaleString('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }) }
 function unload(event: BeforeUnloadEvent) { scanSubmissions(); if (dirty.value || pending.value || submissionBlocked.value) { event.preventDefault(); event.returnValue = '' } }
 onMounted(() => {
-  scanSubmissions(); window.addEventListener('storage', submissionStorageChanged); window.addEventListener('focus', scanSubmissions)
-  void loadVisualCapability()
-  void loadFocusCapability()
+  mounted = true
+  scanSubmissions(); window.addEventListener('storage', submissionStorageChanged); window.addEventListener('focus', windowFocused)
   document.addEventListener('visibilitychange', submissionVisibilityChanged)
-  window.addEventListener('beforeunload', unload); void poll()
+  window.addEventListener('beforeunload', unload); syncRefreshLifecycle()
   referenceObserver = new ResizeObserver(entries => {
     const width = entries[0]?.contentRect.width
     if (stopped || !width) return
@@ -550,11 +569,17 @@ watch(() => props.active, value => {
   if (value === false) { invalidateSubmission(); closeHistory(false); pauseReference() }
   else { scanSubmissions(); if (initialScrollPending) scrollToLatest(true) }
 }, { flush: 'sync' })
+watch([() => props.active, pageVisible, pending], syncRefreshLifecycle, { flush: 'sync' })
+watch(hasActiveRefreshWork, () => foregroundRefresh.reschedule(), { flush: 'sync' })
+watch(() => `${props.jobId}:${props.videoId}:${props.videoHash}`, () => {
+  refreshVersion++; scope.invalidate(); refreshing.value = false
+  if (mounted) void foregroundRefresh.restart(true)
+}, { flush: 'sync' })
 watch(referenceVisible, value => { if (!value) pauseReference() }, { flush: 'sync' })
 watch(() => props.videoUrl, pauseReference, { flush: 'sync' })
 watch(() => props.videoHash, closePreview, { flush: 'sync' })
 watch(sessionListOpen, value => { if (value) pauseReference() }, { flush: 'sync' })
-onBeforeUnmount(() => { scanSubmissions(); stopped = true; capabilityVersion++; focusCapabilityVersion++; submissionVersion++; selectionVersion++; pauseReference(); referenceObserver?.disconnect(); scope.dispose(); window.clearTimeout(timer); window.removeEventListener('beforeunload', unload); window.removeEventListener('storage', submissionStorageChanged); window.removeEventListener('focus', scanSubmissions); document.removeEventListener('visibilitychange', submissionVisibilityChanged) })
+onBeforeUnmount(() => { scanSubmissions(); stopped = true; mounted = false; refreshVersion++; capabilityVersion++; focusCapabilityVersion++; submissionVersion++; selectionVersion++; pauseReference(); referenceObserver?.disconnect(); foregroundRefresh.dispose(); scope.dispose(); window.removeEventListener('beforeunload', unload); window.removeEventListener('storage', submissionStorageChanged); window.removeEventListener('focus', windowFocused); document.removeEventListener('visibilitychange', submissionVisibilityChanged) })
 </script>
 
 <template>
@@ -597,9 +622,9 @@ onBeforeUnmount(() => { scanSubmissions(); stopped = true; capabilityVersion++; 
             <div v-if="turn.result.suggested_clip_instruction" class="agent-clip-suggestion"><p>{{ turn.result.suggested_clip_instruction }}</p><button class="secondary" :disabled="pending || clipTargetBusy" @click="suggest(turn.result.suggested_clip_instruction)">送到剪辑要求</button><small v-if="clipTargetBusy">请先保存或放弃剪辑区域的未提交内容。</small><small v-else>仅填入要求，你仍需在剪辑区域点击查找、核对并确认。</small></div>
           </template><p v-else class="help">{{ turn.status === 'CANCELLED' ? '本轮已取消，已有对话和视频结果仍保留。' : turn.status === 'FAILED' ? '本轮未生成可用回答。请查看原因，原转写与此前回答仍保留。' : turn.status === 'QUEUED' ? '问题已保存，正在等待执行服务。' : '正在结合视频内容查找证据并回答，进度会自动更新。' }}</p>
         </div></li></ol>
-        <div v-if="selected?.turns.length" class="agent-reading-actions"><span>当前视频 · {{ selected.turns.length }} 轮对话</span><button class="text-button" @click="scrollToLatest(true)">定位最新一轮 ↓</button></div>
+        <div class="agent-reading-actions"><span>当前视频 · {{ selected?.turns.length ?? 0 }} 轮对话</span><button class="text-button" :disabled="pending || refreshing" @click="refresh">刷新对话</button><button v-if="selected?.turns.length" class="text-button" @click="scrollToLatest(true)">定位最新一轮 ↓</button></div>
         <form class="agent-compose" @submit.prevent="send">
-          <div class="agent-visual-option"><label><input v-model="visualMode" type="checkbox" true-value="frames" false-value="none" :disabled="pending || visualMode === 'none' && visualCapability?.visual_mode !== 'frames'">结合画面</label><span v-if="visualMode === 'frames'">本轮可按需抽帧；所有模型请求、重试及修复共用下方次数上限。</span><span v-else>默认只用视频转写。</span><button type="button" class="text-button" :disabled="capabilityLoading || focusLoading || pending" @click="loadVisualCapability(); loadFocusCapability()">{{ capabilityLoading ? '正在检查…' : '检查画面能力' }}</button><small v-if="capabilityError">{{ capabilityError }}</small><small v-else-if="visualCapability?.visual_mode === null">当前部署未配置视觉模型。</small><small v-else-if="visualCapability?.visual_mode === 'frames'">配置模型 {{ visualCapability.visual_model_id }}；配置可用不代表额度或识别效果已验证。</small></div>
+          <div class="agent-visual-option"><label><input v-model="visualMode" type="checkbox" true-value="frames" false-value="none" :disabled="pending || visualMode === 'none' && visualCapability?.visual_mode !== 'frames'">结合画面</label><span v-if="visualMode === 'frames'">本轮可按需抽帧；所有模型请求、重试及修复共用下方次数上限。</span><span v-else>默认只用视频转写。</span><button type="button" class="text-button" :disabled="capabilityLoading || focusLoading || pending" @click="foregroundRefresh.checkCapabilities()">{{ capabilityLoading ? '正在检查…' : '检查画面能力' }}</button><small v-if="capabilityError">{{ capabilityError }}</small><small v-else-if="visualCapability?.visual_mode === null">当前部署未配置视觉模型。</small><small v-else-if="visualCapability?.visual_mode === 'frames'">配置模型 {{ visualCapability.visual_model_id }}；配置可用不代表额度或识别效果已验证。</small></div>
           <div v-if="focusHint" class="agent-focus-chip" role="status"><strong>定位提示 {{ topicTime(focusHint.timestamp_ms) }}</strong><span>播放或拖动不会改变此位置，尚不是画面证据。</span><div><button type="button" class="text-button" :disabled="pending" @click="removeFocus">移除定位提示</button><button type="button" class="text-button" :disabled="!canAttachFocus" @click="attachFocus">重新附加当前位置</button></div><p v-if="visualMode !== 'frames'">请移除提示或切回“结合画面”后再提交。</p><p v-else-if="!focusHintMatches(focusHint, focusOwner())">原视频来源已变化，请明确移除或重新附加。</p><p v-else-if="!focusSupported">位置支持尚未确认，提示仍保留；可点击“检查画面能力”重新核对。</p></div>
           <div v-if="!selected?.turns.length" class="agent-examples"><button v-for="example in examples" :key="example" type="button" class="secondary" :disabled="pending || dirty" @click="chooseExample(example)">{{ example }}</button></div>
           <div class="agent-input-box"><label for="agent-question" class="visually-hidden">向视频助手提问</label><textarea id="agent-question" v-model="question" :disabled="pending" maxlength="2000" rows="2" placeholder="问问这段视频，例如：概括主要内容，列出关键观点。"></textarea>
