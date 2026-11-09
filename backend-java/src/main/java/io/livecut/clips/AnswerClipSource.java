@@ -3,6 +3,7 @@ package io.livecut.clips;
 import static io.livecut.clips.ClipPlanValidator.*;
 import java.util.*;
 import io.livecut.agent.AgentAnswerValidator;
+import io.livecut.agent.AgentVisualArtifacts;
 import io.livecut.jobs.ArtifactVerifier;
 import io.livecut.jobs.JobException;
 import org.springframework.http.HttpStatus;
@@ -35,11 +36,13 @@ public final class AnswerClipSource {
             if(!ClipRequestService.sha(ClipRequestService.canonicalJson(answer)).equals(owner.get("result_hash")))throw invalid();
             AgentAnswerValidator.validate(answer,owner);if(!answer.path("answer_scope").asText().equals("VIDEO"))throw unavailable();
             var stages=jdbc.queryForList("SELECT * FROM job_stage WHERE owner_type='AGENT_TURN' AND owner_id=? FOR UPDATE",owner.get("id"));
-            if(stages.size()!=1||!"SUCCEEDED".equals(stages.getFirst().get("status"))||!"SEGMENT".equals(stages.getFirst().get("stage_type")))throw unavailable();
-            var stage=stages.getFirst();var identity=new ArtifactVerifier.ManifestIdentity(parent,String.valueOf(owner.get("video_id")),((Number)job.get("generation")).intValue(),String.valueOf(stage.get("id")),"SEGMENT",((Number)stage.get("attempt")).intValue(),String.valueOf(stage.get("run_token")),sourceHash);
+            String expectedStage="frames".equals(owner.get("visual_mode"))?"AGENT_VISUAL":"SEGMENT";
+            if(stages.size()!=1||!"SUCCEEDED".equals(stages.getFirst().get("status"))||!expectedStage.equals(stages.getFirst().get("stage_type")))throw unavailable();
+            var stage=stages.getFirst();var identity=new ArtifactVerifier.ManifestIdentity(parent,String.valueOf(owner.get("video_id")),((Number)job.get("generation")).intValue(),String.valueOf(stage.get("id")),expectedStage,((Number)stage.get("attempt")).intValue(),String.valueOf(stage.get("run_token")),sourceHash);
             var manifest=artifacts.verifyAgentAnswerManifest(String.valueOf(stage.get("manifest_key")),String.valueOf(stage.get("manifest_hash")),identity);
             var artifact=manifest.artifacts().stream().filter(item->item.kind().equals("agent_answer")).findFirst().orElseThrow();
             if(!answer.equals(artifacts.readJsonArtifact(artifact,identity)))throw invalid();
+            if(expectedStage.equals("AGENT_VISUAL"))AgentVisualArtifacts.verify(jdbc,artifacts,job,owner,answer,manifest,identity);
             return new Frozen(project(answer,utterances,duration,selection.path("utterance_ids")),answer);
         }catch(JobException error){if(Set.of("INVALID_ANSWER_SOURCE","ANSWER_SOURCE_UNAVAILABLE").contains(error.getCode()))throw error;throw invalid();}
         catch(RuntimeException error){throw invalid();}
@@ -70,6 +73,7 @@ public final class AnswerClipSource {
             for(String key:List.of("job_id","video_id","source_hash","transcript_hash"))if(!source.path(key).asText().equals(String.valueOf(owner.get(key))))throw invalid();
             long duration=((Number)owner.get("duration_ms")).longValue();if(number(source,"duration_ms")!=duration)throw invalid();
             Map<String,Object> frame=new HashMap<>(owner);frame.put("id",source.path("turn_id").asText());frame.put("session_id",source.path("session_id").asText());frame.put("question",source.path("question").asText());frame.put("text_model_id",answer.path("provenance").path("text_model_id").asText());
+            frame.put("visual_mode",answer.path("schema_version").asText().equals("1.1")?"frames":"none");
             AgentAnswerValidator.validate(answer,frame);if(!answer.path("answer_scope").asText().equals("VIDEO")||!ClipRequestService.canonicalJson(project(answer,frozen.path("utterances"),duration,source.path("utterance_ids"))).equals(ClipRequestService.canonicalJson(source)))throw invalid();
             return new Frozen(source,answer);
         }catch(RuntimeException error){throw invalid();}

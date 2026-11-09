@@ -75,7 +75,9 @@ def worker(tmp_path, client, calls, **kwargs):
                        fake_executor(calls), worker_heartbeat_seconds=.01, **kwargs)
 
 
-def test_idle_executor_registers_pulses_and_unregisters_under_one_session(tmp_path):
+def test_idle_executor_registers_pulses_and_unregisters_under_one_session(tmp_path, monkeypatch):
+    monkeypatch.delenv("LIVECUT_AGENT_VISUAL_API_KEY", raising=False)
+    monkeypatch.delenv("LIVECUT_AGENT_VISUAL_BASE_URL", raising=False)
     client, calls = PresenceClient(idle=True), []
     runner = worker(tmp_path, client, calls)
     errors = []
@@ -93,7 +95,7 @@ def test_idle_executor_registers_pulses_and_unregisters_under_one_session(tmp_pa
     assert not thread.is_alive() and not errors and not calls
     assert len(client.registrations) == 1
     wid, session, stages, target = client.registrations[0]
-    assert stages == list(STAGES) and not target
+    assert stages == [stage for stage in STAGES if stage != "AGENT_VISUAL"] and not target
     assert client.presence_heartbeats and set(client.presence_heartbeats) == {(wid, session)}
     assert client.unregistrations == [(wid, session)]
     assert not client.callbacks

@@ -40,6 +40,7 @@ class BudgetTransport(httpx.BaseTransport):
             inner = DeadlineHTTPTransport()
         self.inner = inner
         self._caption_reserved: int | None = None
+        self._visual_reserved: int | None = None
         self._asr_calls: dict[str, str] = {}
         self._recovery_path = context.directory / "model-call-recovery.json"
         if _native_path(self._recovery_path).exists():
@@ -98,6 +99,42 @@ class BudgetTransport(httpx.BaseTransport):
                 return None
             self._caption_reserved = budget["text_calls_reserved"]
             return maximum - self._caption_reserved
+        finally:
+            self.context.guard.check()
+
+    def visual_text_budget(self) -> int | None:
+        lease = self.context.lease
+        config, maximum = lease.config.get("agent_turn", {}), lease.config.get("max_text_calls")
+        self.context.guard.check()
+        try:
+            if (lease.stage_type != "AGENT_VISUAL" or not isinstance(config, dict)
+                    or config.get("visual_mode") != "frames" or type(maximum) is not int or not 1 <= maximum <= 24):
+                return None
+            try:
+                turn = self.client.agent_turn(config.get("turn_id"))
+            except WorkerClientError:
+                return None
+            if not isinstance(turn, dict) or not isinstance(turn.get("stage"), dict) or not isinstance(turn.get("budget"), dict):
+                return None
+            stage, budget = turn["stage"], turn["budget"]
+            if (turn.get("id") != config.get("turn_id") or turn.get("session_id") != config.get("session_id")
+                    or turn.get("job_id") != lease.job_id or turn.get("visual_mode") != "frames"
+                    or stage.get("id") != lease.stage_id or stage.get("stage_type") != "AGENT_VISUAL"):
+                return None
+            if (not isinstance(turn.get("status"), str) or not isinstance(stage.get("status"), str)
+                    or type(stage.get("attempt")) is not int):
+                return None
+            if (turn.get("status") != "RUNNING" or stage.get("status") != "RUNNING"
+                    or stage.get("attempt") != lease.attempt):
+                self.context.guard.lose()
+                self.context.guard.check()
+            used = budget.get("text_calls_reserved")
+            if (budget.get("max_text_calls") != maximum or type(budget.get("max_text_calls")) is not int
+                    or type(used) is not int or not 0 <= used <= maximum
+                    or self._visual_reserved is not None and used < self._visual_reserved):
+                return None
+            self._visual_reserved = used
+            return maximum - used
         finally:
             self.context.guard.check()
 
@@ -231,6 +268,8 @@ class BudgetTransport(httpx.BaseTransport):
         if self.context.lease.stage_type == "EXPORT_CLIP":
             raise ModelBudgetError("MODEL_OPERATION_NOT_ALLOWED")
         path = request.url.path.rstrip("/")
+        if self.context.lease.stage_type == "AGENT_VISUAL" and (request.method != "POST" or not path.endswith("/chat/completions")):
+            raise ModelBudgetError("MODEL_OPERATION_NOT_ALLOWED")
         kind = None
         if request.method == "POST" and path.endswith("/services/audio/asr/transcription"):
             kind = "ASR"
@@ -240,7 +279,7 @@ class BudgetTransport(httpx.BaseTransport):
             if request.method == "POST" and "/tasks/" in path:
                 return self._query(request)
             return self.inner.handle_request(request)
-        allowed = {"ASR": {"ASR"}, "TEXT": {"SEGMENT", "CAPTION_PROOFREAD", "ANCHOR_CLIP"}}
+        allowed = {"ASR": {"ASR"}, "TEXT": {"SEGMENT", "CAPTION_PROOFREAD", "ANCHOR_CLIP", "AGENT_VISUAL"}}
         if self.context.lease.stage_type not in allowed[kind]:
             raise ModelBudgetError("MODEL_OPERATION_NOT_ALLOWED")
         try:

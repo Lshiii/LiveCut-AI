@@ -292,6 +292,10 @@ def _digest(value):
 
 
 class ResilientTextTransport(httpx.BaseTransport):
+    def visual_text_budget(self) -> int | None:
+        read = getattr(self.inner, "visual_text_budget", None)
+        return read() if callable(read) else None
+
     def caption_text_budget(self) -> int | None:
         read = getattr(self.inner, "caption_text_budget", None)
         return read() if callable(read) else None
@@ -301,7 +305,9 @@ class ResilientTextTransport(httpx.BaseTransport):
         self.inner, self.context = inner, context
         self.policy = policy or TextRetryPolicy.from_env()
         self.progress, self.sleep, self.monotonic = progress, sleep, monotonic
-        self.fallbacks = _fallbacks(context)
+        self.fallbacks = [] if getattr(context.lease, "stage_type", None) == "AGENT_VISUAL" else _fallbacks(context)
+        if getattr(context.lease, "stage_type", None) == "AGENT_VISUAL" and context.lease.config.get("text_fallback_models", []) != []:
+            raise TextRecoveryError("INVALID_VISUAL_FALLBACK_CONFIGURATION")
         self.circuit = TextCircuit(context, circuit_policy)
         self.trace = {"schema_version": 1, "job_id": context.lease.job_id,
                       "stage_id": context.lease.stage_id, "calls": []}

@@ -32,6 +32,7 @@ public class AgentService {
     private final TransactionTemplate tx;
     @Value("${LIVECUT_TEXT_MODEL:}") private String preferredTextModel="";
     @Value("${LIVECUT_TEXT_FALLBACK_MODELS:}") private String configuredFallbackModels="";
+    @Value("${LIVECUT_AGENT_VISUAL_MODEL:}") private String configuredVisualModel="";
     private record FrozenSource(String video,String hash,String transcriptKey,String transcriptHash,String analysisKey,
                                 String analysisHash,long duration,JsonNode utterances,JsonNode topics) {}
     public AgentService(JdbcTemplate jdbc,ArtifactVerifier artifacts,CaptionService captions,CaptionSourceResolver captionSources,PlatformTransactionManager manager){
@@ -57,6 +58,25 @@ public class AgentService {
     public Page list(String jobId){String parent=uuid(jobId);return tx.execute(status->{lockAnalysis(parent);return new Page(jdbc.queryForList("SELECT * FROM agent_session WHERE job_id=? AND kind='VIDEO' ORDER BY created_at DESC,id DESC LIMIT 100",parent).stream().map(this::sessionSnapshot).toList());});}
     public Session getSession(String id){return tx.execute(status->{var owner=lockPublicSession(uuid(id));requireKind(owner,false);return sessionSnapshot(owner);});}
     public Turn getTurn(String id){return tx.execute(status->{var owner=lockPublicOwner(uuid(id));requireKind(owner,false);return turnSnapshot(owner);});}
+    public Capabilities capabilities(){String model=configuredVisualModel.trim();boolean configured=validModel(model);return new Capabilities(configured?"frames":null,configured?model:null,32,12000,500);}
+    public byte[] visualFrame(String id,String frameId){
+        if(frameId==null||!frameId.matches("f00(?:0[1-9]|[12][0-9]|3[0-2])"))throw missing("AGENT_VISUAL_FRAME_NOT_FOUND");
+        return tx.execute(status->{var owner=lockPublicOwner(uuid(id));requireKind(owner,false);
+            if(!"SUCCEEDED".equals(owner.get("status"))||!"frames".equals(visualMode(owner)))throw missing("AGENT_VISUAL_FRAME_NOT_FOUND");
+            var job=lockAnalysis(String.valueOf(owner.get("job_id")));sameSource(owner,source(job));
+            var stages=jdbc.queryForList("SELECT * FROM job_stage WHERE owner_type='AGENT_TURN' AND owner_id=? FOR UPDATE",id);
+            if(stages.size()!=1||!"AGENT_VISUAL".equals(stages.getFirst().get("stage_type"))||!"SUCCEEDED".equals(stages.getFirst().get("status")))throw conflict("AGENT_STAGE_UNAVAILABLE","Visual evidence execution is unavailable");
+            var stage=stages.getFirst();var identity=identity(stage,job,String.valueOf(owner.get("source_hash")));
+            JsonNode answer=AgentAnswerValidator.JSON.readTree(String.valueOf(owner.get("result_json")));
+            if(!sha(canonical(answer)).equals(owner.get("result_hash")))throw conflict("AGENT_RESULT_INVALID","Stored answer failed integrity validation");
+            AgentAnswerValidator.validate(answer,owner);
+            var manifest=artifacts.verifyAgentAnswerManifest(String.valueOf(stage.get("manifest_key")),String.valueOf(stage.get("manifest_hash")),identity);
+            var ref=manifest.artifacts().stream().filter(a->a.kind().equals("agent_answer")).findFirst().orElseThrow();
+            if(!canonical(answer).equals(canonical(artifacts.readJsonArtifact(ref,identity))))throw conflict("AGENT_RESULT_INVALID","Stored answer no longer matches its artifact");
+            byte[] bytes=AgentVisualArtifacts.verify(jdbc,artifacts,job,owner,answer,manifest,identity).get(frameId);
+            if(bytes==null)throw missing("AGENT_VISUAL_FRAME_NOT_FOUND");return bytes;
+        });
+    }
     /** Resolves an original submission; business absence alone permits replay of its original key/body. */
     public Session findSessionSubmission(String jobId,String submissionKey){
         String parent=uuid(jobId);key(submissionKey);
@@ -81,17 +101,18 @@ public class AgentService {
             if(!id.equals(found.get("session_id"))||!parent.equals(found.get("job_id")))throw conflict("IDEMPOTENCY_CONFLICT","Submission belongs to a different conversation owner");
             var owner=lockOwner(String.valueOf(found.get("id")),parent);requireKind(owner,false);
             String question=String.valueOf(owner.get("question"));int limit=((Number)owner.get("max_text_calls")).intValue();
-            if(question.isBlank()||question.length()>2000||limit<1||limit>24||!sha("agent-turn\n"+id+"\n"+question+"\n"+limit).equals(owner.get("request_hash")))throw invalidSubmission();
+            if(question.isBlank()||question.length()>2000||limit<1||limit>24||!turnFingerprint(id,question,limit,visualMode(owner)).equals(owner.get("request_hash")))throw invalidSubmission();
             return turnSnapshot(owner);
         });
     }
     public Turn createTurn(String sessionId,JsonNode input,String key){
         String id=uuid(sessionId);key(key);
-        if(input==null||!input.isObject()||!input.has("question")||!Set.of("question","max_text_calls").containsAll(input.propertyNames()))throw bad("INVALID_AGENT_TURN","A question and optional text budget are required");
+        if(input==null||!input.isObject()||!input.has("question")||!Set.of("question","max_text_calls","visual_mode").containsAll(input.propertyNames()))throw bad("INVALID_AGENT_TURN","A question and optional text budget are required");
         JsonNode q=input.path("question");if(!q.isString()||q.stringValue().isBlank()||q.stringValue().length()>2000)throw bad("INVALID_AGENT_TURN","Question must be 1..2000 characters");
         int budget=8;if(input.has("max_text_calls")){JsonNode n=input.path("max_text_calls");if(!n.isIntegralNumber()||!n.canConvertToInt())throw bad("INVALID_AGENT_TURN","Text budget must be 1..24");budget=n.intValue();}
         if(budget<1||budget>24)throw bad("INVALID_AGENT_TURN","Text budget must be 1..24");
-        final int limit=budget;String question=q.stringValue(),fingerprint=sha("agent-turn\n"+id+"\n"+question+"\n"+limit);
+        String mode="none";if(input.has("visual_mode")){JsonNode value=input.path("visual_mode");if(!value.isString()||!Set.of("none","frames").contains(value.stringValue()))throw bad("INVALID_AGENT_TURN","Visual mode must be none or frames");mode=value.stringValue();}
+        final String visual=mode;final int limit=budget;String question=q.stringValue(),fingerprint=turnFingerprint(id,question,limit,visual);
         try{return tx.execute(status->{
             var session=lockPublicSession(id);requireKind(session,false);String parent=String.valueOf(session.get("job_id"));
             var existing=jdbc.queryForList("SELECT * FROM agent_turn WHERE idempotency_key=? FOR UPDATE",key);
@@ -100,13 +121,13 @@ public class AgentService {
             int count=jdbc.queryForObject("SELECT COUNT(*) FROM agent_turn WHERE session_id=?",Integer.class,id);
             if(count>=100)throw conflict("AGENT_SESSION_LIMIT","Start a new session after 100 turns");
             var job=lockAnalysis(parent);var current=source(job);sameSource(session,current);
-            String turn=UUID.randomUUID().toString(),stage=UUID.randomUUID().toString(),model=model(job);
-            String fallbacks=TextExecutionPolicy.serialize(TextExecutionPolicy.configuredFallbacks(configuredFallbackModels));
+            String turn=UUID.randomUUID().toString(),stage=UUID.randomUUID().toString(),model=visual.equals("frames")?visualModel():model(job);
+            String fallbacks=visual.equals("frames")?"[]":TextExecutionPolicy.serialize(TextExecutionPolicy.configuredFallbacks(configuredFallbackModels));
             String history=history(id);
-            jdbc.update("INSERT INTO agent_turn (id,session_id,job_id,sequence_number,question,idempotency_key,request_hash,text_model_id,text_fallback_models_json,max_text_calls,history_json) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                turn,id,parent,count+1,question,key,fingerprint,model,fallbacks,limit,history);
-            jdbc.update("INSERT INTO job_stage (id,job_id,owner_type,owner_id,stage_type,shard_key,status,input_hash) VALUES (?,?,'AGENT_TURN',?,'SEGMENT',?,'READY',?)",
-                stage,parent,turn,"agent-"+turn,sha(fingerprint+"\n"+current.hash()+"\n"+current.transcriptHash()+"\n"+current.analysisHash()+"\n"+model+"\n"+fallbacks+"\n"+history));
+            jdbc.update("INSERT INTO agent_turn (id,session_id,job_id,sequence_number,question,idempotency_key,request_hash,text_model_id,text_fallback_models_json,max_text_calls,history_json,visual_mode) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                turn,id,parent,count+1,question,key,fingerprint,model,fallbacks,limit,history,visual);
+            jdbc.update("INSERT INTO job_stage (id,job_id,owner_type,owner_id,stage_type,shard_key,status,input_hash) VALUES (?,?,'AGENT_TURN',?, ?,?,'READY',?)",
+                stage,parent,turn,visual.equals("frames")?"AGENT_VISUAL":"SEGMENT","agent-"+turn,sha(fingerprint+"\n"+current.hash()+"\n"+current.transcriptHash()+"\n"+current.analysisHash()+"\n"+model+"\n"+fallbacks+"\n"+history));
             return turnSnapshot(lockOwner(turn,parent));
         });}catch(DuplicateKeyException collision){return tx.execute(status->{lockPublicSession(id);var rows=jdbc.queryForList("SELECT * FROM agent_turn WHERE idempotency_key=? FOR UPDATE",key);if(rows.isEmpty())throw collision;return existingTurn(rows.getFirst(),fingerprint);});}
     }
@@ -145,7 +166,8 @@ public class AgentService {
         var owner=lockOwner(stage.ownerId(),stage.jobId());Map<String,Object> turn=new TreeMap<>();
         if(isCaption(owner)){if(!CaptionProofreadValidator.STAGE.equals(stage.stageType()))throw conflict("CAPTION_PROOFREAD_STAGE_INVALID","Caption proofreading requires its declared worker capability");
             turn.put("kind","CAPTION");turn.put("caption_context",CaptionProofreadValidator.storedContext(owner));}
-        else if(!"SEGMENT".equals(stage.stageType()))throw conflict("AGENT_STAGE_UNAVAILABLE","Video conversation stage type changed");
+        else if(!(visualMode(owner).equals("frames")?"AGENT_VISUAL":"SEGMENT").equals(stage.stageType()))throw conflict("AGENT_STAGE_UNAVAILABLE","Video conversation stage type changed");
+        if("frames".equals(visualMode(owner))){turn.put("visual_mode","frames");if(!TextExecutionPolicy.storedFallbacks(owner.get("text_fallback_models_json")).isEmpty())throw conflict("AGENT_STAGE_UNAVAILABLE","Visual conversations cannot use text fallbacks");}
         for(String field:List.of("session_id","question","duration_ms"))turn.put(field,owner.get(field));
         turn.put("turn_id",stage.ownerId());turn.put("source_job_id",stage.jobId());turn.put("source_transcript_key",owner.get("transcript_key"));turn.put("source_transcript_hash",owner.get("transcript_hash"));
         turn.put("source_analysis_key",owner.get("analysis_key"));turn.put("source_analysis_hash",owner.get("analysis_hash"));turn.put("max_tool_steps",isCaption(owner)?Math.min(4,((Number)owner.get("max_text_calls")).intValue()-1):4);
@@ -158,13 +180,19 @@ public class AgentService {
         if(isCaption(owner)){var manifest=artifacts.verifyCaptionProofreadManifest(key,hash,identity);var file=manifest.artifacts().stream().filter(a->a.kind().equals("caption_proofread")).findFirst().orElseThrow();CaptionProofreadValidator.validate(artifacts.readJsonArtifact(file,identity),owner);return manifest;}
         var manifest=artifacts.verifyAgentAnswerManifest(key,hash,identity);
         var file=manifest.artifacts().stream().filter(a->a.kind().equals("agent_answer")).findFirst().orElseThrow();
-        AgentAnswerValidator.validate(artifacts.readJsonArtifact(file,identity),owner);return manifest;
+        validateAnswer(stage,job,owner,artifacts.readJsonArtifact(file,identity),manifest,identity);return manifest;
     }
     public void recordSuccess(StageRow stage,Map<String,Object> job,ArtifactVerifier.VerifiedManifest manifest){
         var owner=lockOwner(stage.ownerId(),stage.jobId());var identity=identity(stage,job,String.valueOf(owner.get("source_hash")));
         var file=manifest.artifacts().stream().filter(a->a.kind().equals(isCaption(owner)?"caption_proofread":"agent_answer")).findFirst().orElseThrow();
-        JsonNode result=isCaption(owner)?CaptionProofreadValidator.validate(artifacts.readJsonArtifact(file,identity),owner):AgentAnswerValidator.validate(artifacts.readJsonArtifact(file,identity),owner);String serialized=canonical(result);
+        JsonNode result=isCaption(owner)?CaptionProofreadValidator.validate(artifacts.readJsonArtifact(file,identity),owner):validateAnswer(stage,job,owner,artifacts.readJsonArtifact(file,identity),manifest,identity);String serialized=canonical(result);
         jdbc.update("UPDATE agent_turn SET result_json=?,result_hash=? WHERE id=?",serialized,sha(serialized),stage.ownerId());
+    }
+    private JsonNode validateAnswer(StageRow stage,Map<String,Object> job,Map<String,Object> owner,JsonNode result,ArtifactVerifier.VerifiedManifest manifest,ArtifactVerifier.ManifestIdentity identity){
+        if(!(visualMode(owner).equals("frames")?"AGENT_VISUAL":"SEGMENT").equals(stage.stageType()))throw conflict("AGENT_STAGE_UNAVAILABLE","Answer stage does not match frozen mode");
+        AgentAnswerValidator.validate(result,owner);
+        if("frames".equals(visualMode(owner))){sameSource(owner,source(job));AgentVisualArtifacts.verify(jdbc,artifacts,job,owner,result,manifest,identity);}
+        return result;
     }
     private String history(String session){
         var rows=jdbc.queryForList("SELECT question,result_json,result_hash FROM agent_turn WHERE session_id=? AND status='SUCCEEDED' ORDER BY sequence_number DESC LIMIT 6",session);
@@ -186,7 +214,7 @@ public class AgentService {
         JsonNode result="SUCCEEDED".equals(owner.get("status"))&&owner.get("result_json")!=null?AgentAnswerValidator.JSON.readTree(String.valueOf(owner.get("result_json"))):null;
         return new Turn(id,String.valueOf(owner.get("session_id")),String.valueOf(owner.get("job_id")),String.valueOf(owner.get("question")),((Number)owner.get("sequence_number")).intValue(),
             String.valueOf(owner.get("status")),((Number)owner.get("state_version")).longValue(),instant(owner.get("created_at")),instant(owner.get("updated_at")),
-            new Budget(((Number)owner.get("max_text_calls")).intValue(),((Number)owner.get("text_calls_reserved")).intValue()),stage,result);
+            new Budget(((Number)owner.get("max_text_calls")).intValue(),((Number)owner.get("text_calls_reserved")).intValue()),stage,result,visualMode(owner));
     }
     private FrozenSource source(Map<String,Object> job){
         if(!"REVIEW_READY".equals(job.get("status"))||!"topics".equals(AgentAnswerValidator.JSON.readTree(String.valueOf(job.get("config_json"))).path("analysis_mode").asText()))throw conflict("AGENT_SOURCE_NOT_READY","A completed topics analysis is required");
@@ -339,6 +367,10 @@ public class AgentService {
     private static JobException invalidCaption(String message){return bad("INVALID_CAPTION_PROOFREAD_REQUEST",message);}
     private String model(Map<String,Object> job){String model=preferredTextModel.isBlank()?AgentAnswerValidator.JSON.readTree(String.valueOf(job.get("config_json"))).path("text_model").asText():preferredTextModel;
         if(!model.matches("[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}"))throw bad("INVALID_AGENT_TURN","Invalid configured text model");return model;}
+    private String visualModel(){String model=configuredVisualModel.trim();if(!validModel(model))throw conflict("AGENT_VISUAL_NOT_CONFIGURED","No valid visual planner model is configured");return model;}
+    private static boolean validModel(String model){return model!=null&&model.matches("[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}");}
+    private static String visualMode(Map<String,Object> owner){Object value=owner.get("visual_mode");String mode=value==null?"none":String.valueOf(value);if(!Set.of("none","frames").contains(mode))throw invalidSubmission();return mode;}
+    private static String turnFingerprint(String id,String question,int limit,String mode){return sha("agent-turn\n"+id+"\n"+question+"\n"+limit+("frames".equals(mode)?"\nvisual_mode=frames":""));}
     private Map<String,Object> completedStage(String parent,String type){var rows=jdbc.queryForList("SELECT * FROM job_stage WHERE job_id=? AND owner_type='ANALYSIS' AND stage_type=? AND status='SUCCEEDED' FOR UPDATE",parent,type);if(rows.size()!=1)throw conflict("AGENT_SOURCE_UNAVAILABLE","Published source is unavailable");return rows.getFirst();}
     private Map<String,Object> lockAnalysis(String id){var rows=jdbc.queryForList("SELECT * FROM analysis_job WHERE id=? FOR UPDATE",id);if(rows.isEmpty())throw missing("JOB_NOT_FOUND");return rows.getFirst();}
     private ArtifactVerifier.ManifestIdentity identity(Map<String,Object> stage,Map<String,Object> job,String hash){return new ArtifactVerifier.ManifestIdentity(String.valueOf(job.get("id")),String.valueOf(job.get("video_id")),((Number)job.get("generation")).intValue(),String.valueOf(stage.get("id")),String.valueOf(stage.get("stage_type")),((Number)stage.get("attempt")).intValue(),String.valueOf(stage.get("run_token")),hash);}

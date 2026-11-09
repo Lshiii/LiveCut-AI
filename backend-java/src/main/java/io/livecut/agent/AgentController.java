@@ -1,12 +1,22 @@
 package io.livecut.agent;
 
 import org.springframework.web.bind.annotation.*;
+import org.springframework.http.ResponseEntity;
+import org.springframework.http.MediaType;
+import org.springframework.http.CacheControl;
 import tools.jackson.databind.JsonNode;
 
 @RestController
 public class AgentController {
     private final AgentService agents;
     public AgentController(AgentService agents){this.agents=agents;}
+    @GetMapping("/api/agent-capabilities")
+    public AgentModels.Capabilities capabilities(){return agents.capabilities();}
+    @GetMapping("/api/agent-turns/{id}/visual-evidence/{frameId}/content")
+    public ResponseEntity<byte[]> visualFrame(@PathVariable String id,@PathVariable String frameId){
+        return ResponseEntity.ok().contentType(MediaType.IMAGE_JPEG).cacheControl(CacheControl.noStore())
+            .header("X-Content-Type-Options","nosniff").body(agents.visualFrame(id,frameId));
+    }
     @PostMapping("/api/jobs/{jobId}/agent-sessions")
     public AgentModels.Session createSession(@PathVariable String jobId,@RequestBody JsonNode input,
             @RequestHeader(value="Idempotency-Key",required=false) String key){return agents.createSession(jobId,input,key);}

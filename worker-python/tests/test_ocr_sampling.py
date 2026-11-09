@@ -161,13 +161,13 @@ def test_attempt_local_ocr_refuses_to_resume_a_different_sampling_policy(fixture
     assert {path: path.read_bytes() for path in before} == before
 
 
-def test_prefix_retains_the_previous_binding_state_provenance_shapes_and_cache_key(fixture):
+def test_prefix_keeps_its_state_shape_and_uses_the_exact_pts_extraction_profile(fixture):
     result = cache_run(fixture, "old-prefix")
     legacy = {"source_sha256": digest(fixture.source), "duration_ms": 1200, "interval_ms": 500,
               "max_frames": 3, "sampling": "prefix-at-fixed-interval-v1",
               "observer": "rapidocr-prefix-observer-v1-score045-text2000",
               "ffmpeg": {"sha256": digest(fixture.ffmpeg), "size_bytes": fixture.ffmpeg.stat().st_size,
-                         "profile": "copyts-showinfo-v1-scale-max360x640-no-upscale"},
+                         "profile": "copyts-showinfo-v2-exact-pts-scale-max360x640-no-upscale"},
               "extractor_identity": "synthetic-extractor-v1",
               "runtime": {"kind": "custom", "model_id": "custom-ocr-engine",
                           "identity": "synthetic-engine-weights-v1"}}
@@ -186,6 +186,25 @@ def test_prefix_retains_the_previous_binding_state_provenance_shapes_and_cache_k
     assert explicit.provenance["cache_hit"] is True
     assert explicit.provenance["cache_key"] == expected_key
     assert explicit.observations == result.observations and fixture.engine.calls == 3
+
+
+def test_exact_pts_profile_creates_a_new_bundle_without_relabeling_old_v1_evidence(fixture, monkeypatch):
+    from livecut import ocr_cache
+    current_profile = ocr_cache._PROFILE
+    monkeypatch.setattr(ocr_cache, "_PROFILE", "copyts-showinfo-v1-scale-max360x640-no-upscale")
+    old = cache_run(fixture, "legacy-v1-attempt")
+    # The production Worker records this provenance alongside materialized OCR;
+    # the cache helper returns it without writing business-facing metadata.
+    save_json(fixture.root / "legacy-v1-attempt/cache-provenance.json", old.provenance)
+    before = {path: path.read_bytes() for path in entry(fixture, old).rglob("*") if path.is_file()}
+    before.update({path: path.read_bytes() for path in (fixture.root / "legacy-v1-attempt").rglob("*") if path.is_file()})
+    monkeypatch.setattr(ocr_cache, "_PROFILE", current_profile)
+    new = cache_run(fixture, "exact-v2-attempt")
+    assert old.provenance["cache_key"] != new.provenance["cache_key"] and new.provenance["cache_hit"] is False
+    assert len(published(fixture)) == 2 and fixture.engine.calls == 6
+    with pytest.raises(VisionError, match="attempt already contains different"):
+        cache_run(fixture, "legacy-v1-attempt")
+    assert {path: path.read_bytes() for path in before} == before
 
 
 @pytest.mark.parametrize("duration,interval,maximum", [(1200, 500, 3), (100, 500, 16)])
