@@ -9,6 +9,8 @@ import AgentNotePanel from './AgentNotePanel.vue'
 import { AgentForegroundRefresh, agentHasActiveWork, type AgentRefreshLease } from './agentRefresh'
 import { parseAgentVisualCapability, type AgentVisualCapability } from './agentVisualEvidence'
 import { AgentFocusError, canCaptureAgentFocus, captureAgentFocus, focusHintMatches, parseAgentFocusCapability, type AgentFocusHint } from './agentFocus'
+import { agentFrameFollowupTarget, confirmAgentFrameFollowup, prepareAgentFrameFollowup, sameAgentFocusHint,
+  type AgentFrameFollowupProposal, type AgentFrameFollowupTarget } from './agentFrameFollowup'
 import { SequencePreview } from './sequencePreview'
 import { selectAnswerClip, type AnswerClipSelection } from './answerClip'
 import { topicTime } from './topics'
@@ -24,6 +26,7 @@ const emit = defineEmits<{ clipInstruction: [instruction: string]; clipAnchor: [
 const sessions = ref<AgentSession[]>([]), selectedId = ref(''), question = ref(''), maxCalls = ref(8)
 const visualMode = ref<'none' | 'frames'>('none'), visualCapability = ref<AgentVisualCapability | null>(null), capabilityLoading = ref(false), capabilityError = ref('')
 const focusHint = ref<AgentFocusHint | null>(null), focusSupported = ref(false), focusLoading = ref(false), focusError = ref(''), focusPlayerVersion = ref(0)
+const followupProposal = ref<AgentFrameFollowupProposal | null>(null), questionInput = ref<HTMLTextAreaElement | null>(null)
 const action = ref(''), error = ref(''), refreshError = ref(''), notice = ref(''), loading = ref(true)
 const pageVisible = ref(!document.hidden), refreshing = ref(false)
 const selected = computed(() => sessions.value.find(session => session.id === selectedId.value) ?? null)
@@ -74,6 +77,7 @@ const acknowledgedSubmissions = new Map<string, AgentSubmissionEntry>()
 let submissionVersion = 0
 let stopped = false, mounted = false, refreshVersion = 0, selectionVersion = 0, previewVersion = 0
 let referenceObserver: ResizeObserver | undefined, capabilityVersion = 0, focusCapabilityVersion = 0
+let followupVersion = 0
 let preparedEvidence: { version: number; sessionId: string; turnId: string; videoUrl: string; sourceHash: string; start: number; end?: number } | null = null
 let evidenceTimer: number | undefined
 const evidenceSequence = new SequencePreview()
@@ -84,6 +88,14 @@ const scopes = { VIDEO: '来自视频', GENERAL: '通用知识补充', INSUFFICI
 const toolNames = { search_transcript: '检索视频原句', read_context: '补读相邻内容', list_topics: '查看视频话题', inspect_frames: '查看指定画面', inspect_clip: '短片画面抽样' }
 const canAttachFocus = computed(() => { void focusPlayerVersion.value; return canCaptureAgentFocus(focusCaptureInput()) })
 const focusSubmissionBlocked = computed(() => !!focusHint.value && (visualMode.value !== 'frames' || !focusSupported.value || !focusHintMatches(focusHint.value, focusOwner())))
+const frameFollowupUnavailable = computed(() => {
+  if (props.active === false || !pageVisible.value || sessionListOpen.value) return '请回到当前视频对话后继续提问。'
+  if (pending.value) return '当前操作正在处理，完成后可在此时间继续提问。'
+  if (capabilityLoading.value || focusLoading.value) return '正在核对画面与位置能力，请稍后重试。'
+  if (visualCapability.value?.visual_mode !== 'frames') return '请配置画面模型，并点击下方“检查画面能力”，再按截图时间继续提问。'
+  if (!focusSupported.value) return '位置支持尚未确认，请点击下方“检查画面能力”后重试。'
+  return null
+})
 const hasActiveRefreshWork = computed(() => agentHasActiveWork(sessions.value))
 const foregroundRefresh = new AgentForegroundRefresh({ refresh: refreshNow, hasActiveWork: () => hasActiveRefreshWork.value,
   capabilities: async lease => { await Promise.all([loadVisualCapability(lease.current, lease.signal), loadFocusCapability(lease.current, lease.signal)]) } })
@@ -130,6 +142,10 @@ function message(value: unknown) {
     AGENT_FOCUS_NOT_READY: '请先展开并加载当前原视频，等定位完成后再附加位置。当前草稿与原提交保持不变。',
     AGENT_FOCUS_MODE_REQUIRED: '草稿包含定位提示。请移除提示或切回“结合画面”后再提交。',
     AGENT_FOCUS_SOURCE_CHANGED: '定位提示的原视频来源已变化，请明确移除或重新附加当前位置。',
+    AGENT_FRAME_FOLLOWUP_INVALID: '这张截图的时间或来源无法核对，未改变问题和定位提示。请使用当前对话的有效画面引用。',
+    AGENT_FRAME_FOLLOWUP_UNAVAILABLE: '请先确认画面模型与位置能力可用，再按截图时间继续提问。当前草稿保留，可点击“检查画面能力”。',
+    AGENT_FRAME_FOLLOWUP_NOT_READY: '请回到可见的视频对话页，等待当前操作完成后再使用截图时间。当前草稿保留。',
+    AGENT_FRAME_FOLLOWUP_CHANGED: '原定位提示或截图来源已变化，请重新选择截图时间。当前草稿保留。',
   }
   return known[code] ?? `对话操作未完成：${code}`
 }
@@ -181,6 +197,38 @@ function attachFocus() {
   catch (value) { error.value = message(value) }
 }
 function removeFocus() { if (!pending.value) { focusHint.value = null; notice.value = '已移除本页定位提示；未改变任何原提交。' } }
+function frameFollowupContext() {
+  return { owner: focusOwner(), session_id: selectedId.value, transcript_hash: selected.value?.source.transcript_hash ?? '',
+    active: props.active !== false && !stopped, visible: !document.hidden && !sessionListOpen.value, pending: pending.value,
+    visual_available: visualCapability.value?.visual_mode === 'frames' && !capabilityLoading.value,
+    focus_supported: focusSupported.value && !focusLoading.value }
+}
+function clearFrameFollowup() { followupVersion++; followupProposal.value = null }
+function applyFrameFollowup(target: AgentFrameFollowupTarget) {
+  const fresh = agentFrameFollowupTarget(selected.value, target.turn_id, target.frame_id, frameFollowupContext())
+  if (JSON.stringify(fresh) !== JSON.stringify(target)) throw new AgentFocusError('AGENT_FRAME_FOLLOWUP_CHANGED')
+  pauseReference()
+  visualMode.value = 'frames'; focusHint.value = fresh.hint; clearFrameFollowup()
+  error.value = ''; notice.value = `已采用第 ${fresh.sequence} 轮 ${fresh.frame_id} 的实际时间 ${topicTime(fresh.hint.timestamp_ms)}，并切到“结合画面”。问题与请求上限保留，发送后将重新取帧。`
+  const version = ++followupVersion
+  void nextTick(() => {
+    if (version === followupVersion && !stopped && props.active !== false && !document.hidden && !sessionListOpen.value && !pending.value
+      && selectedId.value === fresh.session_id && sameAgentFocusHint(focusHint.value, fresh.hint) && visualMode.value === 'frames') questionInput.value?.focus()
+  })
+}
+function continueFromFrame(turnId: string, frameId: string) {
+  try {
+    const value = prepareAgentFrameFollowup(selected.value, turnId, frameId, frameFollowupContext(), focusHint.value)
+    if (value.kind === 'replace') { followupProposal.value = value.proposal; error.value = ''; notice.value = '' }
+    else applyFrameFollowup(value.target)
+  } catch (value) { error.value = message(value) }
+}
+function acceptFrameFollowup() {
+  if (!followupProposal.value) return
+  try { applyFrameFollowup(confirmAgentFrameFollowup(followupProposal.value, selected.value, frameFollowupContext(), focusHint.value)) }
+  catch (value) { clearFrameFollowup(); error.value = message(value) }
+}
+function keepFrameFollowupHint() { clearFrameFollowup(); notice.value = '已保留原定位提示，问题与请求上限未变。' }
 function upsertSession(value: AgentSession) {
   const index = sessions.value.findIndex(session => session.id === value.id)
   const latest = newestAgentSession(index < 0 ? undefined : sessions.value[index], value)
@@ -327,6 +375,7 @@ async function send() {
   const input = question.value.trim(), budget = maxCalls.value, mode = visualMode.value
   const focus = focusHint.value ? { ...focusHint.value } : null
   if (pending.value || !input || props.active === false || document.hidden) return
+  if (followupProposal.value) { error.value = '请先选择“使用此时间”或“保留原提示”，再发送问题。'; return }
   try { requireNoSubmission() } catch (value) { error.value = message(value); return }
   if (focus && mode !== 'frames') { error.value = message(new AgentFocusError('AGENT_FOCUS_MODE_REQUIRED')); return }
   if (focus && !focusHintMatches(focus, focusOwner())) { error.value = message(new AgentFocusError('AGENT_FOCUS_SOURCE_CHANGED')); return }
@@ -571,6 +620,10 @@ watch(() => props.active, value => {
 }, { flush: 'sync' })
 watch([() => props.active, pageVisible, pending], syncRefreshLifecycle, { flush: 'sync' })
 watch(hasActiveRefreshWork, () => foregroundRefresh.reschedule(), { flush: 'sync' })
+watch(() => JSON.stringify([selectedId.value, props.jobId, props.videoId, props.videoHash, props.videoUrl,
+  selected.value?.source.transcript_hash, selected.value?.source.duration_ms, props.active, pageVisible.value, sessionListOpen.value,
+  visualMode.value, focusHint.value, pending.value, visualCapability.value?.visual_mode, focusSupported.value, capabilityLoading.value, focusLoading.value]),
+  clearFrameFollowup, { flush: 'sync' })
 watch(() => `${props.jobId}:${props.videoId}:${props.videoHash}`, () => {
   refreshVersion++; scope.invalidate(); refreshing.value = false
   if (mounted) void foregroundRefresh.restart(true)
@@ -579,7 +632,7 @@ watch(referenceVisible, value => { if (!value) pauseReference() }, { flush: 'syn
 watch(() => props.videoUrl, pauseReference, { flush: 'sync' })
 watch(() => props.videoHash, closePreview, { flush: 'sync' })
 watch(sessionListOpen, value => { if (value) pauseReference() }, { flush: 'sync' })
-onBeforeUnmount(() => { scanSubmissions(); stopped = true; mounted = false; refreshVersion++; capabilityVersion++; focusCapabilityVersion++; submissionVersion++; selectionVersion++; pauseReference(); referenceObserver?.disconnect(); foregroundRefresh.dispose(); scope.dispose(); window.removeEventListener('beforeunload', unload); window.removeEventListener('storage', submissionStorageChanged); window.removeEventListener('focus', windowFocused); document.removeEventListener('visibilitychange', submissionVisibilityChanged) })
+onBeforeUnmount(() => { scanSubmissions(); stopped = true; mounted = false; clearFrameFollowup(); refreshVersion++; capabilityVersion++; focusCapabilityVersion++; submissionVersion++; selectionVersion++; pauseReference(); referenceObserver?.disconnect(); foregroundRefresh.dispose(); scope.dispose(); window.removeEventListener('beforeunload', unload); window.removeEventListener('storage', submissionStorageChanged); window.removeEventListener('focus', windowFocused); document.removeEventListener('visibilitychange', submissionVisibilityChanged) })
 </script>
 
 <template>
@@ -615,7 +668,7 @@ onBeforeUnmount(() => { scanSubmissions(); stopped = true; mounted = false; refr
         <div v-if="!selected?.turns.length" class="agent-welcome"><h3>从视频里找答案</h3><p>可以先概括内容，也可以沿着已有回答继续追问。证据不足时会明确说明。</p></div>
         <ol v-else ref="messageList" class="agent-turns" aria-label="对话记录" @scroll.passive="messageScroll"><li v-for="turn in selected.turns" :key="turn.id" class="agent-turn"><div class="agent-question"><span>你的问题 · 第 {{ turn.sequence }} 轮</span><p>{{ turn.question }}</p><small v-if="turn.focus_timestamp_ms !== undefined">附加定位提示 {{ topicTime(turn.focus_timestamp_ms) }}，不是已验证画面证据。</small></div><div class="agent-answer"><div class="agent-answer-heading"><strong>视频助手</strong><span class="agent-status">{{ names[turn.status] }}</span><button v-if="agentTurnActive(turn)" class="text-button" :disabled="pending" @click="cancel(turn)">{{ action === 'cancel' ? '正在取消…' : '取消本轮' }}</button></div><TextRequestProgress :progress="turn.stage.text_progress" :terminal="!agentTurnActive(turn)" /><FailureDiagnostic :diagnostic="turn.stage.diagnostic" :error-code="turn.stage.error_code" :attempt="turn.stage.attempt" />
           <template v-if="turn.result"><span class="agent-scope" :class="turn.result.answer_scope.toLowerCase()">{{ scopes[turn.result.answer_scope] }}</span><AgentAnswer class="agent-answer-text" :text="turn.result.answer" /><p v-if="turn.result.answer_scope === 'GENERAL'" class="help">这部分是通用知识补充，不能当作视频中已经说过的话。</p><p v-else-if="turn.result.answer_scope === 'INSUFFICIENT'" class="help">当前视频证据不足，可换个说法，或补充想找的具体内容。</p>
-            <AgentVisualEvidence :key="turn.id" :turn="turn" :active="active !== false && !sessionListOpen" @locate="locateFrame(turn, $event)" @preview="previewVisualRange(turn, $event)" />
+            <AgentVisualEvidence :key="turn.id" :turn="turn" :active="active !== false && !sessionListOpen" :followup-unavailable="frameFollowupUnavailable" @locate="locateFrame(turn, $event)" @preview="previewVisualRange(turn, $event)" @followup="continueFromFrame(turn.id, $event)" />
             <AgentNotePanel v-if="selected" :key="`note-${turn.id}`" :session="selected" :turn="turn" :expanded="noteTurnId === turn.id" :active="active !== false && !sessionListOpen" @toggle="noteTurnId = noteTurnId === turn.id ? '' : turn.id" @close="noteTurnId === turn.id && (noteTurnId = '')" />
             <details v-if="turn.result.citations.length" class="agent-citations"><summary>视频原句依据 · {{ turn.result.citations.length }} 条</summary><p v-if="turn.result.answer_scope === 'VIDEO'" class="agent-anchor-help">从同一回答中选择要保留的原句，剪成一个片段；可以补充前后解释，所选句会完整保留。</p><div v-for="(source, sourceIndex) in turn.result.citations" :key="source.utterance_id" class="agent-citation-row"><label v-if="turn.result.answer_scope === 'VIDEO' && turn.status === 'SUCCEEDED'" class="agent-anchor-choice"><input type="checkbox" :checked="(anchorChoices[turn.id] ?? []).includes(source.utterance_id)" :disabled="pending || clipTargetBusy || active === false" :aria-label="`选择剪辑原句 第${sourceIndex + 1}条 ${topicTime(source.start_ms)}至${topicTime(source.end_ms)}`" @change="chooseAnchor(turn, source.utterance_id, $event)"><span>选择此原句</span></label><button class="agent-citation" :class="{ selected: citation?.utterance_id === source.utterance_id }" @click="preview(source, turn)"><span>回看 {{ topicTime(source.start_ms) }} → {{ topicTime(source.end_ms) }}</span><p>{{ source.text }}</p></button></div><div v-if="turn.result.answer_scope === 'VIDEO'" class="agent-anchor-actions"><span>已选 {{ (anchorChoices[turn.id] ?? []).length }} 条 · 来自第 {{ turn.sequence }} 轮视频回答</span><button class="secondary" :disabled="pending || clipTargetBusy || active === false || !(anchorChoices[turn.id] ?? []).length" @click="suggestAnchors(turn)">按所选原句剪辑</button><small>仅填入剪辑区，不创建请求；初始候选只核对所选句及相邻上下文，仍需人工回看。</small></div></details>
             <details v-if="turn.result.tool_calls.length" class="agent-tools"><summary>查找过程 · {{ turn.result.tool_calls.length }} 步</summary><ol><li v-for="call in turn.result.tool_calls" :key="call.step"><strong>{{ call.step }}. {{ toolNames[call.tool_name] }}<template v-if="call.origin"> · {{ call.origin === 'USER_FOCUS' ? '用户位置触发' : '模型选择' }}</template></strong><p v-if="call.tool_name === 'search_transcript'">查询：{{ call.arguments.query }}</p><p v-else-if="call.tool_name === 'read_context'">补读前 {{ call.arguments.before }} 句、后 {{ call.arguments.after }} 句</p><p v-else-if="call.tool_name === 'list_topics'">查看第 {{ Number(call.arguments.offset) + 1 }} 项起的话题，最多 {{ call.arguments.limit }} 项</p><p v-else-if="call.tool_name === 'inspect_frames'">请求时间：{{ (call.arguments.timestamps_ms as number[]).map(topicTime).join('、') }}</p><p v-else>短片抽样：{{ topicTime(Number(call.arguments.start_ms)) }} → {{ topicTime(Number(call.arguments.end_ms)) }} · 2fps、无原始音轨</p><small>返回 {{ call.result_utterance_ids.length }} 条原句依据<template v-if="call.result_frame_ids"> · {{ call.result_frame_ids.length }} 帧画面</template></small></li></ol></details>
@@ -626,9 +679,13 @@ onBeforeUnmount(() => { scanSubmissions(); stopped = true; mounted = false; refr
         <form class="agent-compose" @submit.prevent="send">
           <div class="agent-visual-option"><label><input v-model="visualMode" type="checkbox" true-value="frames" false-value="none" :disabled="pending || visualMode === 'none' && visualCapability?.visual_mode !== 'frames'">结合画面</label><span v-if="visualMode === 'frames'">本轮可按需抽帧；所有模型请求、重试及修复共用下方次数上限。</span><span v-else>默认只用视频转写。</span><button type="button" class="text-button" :disabled="capabilityLoading || focusLoading || pending" @click="foregroundRefresh.checkCapabilities()">{{ capabilityLoading ? '正在检查…' : '检查画面能力' }}</button><small v-if="capabilityError">{{ capabilityError }}</small><small v-else-if="visualCapability?.visual_mode === null">当前部署未配置视觉模型。</small><small v-else-if="visualCapability?.visual_mode === 'frames'">配置模型 {{ visualCapability.visual_model_id }}；配置可用不代表额度或识别效果已验证。</small></div>
           <div v-if="focusHint" class="agent-focus-chip" role="status"><strong>定位提示 {{ topicTime(focusHint.timestamp_ms) }}</strong><span>播放或拖动不会改变此位置，尚不是画面证据。</span><div><button type="button" class="text-button" :disabled="pending" @click="removeFocus">移除定位提示</button><button type="button" class="text-button" :disabled="!canAttachFocus" @click="attachFocus">重新附加当前位置</button></div><p v-if="visualMode !== 'frames'">请移除提示或切回“结合画面”后再提交。</p><p v-else-if="!focusHintMatches(focusHint, focusOwner())">原视频来源已变化，请明确移除或重新附加。</p><p v-else-if="!focusSupported">位置支持尚未确认，提示仍保留；可点击“检查画面能力”重新核对。</p></div>
+          <section v-if="followupProposal" class="agent-frame-followup-proposal" aria-label="替换定位提示">
+            <strong>是否替换下一轮定位提示？</strong><p>原提示 {{ topicTime(followupProposal.previous_hint.timestamp_ms) }}<span v-if="!focusHintMatches(followupProposal.previous_hint, focusOwner())">（来自此前视频来源）</span> → 截图时间 {{ topicTime(followupProposal.target.hint.timestamp_ms) }} · 第 {{ followupProposal.target.sequence }} 轮 {{ followupProposal.target.frame_id }}</p>
+            <p>使用后将切到“结合画面”；本次只附加时间，不发送问题，下一轮重新取帧。</p><div><button type="button" class="secondary" :disabled="pending || !!frameFollowupUnavailable" @click="acceptFrameFollowup">使用此时间</button><button type="button" class="text-button" @click="keepFrameFollowupHint">保留原提示</button></div>
+          </section>
           <div v-if="!selected?.turns.length" class="agent-examples"><button v-for="example in examples" :key="example" type="button" class="secondary" :disabled="pending || dirty" @click="chooseExample(example)">{{ example }}</button></div>
-          <div class="agent-input-box"><label for="agent-question" class="visually-hidden">向视频助手提问</label><textarea id="agent-question" v-model="question" :disabled="pending" maxlength="2000" rows="2" placeholder="问问这段视频，例如：概括主要内容，列出关键观点。"></textarea>
-          <div class="agent-compose-actions"><details class="agent-options"><summary>回答设置 <span>· {{ maxCalls }} 次上限</span></summary><div class="agent-options-body"><label>本轮模型请求上限<input v-model.number="maxCalls" type="number" min="1" max="24" :disabled="pending" aria-label="对话模型请求上限"></label><p>自动重试计入此上限。{{ visualMode === 'frames' ? '结合原句与实际抽查画面，画面采样不等于连续观看。' : '只使用当前视频转写。' }}剪辑建议需另行审核确认。</p></div></details><span class="agent-character-count">{{ question.length }} / 2000</span><button v-if="dirty" class="text-button" type="button" :disabled="pending" @click="discard">放弃输入</button><button class="primary" type="submit" :disabled="pending || submissionBlocked || focusSubmissionBlocked || !question.trim() || !!activeTurn">{{ action === 'send' ? '正在提交…' : selected ? '发送问题 ↑' : '开始提问 ↑' }}</button></div></div>
+          <div class="agent-input-box"><label for="agent-question" class="visually-hidden">向视频助手提问</label><textarea id="agent-question" ref="questionInput" v-model="question" :disabled="pending" maxlength="2000" rows="2" placeholder="问问这段视频，例如：概括主要内容，列出关键观点。"></textarea>
+          <div class="agent-compose-actions"><details class="agent-options"><summary>回答设置 <span>· {{ maxCalls }} 次上限</span></summary><div class="agent-options-body"><label>本轮模型请求上限<input v-model.number="maxCalls" type="number" min="1" max="24" :disabled="pending" aria-label="对话模型请求上限"></label><p>自动重试计入此上限。{{ visualMode === 'frames' ? '结合原句与实际抽查画面，画面采样不等于连续观看。' : '只使用当前视频转写。' }}剪辑建议需另行审核确认。</p></div></details><span class="agent-character-count">{{ question.length }} / 2000</span><button v-if="dirty" class="text-button" type="button" :disabled="pending" @click="discard">放弃输入</button><button class="primary" type="submit" :disabled="pending || !!followupProposal || submissionBlocked || focusSubmissionBlocked || !question.trim() || !!activeTurn">{{ action === 'send' ? '正在提交…' : selected ? '发送问题 ↑' : '开始提问 ↑' }}</button></div></div>
           <p v-if="activeTurn" class="help" role="status">正在处理上一轮。你可以先编辑问题，等待回答或取消本轮后发送。</p>
         </form>
       </div>
@@ -637,6 +694,7 @@ onBeforeUnmount(() => { scanSubmissions(); stopped = true; mounted = false; refr
 </template>
 
 <style scoped>
+.agent-frame-followup-proposal{margin:7px 0;padding:10px;border:1px solid #dcb48d;border-radius:7px;background:#fff8ee;color:#79583c;font-size:12px;line-height:1.7;overflow-wrap:anywhere}.agent-frame-followup-proposal>div{display:flex;flex-wrap:wrap;gap:8px;margin-top:7px}.agent-frame-followup-proposal button{max-width:100%;font-size:12px}
 .agent-panel { container: agent / inline-size; position: relative; display: flex; flex-direction: column; height: 100%; min-height: 0; min-width: 0; margin: 0; padding: 0; overflow: hidden; border: 0; border-radius: 0; background: transparent; color: #1e293b; font-size: 14px; }
 .agent-submission-recovery { flex: none; max-height: min(32vh, 260px); overflow-y: auto; padding: 12px; margin-bottom: 10px; border: 1px solid #e7c895; border-radius: 8px; background: #fff9ef; font-size: 12px; line-height: 1.6; }
 .agent-submission-recovery h3 { font-size: 14px; }.agent-submission-entry { border-top: 1px solid #ead7b7; padding: 10px 0; }.agent-submission-entry:last-child { padding-bottom: 0; }.agent-original-question { white-space: pre-wrap; overflow-wrap: anywhere; }.agent-submission-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; }.agent-submission-error, .agent-submission-limit { color: #985c32; overflow-wrap: anywhere; }
