@@ -10,7 +10,8 @@ import tools.jackson.databind.JsonNode;
 public class AgentController {
     private final AgentService agents;
     private final AgentNoteService notes;
-    public AgentController(AgentService agents,AgentNoteService notes){this.agents=agents;this.notes=notes;}
+    private final AgentSessionHistoryService history;
+    public AgentController(AgentService agents,AgentNoteService notes,AgentSessionHistoryService history){this.agents=agents;this.notes=notes;this.history=history;}
     @GetMapping("/api/agent-turns/{id}/note")
     public ResponseEntity<AgentNoteModels.Preview> note(@PathVariable String id){
         return ResponseEntity.ok().contentType(MediaType.APPLICATION_JSON).cacheControl(CacheControl.noStore())
@@ -39,6 +40,8 @@ public class AgentController {
             @RequestHeader(value="Idempotency-Key",required=false) String key){return agents.createSession(jobId,input,key);}
     @GetMapping("/api/jobs/{jobId}/agent-sessions")
     public AgentModels.Page sessions(@PathVariable String jobId){return agents.list(jobId);}
+    @GetMapping("/api/jobs/{jobId}/agent-session-history")
+    public AgentSessionHistoryModels.Page history(@PathVariable String jobId,@RequestParam(required=false) String limit,@RequestParam(required=false) String cursor){return history.list(jobId,limit,cursor);}
     @GetMapping("/api/jobs/{jobId}/agent-session-submissions/{key}")
     public AgentModels.Session sessionSubmission(@PathVariable String jobId,@PathVariable String key){return agents.findSessionSubmission(jobId,key);}
     @GetMapping("/api/agent-sessions/{id}")

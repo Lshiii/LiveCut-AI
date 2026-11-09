@@ -1,5 +1,9 @@
 # 视频分析结果契约
 
+## 视频对话历史元数据
+
+[agent-session-history.schema.json](./agent-session-history.schema.json) 定义VIDEO会话的只读分页摘要，只有首问、来源提示和轮数，不含完整回答或转写。摘要不能进入完整Session缓存或用于原提交认领；游标、微秒顺序、跨字段校验与旧服务兼容见[分页历史说明](../docs/68-轻量分页视频对话历史.md)。[示例](../fixtures/agent-session-history.synthetic.json)为合成元数据，不是模型结果。
+
 ## 问答学习笔记
 
 [agent-note.schema.json](./agent-note.schema.json) 定义单个成功VIDEO轮次的只读笔记预览，下载ZIP包含Markdown、公开source.json和实际被引用的JPEG。三端另核同源身份、filename与turn绑定、字节上限及生命周期；Schema不能证明内容或图片来源有效。导出不新增模型/ASR请求，不包含原视频和完整转写。见[学习笔记协议](../docs/65-问答学习笔记.md)与[合成预览夹具](../fixtures/agent-note.synthetic.json)。

@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:livecut:agent-session-history:1.0",
+  "title": "Read-only video conversation history metadata",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "job_id", "items", "limit", "next_cursor", "active_count"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "job_id": {"$ref": "#/$defs/uuid"},
+    "items": {"type": "array", "maxItems": 30, "items": {"$ref": "#/$defs/item"}},
+    "limit": {"type": "integer", "minimum": 1, "maximum": 30},
+    "next_cursor": {"oneOf": [{"type": "null"}, {"type": "string", "minLength": 1, "maxLength": 1024, "pattern": "^[A-Za-z0-9_-]+$"}]},
+    "active_count": {"type": "integer", "minimum": 0, "maximum": 9007199254740991}
+  },
+  "$defs": {
+    "uuid": {"type": "string", "pattern": "^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$"},
+    "hash": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "source": {
+      "type": "object", "additionalProperties": false,
+      "required": ["video_sha256", "transcript_hash", "duration_ms"],
+      "properties": {
+        "video_sha256": {"$ref": "#/$defs/hash"},
+        "transcript_hash": {"$ref": "#/$defs/hash"},
+        "duration_ms": {"type": "integer", "minimum": 1, "maximum": 9007199254740991}
+      }
+    },
+    "item": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "job_id", "video_id", "created_at", "source", "first_question", "turn_count", "active_turn_count"],
+      "properties": {
+        "id": {"$ref": "#/$defs/uuid"},
+        "job_id": {"$ref": "#/$defs/uuid"},
+        "video_id": {"$ref": "#/$defs/uuid"},
+        "created_at": {"type": "string", "format": "date-time"},
+        "source": {"$ref": "#/$defs/source"},
+        "first_question": {"oneOf": [{"type": "null"}, {"type": "string", "minLength": 1, "maxLength": 2000}]},
+        "turn_count": {"type": "integer", "minimum": 0, "maximum": 100},
+        "active_turn_count": {"type": "integer", "minimum": 0, "maximum": 100}
+      },
+      "allOf": [{"if": {"properties": {"turn_count": {"const": 0}}}, "then": {"properties": {"first_question": {"type": "null"}, "active_turn_count": {"const": 0}}}, "else": {"properties": {"first_question": {"type": "string", "minLength": 1, "maxLength": 2000}}}}]
+    }
+  }
+}

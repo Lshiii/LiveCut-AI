@@ -6,7 +6,8 @@ import TextRequestProgress from './TextRequestProgress.vue'
 import AgentAnswer from './AgentAnswer.vue'
 import AgentVisualEvidence from './AgentVisualEvidence.vue'
 import AgentNotePanel from './AgentNotePanel.vue'
-import { AgentForegroundRefresh, agentHasActiveWork, type AgentRefreshLease } from './agentRefresh'
+import { AgentForegroundRefresh, type AgentRefreshLease } from './agentRefresh'
+import { AgentSessionHistoryPager, agentSessionHistoryHasActiveWork, mergeLegacyAgentSessions, readAgentSessionHistory, type AgentHistoryNavigation } from './agentSessionHistory'
 import { parseAgentVisualCapability, type AgentVisualCapability } from './agentVisualEvidence'
 import { AgentFocusError, canCaptureAgentFocus, captureAgentFocus, focusHintMatches, parseAgentFocusCapability, type AgentFocusHint } from './agentFocus'
 import { agentFrameFollowupTarget, confirmAgentFrameFollowup, prepareAgentFrameFollowup, sameAgentFocusHint,
@@ -17,7 +18,7 @@ import { topicTime } from './topics'
 import { AgentReadScope, AgentResponseError, agentTurnActive, canPrefillClipInstruction,
   newestAgentSession, newestAgentTurn, parseAgentSession, parseAgentTurn,
   type AgentCitation, type AgentSession, type AgentTurn } from './videoAgent'
-import { AgentSubmissionError, agentDraftAfterSubmission, agentDraftMatchesSubmission, agentSubmissionStorageKey, assertAgentSubmissionStored, createAgentSubmission, filterAcknowledgedAgentSubmissions, inspectAgentSubmissionLimit, mergeAgentSubmissionResult, parseAgentSubmissionResponse,
+import { AgentLegacySubmissionContext, AgentSubmissionError, agentDraftAfterSubmission, agentDraftMatchesSubmission, agentSubmissionStorageKey, assertAgentSubmissionStored, createAgentSubmission, filterAcknowledgedAgentSubmissions, inspectAgentSubmissionLimit, mergeAgentSubmissionResult, parseAgentSubmissionResponse,
   removeAgentSubmission, resolveAgentSubmission, restoreAgentSubmission, retainAgentSubmissions, scanAgentSubmissions,
   type AgentSubmissionEntry, type AgentSubmissionIssue, type AgentSubmissionResult } from './agentSubmissionRecovery'
 
@@ -29,7 +30,12 @@ const focusHint = ref<AgentFocusHint | null>(null), focusSupported = ref(false),
 const followupProposal = ref<AgentFrameFollowupProposal | null>(null), questionInput = ref<HTMLTextAreaElement | null>(null)
 const action = ref(''), error = ref(''), refreshError = ref(''), notice = ref(''), loading = ref(true)
 const pageVisible = ref(!document.hidden), refreshing = ref(false)
-const selected = computed(() => sessions.value.find(session => session.id === selectedId.value) ?? null)
+const history = ref(new AgentSessionHistoryPager()), historyLoading = ref(false), historyError = ref('')
+const selectionTargetId = ref(''), detailLoading = ref(false), selectionError = ref('')
+const legacyLoading = ref(false), legacyError = ref('')
+const selected = computed(() => sessions.value.find(session => session.id === selectedId.value && session.job_id === props.jobId
+  && session.video_id === props.videoId && session.source.video_sha256 === props.videoHash) ?? null)
+const selectionUnavailable = computed(() => !!selectionTargetId.value || !!selectedId.value && !selected.value)
 const activeTurn = computed(() => selected.value?.turns.find(agentTurnActive))
 const recentAnswer = computed(() => [...(selected.value?.turns ?? [])].reverse().find(turn => !!turn.result))
 const referenceTurnId = ref('')
@@ -70,6 +76,10 @@ function historyKey(event: KeyboardEvent) {
   else if (!event.shiftKey && document.activeElement === buttons.at(-1)) { event.preventDefault(); buttons[0]?.focus() }
 }
 const scope = new AgentReadScope()
+const historyScope = new AgentReadScope(), legacyScope = new AgentReadScope()
+let legacyContext = new AgentLegacySubmissionContext({ job_id: props.jobId, video_id: props.videoId, video_sha256: props.videoHash })
+let historyVersion = 0, detailVersion = 0, legacyVersion = 0, historyProbeRequested = true
+let legacyRun: { promise: Promise<void> } | null = null, legacyRequested = false
 // Only actions this page started own an unacknowledged identity. Passive remote
 // entries remain visible/blocking without being re-created after their owner ACKs.
 const ownUnacknowledged = new Map<string, AgentSubmissionEntry>()
@@ -90,22 +100,23 @@ const canAttachFocus = computed(() => { void focusPlayerVersion.value; return ca
 const focusSubmissionBlocked = computed(() => !!focusHint.value && (visualMode.value !== 'frames' || !focusSupported.value || !focusHintMatches(focusHint.value, focusOwner())))
 const frameFollowupUnavailable = computed(() => {
   if (props.active === false || !pageVisible.value || sessionListOpen.value) return '请回到当前视频对话后继续提问。'
+  if (selectionUnavailable.value) return '所选会话的完整内容尚未核对，请先完成读取。'
   if (pending.value) return '当前操作正在处理，完成后可在此时间继续提问。'
   if (capabilityLoading.value || focusLoading.value) return '正在核对画面与位置能力，请稍后重试。'
   if (visualCapability.value?.visual_mode !== 'frames') return '请配置画面模型，并点击下方“检查画面能力”，再按截图时间继续提问。'
   if (!focusSupported.value) return '位置支持尚未确认，请点击下方“检查画面能力”后重试。'
   return null
 })
-const hasActiveRefreshWork = computed(() => agentHasActiveWork(sessions.value))
+const hasActiveRefreshWork = computed(() => agentSessionHistoryHasActiveWork(history.value, selected.value))
 const foregroundRefresh = new AgentForegroundRefresh({ refresh: refreshNow, hasActiveWork: () => hasActiveRefreshWork.value,
   capabilities: async lease => { await Promise.all([loadVisualCapability(lease.current, lease.signal), loadFocusCapability(lease.current, lease.signal)]) } })
 function foregroundReadable() { return !stopped && props.active !== false && !document.hidden }
 function syncRefreshLifecycle() {
   if (!mounted) return
-  if (!foregroundReadable() || pending.value) { refreshVersion++; scope.invalidate(); refreshing.value = false }
+  if (!foregroundReadable() || pending.value) { refreshVersion++; scope.invalidate(); refreshing.value = false; cancelHistoryRead(); detailVersion++; detailLoading.value = false; cancelLegacyRead() }
   foregroundRefresh.update({ active: props.active !== false, visible: pageVisible.value && !document.hidden, blocked: pending.value })
 }
-function windowFocused() { scanSubmissions(); pageVisible.value = !document.hidden; syncRefreshLifecycle(); foregroundRefresh.focus() }
+function windowFocused() { scanSubmissions(); pageVisible.value = !document.hidden; historyProbeRequested = true; syncRefreshLifecycle(); foregroundRefresh.focus(); void checkLegacySlots() }
 function refresh() { return foregroundRefresh.refresh() }
 defineExpose({ dirty, pending })
 
@@ -131,6 +142,9 @@ function message(value: unknown) {
     AGENT_SUBMISSION_ENTRY_INVALID: '本机存在无法识别的提交回执，未把它当作空记录。请保留下载后核对，暂不能建立新请求。',
     AGENT_SUBMISSION_LEGACY_INVALID: '旧提交回执格式不符合要求，原记录保留，未替换请求标识或直接重发。',
     AGENT_SUBMISSION_LEGACY_CHANGED: '迁移期间另一个页面更新了旧回执，两份记录均保留。请刷新回执并逐项核对。',
+    AGENT_SUBMISSION_LEGACY_OWNER_UNVERIFIED: '有旧提交尚未核对所属会话，原记录保留。请先核对旧提交归属，再新建对话或发送问题。',
+    AGENT_SUBMISSION_LEGACY_OWNER_INVALID: '旧提交的完整会话来源无法核对，原记录保留，暂不能建立新请求。',
+    AGENT_SUBMISSION_LEGACY_LIMIT: '本机旧提交数量超过单次核对上限，原记录保留，暂不能建立新请求。',
     AGENT_SUBMISSION_ENTRY_CONFLICT: '本机原回执已被其他页面移除或更改，尚未把它当作提交成功；请按原标识只读核对。',
     AGENT_SUBMISSION_SOURCE_MISMATCH: '本机回执与当前视频来源不同，记录仍保留，不能替换原来源或建立新请求。',
     INVALID_AGENT_SUBMISSION_RESPONSE: '原提交响应的来源、问题或预算不一致，原回执与本页草稿仍保留。',
@@ -189,7 +203,7 @@ function focusCaptureInput() {
   try { url = new URL(props.videoUrl, document.baseURI).href } catch { /* An invalid current source cannot be captured. */ }
   return { player: sourcePlayer.value, owner: focusOwner(), expectedSourceUrl: url, active: props.active !== false && !stopped,
     visible: !document.hidden && referenceVisible.value && !sessionListOpen.value, frames: visualMode.value === 'frames', supported: focusSupported.value,
-    pending: pending.value, pendingPreview: preparedEvidence !== null }
+    pending: pending.value || selectionUnavailable.value, pendingPreview: preparedEvidence !== null }
 }
 function touchFocusPlayer() { focusPlayerVersion.value++ }
 function attachFocus() {
@@ -199,7 +213,7 @@ function attachFocus() {
 function removeFocus() { if (!pending.value) { focusHint.value = null; notice.value = '已移除本页定位提示；未改变任何原提交。' } }
 function frameFollowupContext() {
   return { owner: focusOwner(), session_id: selectedId.value, transcript_hash: selected.value?.source.transcript_hash ?? '',
-    active: props.active !== false && !stopped, visible: !document.hidden && !sessionListOpen.value, pending: pending.value,
+    active: props.active !== false && !stopped, visible: !document.hidden && !sessionListOpen.value, pending: pending.value || selectionUnavailable.value,
     visual_available: visualCapability.value?.visual_mode === 'frames' && !capabilityLoading.value,
     focus_supported: focusSupported.value && !focusLoading.value }
 }
@@ -235,6 +249,7 @@ function upsertSession(value: AgentSession) {
   if (index < 0) sessions.value.unshift(latest)
   else sessions.value[index] = latest
   sessions.value.sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at))
+  history.value.observeDetail(latest)
   return latest
 }
 function scrollToLatest(force = false) {
@@ -273,11 +288,63 @@ function canSwitch() {
   return true
 }
 async function selectSession(id: string) {
-  if (id === selectedId.value || !canSwitch()) return
+  if (id === selectedId.value && !selectionTargetId.value) { closeHistory(); return }
+  if (!canSwitch()) return
   closeHistory()
-  scope.invalidate(); selectionVersion++; selectedId.value = id; closePreview()
-  error.value = ''; notice.value = ''; playbackError.value = ''
+  scope.invalidate(); selectionTargetId.value = id; selectionError.value = ''
   await foregroundRefresh.restart()
+}
+function cancelHistoryRead() { historyVersion++; historyScope.invalidate(); historyLoading.value = false }
+async function readHistory(navigation: AgentHistoryNavigation = 'refresh', parent?: AgentRefreshLease) {
+  if (!foregroundReadable() || pending.value || navigation === 'refresh' && historyLoading.value) return
+  cancelHistoryRead()
+  const read = historyScope.begin(parent?.signal), version = historyVersion, owner = submissionOwner(), cursor = history.value.cursorFor(navigation)
+  const current = () => read.current() && (!parent || parent.current()) && foregroundReadable() && !pending.value
+    && version === historyVersion && owner.job_id === props.jobId && owner.video_id === props.videoId && owner.video_sha256 === props.videoHash
+  historyLoading.value = true
+  const probe = historyProbeRequested; historyProbeRequested = false
+  try {
+    const result = await readAgentSessionHistory({ pager: history.value, owner, cursor, probe,
+      fetch: path => api<unknown>(path, { signal: read.signal }), current })
+    if (!result || !current()) return
+    if (result.kind === 'modern') history.value.acceptModern(result.page, navigation, cursor)
+    else {
+      sessions.value = mergeLegacyAgentSessions(sessions.value, result.details, owner)
+      history.value.acceptLegacy(result.items, navigation)
+    }
+    historyError.value = ''
+  } catch (value) { if (current()) historyError.value = '暂时无法核对对话历史，已有页和当前回答保留。'; throw value }
+  finally { read.release(); if (version === historyVersion) historyLoading.value = false }
+}
+async function navigateHistory(navigation: Exclude<AgentHistoryNavigation, 'refresh'>) {
+  if (!foregroundReadable() || pending.value || historyLoading.value) return
+  if (history.value.navigateLocally(navigation)) return
+  try { await readHistory(navigation) } catch { /* The history panel owns its fixed error. */ }
+}
+async function probeHistoryUpgrade() {
+  if (!foregroundReadable() || pending.value || historyLoading.value) return
+  historyProbeRequested = true
+  try { await readHistory() } catch { /* Keep the existing compatibility page. */ }
+}
+function keepCurrentSession() {
+  scope.invalidate(); detailVersion++; detailLoading.value = false; selectionTargetId.value = ''; selectionError.value = ''
+  void foregroundRefresh.restart()
+}
+async function readSelectedSession(id: string, lease: AgentRefreshLease, parentCurrent: () => boolean) {
+  const version = ++detailVersion
+  detailLoading.value = true
+  const current = () => parentCurrent() && version === detailVersion && (selectionTargetId.value || selectedId.value) === id
+  try {
+    const raw = await api<unknown>(`/api/agent-sessions/${id}`, { signal: lease.signal })
+    if (!current()) return
+    const value = parseSession(raw, id)
+    upsertSession(value)
+    if (selectionTargetId.value === id) {
+      selectionVersion++; selectedId.value = id; selectionTargetId.value = ''; closePreview()
+    }
+    selectionError.value = ''
+  } catch (value) { if (current()) selectionError.value = '所选会话的完整内容暂时无法核对，原回答与当前输入保留。'; throw value }
+  finally { if (version === detailVersion) detailLoading.value = false }
 }
 async function refreshNow(lease: AgentRefreshLease) {
   const read = scope.begin(lease.signal), jobId = props.jobId, videoHash = props.videoHash, version = ++refreshVersion
@@ -285,20 +352,12 @@ async function refreshNow(lease: AgentRefreshLease) {
   if (!current()) { read.release(); return }
   refreshing.value = true
   try {
-    const raw = await api<{ items: unknown[] }>(`/api/jobs/${jobId}/agent-sessions`, { signal: read.signal })
+    await readHistory('refresh', lease)
     if (!current()) return
-    if (!Array.isArray(raw.items)) throw new AgentResponseError()
-    const incoming = raw.items.map(value => parseSession(value))
-    if (new Set(incoming.map(value => value.id)).size !== incoming.length) throw new AgentResponseError()
-    for (const value of incoming) upsertSession(value)
     scanSubmissions()
-    if (!selectedId.value && sessions.value[0] && !pending.value) selectedId.value = sessions.value[0].id
-    const id = selectedId.value
-    if (id) {
-      const detail = await api<unknown>(`/api/agent-sessions/${id}`, { signal: read.signal })
-      if (!current() || selectedId.value !== id) return
-      upsertSession(parseSession(detail, id))
-    }
+    if (!selectedId.value && !selectionTargetId.value && history.value.items[0] && !pending.value) selectionTargetId.value = history.value.items[0].id
+    const id = selectionTargetId.value || selectedId.value
+    if (id) await readSelectedSession(id, { signal: read.signal, current }, current)
     refreshError.value = ''
   } catch (value) {
     if (current()) refreshError.value = value instanceof ApiError && ['NETWORK_UNAVAILABLE', 'REQUEST_TIMEOUT'].includes(value.code)
@@ -311,11 +370,51 @@ function submissionOwner() { return { job_id: props.jobId, video_id: props.video
 function scanSubmissions() {
   try {
     const own = [...ownUnacknowledged.values()]
-    const scanned = filterAcknowledgedAgentSubmissions(scanAgentSubmissions(localStorage, submissionOwner(), sessions.value), [...acknowledgedSubmissions.values()])
+    const scanned = filterAcknowledgedAgentSubmissions(scanAgentSubmissions(localStorage, submissionOwner(), sessions.value, legacyContext), [...acknowledgedSubmissions.values()])
     const result = retainAgentSubmissions(own, scanned, localStorage)
     submissionEntries.value = result.entries; submissionIssues.value = result.issues
     ownDurabilityLost.value = result.issues.some(issue => own.some(entry => issue.storage_key === agentSubmissionStorageKey(entry)))
   } catch { submissionIssues.value = [{ storage_key: '', code: 'AGENT_SUBMISSION_STORAGE_UNAVAILABLE' }]; ownDurabilityLost.value = ownUnacknowledged.size > 0 }
+}
+function cancelLegacyRead() { legacyVersion++; legacyScope.invalidate(); legacyLoading.value = false; legacyRun = null; legacyRequested = false }
+function checkLegacySlots(): Promise<void> {
+  if (!foregroundReadable() || pending.value) return Promise.resolve()
+  if (legacyRun) { legacyRequested = true; return legacyRun.promise }
+  const read = legacyScope.begin(), context = legacyContext, owner = submissionOwner(), version = ++legacyVersion
+  const current = () => read.current() && context === legacyContext && version === legacyVersion && foregroundReadable() && !pending.value
+    && owner.job_id === props.jobId && owner.video_id === props.videoId && owner.video_sha256 === props.videoHash
+  const run = { promise: Promise.resolve() }; legacyRun = run
+  run.promise = (async () => {
+    try {
+      const queue = context.unresolved(localStorage, owner)
+      if (!queue.length) { scanSubmissions(); return }
+      legacyLoading.value = true; legacyError.value = ''
+      const worker = async () => {
+        while (queue.length && current()) {
+          const slot = queue.shift()!
+          if (localStorage.getItem(slot.storage_key) !== slot.raw) continue
+          try {
+            const raw = await api<unknown>(`/api/agent-sessions/${slot.session_id}`, { signal: read.signal })
+            if (!current()) return
+            const session = context.classify(localStorage, slot, raw, current)
+            if (session && current()) upsertSession(session)
+            if (current()) scanSubmissions()
+          } catch { if (current()) { context.forget(slot); legacyError.value = '部分旧提交的完整会话无法核对，原槽保留。请恢复连接后重试核对旧提交归属。' } }
+        }
+      }
+      await Promise.all([worker(), worker()])
+      if (current()) scanSubmissions()
+    } catch (value) { if (current()) { legacyError.value = message(value); scanSubmissions() } }
+    finally {
+      read.release()
+      if (legacyRun === run) {
+        legacyRun = null; legacyLoading.value = false
+        const again = legacyRequested; legacyRequested = false
+        if (again && current()) void checkLegacySlots()
+      }
+    }
+  })()
+  return run.promise
 }
 function requireNoSubmission() {
   scanSubmissions()
@@ -348,7 +447,7 @@ async function requestSession(version: number, operation: number): Promise<Agent
   const owner = submissionOwner()
   requireNoSubmission()
   let entry: AgentSubmissionEntry
-  try { entry = createAgentSubmission(localStorage, owner, 'SESSION', '{}', () => crypto.randomUUID(), sessions.value, undefined, [...acknowledgedSubmissions.values()]) }
+  try { entry = createAgentSubmission(localStorage, owner, 'SESSION', '{}', () => crypto.randomUUID(), sessions.value, undefined, [...acknowledgedSubmissions.values()], legacyContext) }
   catch (value) { scanSubmissions(); throw value }
   rememberSubmission(entry)
   const raw = await postSubmission(entry)
@@ -363,6 +462,7 @@ async function requestSession(version: number, operation: number): Promise<Agent
 }
 async function newSession() {
   if (props.active === false || document.hidden || !canSwitch()) return
+  if (selectionUnavailable.value) { error.value = '所选会话完整内容尚未核对，请先重试读取或保留当前会话。'; return }
   try { requireNoSubmission() } catch (value) { error.value = message(value); return }
   closeHistory(false)
   scope.invalidate(); const version = ++selectionVersion, operation = ++submissionVersion
@@ -375,6 +475,7 @@ async function send() {
   const input = question.value.trim(), budget = maxCalls.value, mode = visualMode.value
   const focus = focusHint.value ? { ...focusHint.value } : null
   if (pending.value || !input || props.active === false || document.hidden) return
+  if (selectionUnavailable.value || !selected.value && !history.value.loaded) { error.value = '请先核对所选会话的完整内容，再发送问题。未新建其他对话，当前输入保留。'; return }
   if (followupProposal.value) { error.value = '请先选择“使用此时间”或“保留原提示”，再发送问题。'; return }
   try { requireNoSubmission() } catch (value) { error.value = message(value); return }
   if (focus && mode !== 'frames') { error.value = message(new AgentFocusError('AGENT_FOCUS_MODE_REQUIRED')); return }
@@ -400,7 +501,7 @@ async function send() {
     if (!session || !submissionCurrent(version, operation, owner, session.id)) return
     requireNoSubmission()
     let entry: AgentSubmissionEntry
-    try { entry = createAgentSubmission(localStorage, owner, 'TURN', JSON.stringify({ question: input, max_text_calls: budget, ...(mode === 'frames' ? { visual_mode: 'frames' } : {}), ...(focus ? { focus_timestamp_ms: focus.timestamp_ms } : {}) }), () => crypto.randomUUID(), sessions.value, session, [...acknowledgedSubmissions.values()]) }
+    try { entry = createAgentSubmission(localStorage, owner, 'TURN', JSON.stringify({ question: input, max_text_calls: budget, ...(mode === 'frames' ? { visual_mode: 'frames' } : {}), ...(focus ? { focus_timestamp_ms: focus.timestamp_ms } : {}) }), () => crypto.randomUUID(), sessions.value, session, [...acknowledgedSubmissions.values()], legacyContext) }
     catch (value) { scanSubmissions(); throw value }
     rememberSubmission(entry)
     submitted = entry
@@ -493,16 +594,16 @@ function originalVisualMode(entry: AgentSubmissionEntry): string { return entry.
 function originalFocus(entry: AgentSubmissionEntry): number | undefined { return entry.kind === 'TURN' ? JSON.parse(entry.input).focus_timestamp_ms : undefined }
 function submissionStorageChanged(event: StorageEvent) {
   if (event.key === null || event.key.startsWith(`livecut-agent-submission-v1:${props.jobId}:`) || event.key === `livecut-agent-session-${props.jobId}`
-    || sessions.value.some(session => event.key === `livecut-agent-turn-${session.id}`)) scanSubmissions()
+    || event.key.startsWith('livecut-agent-turn-')) { scanSubmissions(); void checkLegacySlots() }
 }
 function invalidateSubmission() {
   submissionVersion++
   if (action.value === 'send' || action.value === 'session' || action.value.startsWith('recover:') || action.value.startsWith('release:')) action.value = ''
 }
-function submissionVisibilityChanged() { pageVisible.value = !document.hidden; if (document.hidden) { invalidateSubmission(); pauseReference() } else scanSubmissions(); touchFocusPlayer(); syncRefreshLifecycle() }
+function submissionVisibilityChanged() { pageVisible.value = !document.hidden; if (document.hidden) { invalidateSubmission(); pauseReference() } else { scanSubmissions(); historyProbeRequested = true; void checkLegacySlots() }; touchFocusPlayer(); syncRefreshLifecycle() }
 async function cancel(turn: AgentTurn) {
   const session = selected.value
-  if (pending.value || !session || !agentTurnActive(turn)) return
+  if (pending.value || selectionUnavailable.value || !session || !agentTurnActive(turn)) return
   scope.invalidate(); const version = ++selectionVersion
   action.value = 'cancel'; error.value = ''; notice.value = ''
   try {
@@ -519,17 +620,18 @@ function chooseExample(value: string) {
 }
 function discard() { if (!pending.value) { question.value = ''; focusHint.value = null; error.value = ''; notice.value = '' } }
 function suggest(value: string) {
+  if (selectionUnavailable.value) { error.value = '请先核对所选会话的完整内容。'; return }
   if (!canPrefillClipInstruction(value, !!props.clipTargetBusy, pending.value)) { error.value = '剪辑区域有未提交内容或正在提交，请先处理后再送入要求。'; return }
   emit('clipInstruction', value)
 }
 function chooseAnchor(turn: AgentTurn, id: string, event: Event) {
-  if (pending.value || props.active === false || turn.status !== 'SUCCEEDED' || turn.result?.answer_scope !== 'VIDEO' || !turn.result.citations.some(citation => citation.utterance_id === id)) return
+  if (pending.value || selectionUnavailable.value || props.active === false || turn.status !== 'SUCCEEDED' || turn.result?.answer_scope !== 'VIDEO' || !turn.result.citations.some(citation => citation.utterance_id === id)) return
   const previous = anchorChoices.value[turn.id] ?? []
   anchorChoices.value = { ...anchorChoices.value, [turn.id]: (event.target as HTMLInputElement).checked ? [...new Set([...previous, id])] : previous.filter(value => value !== id) }
 }
 async function suggestAnchors(turn: AgentTurn) {
   const owner = selected.value, ids = anchorChoices.value[turn.id] ?? [], version = selectionVersion, videoHash = props.videoHash
-  if (!owner || !ids.length || pending.value || props.active === false || props.clipTargetBusy) return
+  if (!owner || !ids.length || pending.value || selectionUnavailable.value || props.active === false || props.clipTargetBusy) return
   anchorPreparing.value = true; error.value = ''
   try {
     const selection = await selectAnswerClip(owner, turn, ids)
@@ -540,7 +642,7 @@ async function suggestAnchors(turn: AgentTurn) {
 }
 function anchorEditorActive() { return props.active !== false }
 async function prepareEvidencePreview(turn: AgentTurn, start: number, end?: number) {
-  if (stopped || props.active === false || document.hidden || !selected.value?.turns.some(value => value.id === turn.id && value.status === 'SUCCEEDED')
+  if (stopped || selectionUnavailable.value || props.active === false || document.hidden || !selected.value?.turns.some(value => value.id === turn.id && value.status === 'SUCCEEDED')
     || !Number.isSafeInteger(start) || start < 0 || start >= selected.value.source.duration_ms
     || end !== undefined && (!Number.isSafeInteger(end) || end <= start || end > selected.value.source.duration_ms)) return
   pauseReference()
@@ -597,7 +699,7 @@ onMounted(() => {
   mounted = true
   scanSubmissions(); window.addEventListener('storage', submissionStorageChanged); window.addEventListener('focus', windowFocused)
   document.addEventListener('visibilitychange', submissionVisibilityChanged)
-  window.addEventListener('beforeunload', unload); syncRefreshLifecycle()
+  window.addEventListener('beforeunload', unload); syncRefreshLifecycle(); void checkLegacySlots()
   referenceObserver = new ResizeObserver(entries => {
     const width = entries[0]?.contentRect.width
     if (stopped || !width) return
@@ -616,23 +718,28 @@ watch(() => {
 }, () => { if (initialScrollPending || followLatest) scrollToLatest() }, { flush: 'post' })
 watch(() => props.active, value => {
   if (value === false) { invalidateSubmission(); closeHistory(false); pauseReference() }
-  else { scanSubmissions(); if (initialScrollPending) scrollToLatest(true) }
+  else { scanSubmissions(); historyProbeRequested = true; void checkLegacySlots(); if (initialScrollPending) scrollToLatest(true) }
 }, { flush: 'sync' })
 watch([() => props.active, pageVisible, pending], syncRefreshLifecycle, { flush: 'sync' })
+watch(pending, (value, previous) => { if (!value && previous) void checkLegacySlots() }, { flush: 'sync' })
 watch(hasActiveRefreshWork, () => foregroundRefresh.reschedule(), { flush: 'sync' })
 watch(() => JSON.stringify([selectedId.value, props.jobId, props.videoId, props.videoHash, props.videoUrl,
   selected.value?.source.transcript_hash, selected.value?.source.duration_ms, props.active, pageVisible.value, sessionListOpen.value,
-  visualMode.value, focusHint.value, pending.value, visualCapability.value?.visual_mode, focusSupported.value, capabilityLoading.value, focusLoading.value]),
+  visualMode.value, focusHint.value, pending.value, selectionUnavailable.value, visualCapability.value?.visual_mode, focusSupported.value, capabilityLoading.value, focusLoading.value]),
   clearFrameFollowup, { flush: 'sync' })
 watch(() => `${props.jobId}:${props.videoId}:${props.videoHash}`, () => {
-  refreshVersion++; scope.invalidate(); refreshing.value = false
+  refreshVersion++; scope.invalidate(); refreshing.value = false; cancelHistoryRead(); cancelLegacyRead(); detailVersion++; detailLoading.value = false
+  legacyContext.dispose(); legacyContext = new AgentLegacySubmissionContext(submissionOwner()); history.value = new AgentSessionHistoryPager(); historyProbeRequested = true
+  selectionTargetId.value = ''; selectedId.value = ''; selectionError.value = ''; historyError.value = ''; legacyError.value = ''
+  sessions.value = []
   if (mounted) void foregroundRefresh.restart(true)
+  void checkLegacySlots()
 }, { flush: 'sync' })
 watch(referenceVisible, value => { if (!value) pauseReference() }, { flush: 'sync' })
 watch(() => props.videoUrl, pauseReference, { flush: 'sync' })
 watch(() => props.videoHash, closePreview, { flush: 'sync' })
 watch(sessionListOpen, value => { if (value) pauseReference() }, { flush: 'sync' })
-onBeforeUnmount(() => { scanSubmissions(); stopped = true; mounted = false; clearFrameFollowup(); refreshVersion++; capabilityVersion++; focusCapabilityVersion++; submissionVersion++; selectionVersion++; pauseReference(); referenceObserver?.disconnect(); foregroundRefresh.dispose(); scope.dispose(); window.removeEventListener('beforeunload', unload); window.removeEventListener('storage', submissionStorageChanged); window.removeEventListener('focus', windowFocused); document.removeEventListener('visibilitychange', submissionVisibilityChanged) })
+onBeforeUnmount(() => { scanSubmissions(); stopped = true; mounted = false; clearFrameFollowup(); refreshVersion++; capabilityVersion++; focusCapabilityVersion++; submissionVersion++; selectionVersion++; pauseReference(); referenceObserver?.disconnect(); foregroundRefresh.dispose(); scope.dispose(); cancelHistoryRead(); historyScope.dispose(); cancelLegacyRead(); legacyScope.dispose(); legacyContext.dispose(); window.removeEventListener('beforeunload', unload); window.removeEventListener('storage', submissionStorageChanged); window.removeEventListener('focus', windowFocused); document.removeEventListener('visibilitychange', submissionVisibilityChanged) })
 </script>
 
 <template>
@@ -640,8 +747,13 @@ onBeforeUnmount(() => { scanSubmissions(); stopped = true; mounted = false; clea
     <div v-if="sessionListOpen" class="agent-history-backdrop" aria-hidden="true" @click="closeHistory()"></div>
     <p v-if="error" class="message error" role="alert">{{ error }}</p><p v-if="notice" class="message notice" role="status">{{ notice }}</p>
     <p v-if="refreshError" class="agent-refresh-error" role="status">{{ refreshError }} 已有记录与输入仍保留。</p>
+    <section v-if="selectionTargetId || selectionError" class="agent-selection-status" aria-label="所选会话读取状态">
+      <p role="status">{{ detailLoading ? '正在读取并核对所选会话的完整内容…' : selectionError || '所选会话完整内容尚未读取，当前显示的原回答与输入仍保留。' }}</p>
+      <button class="text-button" :disabled="pending || refreshing" @click="foregroundRefresh.restart()">重试读取所选会话</button><button v-if="selected" class="text-button" :disabled="pending" @click="keepCurrentSession">保留当前会话</button>
+    </section>
     <section v-if="submissionBlocked" class="agent-submission-recovery" aria-label="待核对的原提交">
       <div class="agent-section-heading"><h3>原提交结果待核对 · {{ submissionEntries.length }} 条</h3><button class="text-button" :disabled="pending" @click="scanSubmissions">刷新本机回执</button></div>
+      <p v-if="legacyError" class="agent-submission-error" role="status">{{ legacyError }}</p><button class="text-button" :disabled="pending || legacyLoading || active === false" @click="checkLegacySlots">{{ legacyLoading ? '正在核对旧提交归属…' : '核对旧提交归属' }}</button>
       <p>可继续编辑本页草稿；新对话和新提问暂时停止。逐项核对会使用原标识与原内容，不会自动再发其他问题。</p>
       <p v-for="issue in submissionIssues" :key="issue.storage_key + issue.code" class="agent-submission-error" role="alert">{{ message(new AgentSubmissionError(issue.code)) }}</p>
       <article v-for="entry in submissionEntries" :key="agentSubmissionStorageKey(entry)" class="agent-submission-entry">
@@ -651,7 +763,14 @@ onBeforeUnmount(() => { scanSubmissions(); stopped = true; mounted = false; clea
       </article>
     </section>
     <div class="agent-layout" :class="{ 'conversation-focused': conversationFocused && !compactReference }">
-      <aside v-show="sessionListOpen" ref="historyPanel" role="dialog" aria-modal="true" @keydown="historyKey" :id="`agent-history-${jobId}`" class="agent-sessions" aria-label="视频对话列表"><div class="agent-section-heading"><h3>对话记录 · {{ sessions.length }}</h3><div class="agent-history-actions"><button class="text-button" @click="closeHistory()">关闭对话记录</button><button class="text-button" :disabled="pending" @click="refresh">刷新</button></div></div><p v-if="loading && !sessions.length" class="help">正在读取对话…</p><p v-else-if="!sessions.length" class="help">发送第一个问题，即可开始对话。</p><button v-for="session in sessions" :key="session.id" class="agent-session" :class="{ selected: selectedId === session.id }" :aria-pressed="selectedId === session.id" :disabled="pending || dirty" @click="session.id === selectedId ? closeHistory() : selectSession(session.id)"><strong>{{ session.turns[0]?.question ?? '新对话' }}</strong><small>{{ date(session.created_at) }} · {{ session.turns.length }} 轮</small></button></aside>
+      <aside v-show="sessionListOpen" ref="historyPanel" role="dialog" aria-modal="true" @keydown="historyKey" :id="`agent-history-${jobId}`" class="agent-sessions" aria-label="视频对话列表">
+        <div class="agent-section-heading"><h3>对话记录 · 本页 {{ history.items.length }} 条</h3><div class="agent-history-actions"><button class="text-button" @click="closeHistory()">关闭对话记录</button><button class="text-button" :disabled="pending || historyLoading" @click="refresh">刷新</button><button class="text-button" :disabled="pending || historyLoading" @click="probeHistoryUpgrade">检查升级</button></div></div>
+        <p v-if="historyError" class="agent-submission-error" role="status">{{ historyError }}</p><p v-if="historyLoading" class="help" role="status">正在读取对话历史…</p><p v-else-if="history.loaded && !history.items.length" class="help">本页没有对话记录。</p>
+        <p v-if="history.view === 'legacy'" class="help">兼容旧服务，仅展示最近 100 个会话；此处翻页整理已有完整列表。</p><p v-if="history.upgradeAvailable" class="help">已检测到轻量历史接口；点击“回到最新”采用新分页，当前页保持不变。</p><p v-if="history.unsupportedOldPage" class="help">当前服务不能继续读取此分页位置，请明确回到最新。</p>
+        <p v-if="selected && !history.items.some(item => item.id === selectedId)" class="help">当前会话 #{{ selected.id.slice(0,8) }} 不在本页；回答与输入保持不变。</p>
+        <button v-for="session in history.items" :key="session.id" class="agent-session" :class="{ selected: selectedId === session.id }" :aria-pressed="selectedId === session.id" :disabled="pending || dirty" @click="selectSession(session.id)"><strong>{{ session.first_question ?? '新对话' }}</strong><small>{{ date(session.created_at) }} · {{ session.turn_count }} 轮<span v-if="session.active_turn_count"> · 进行中 {{ session.active_turn_count }}</span></small></button>
+        <nav class="agent-history-pagination" aria-label="视频对话历史分页"><span>第 {{ history.pageNumber }} 页</span><button class="text-button" :disabled="pending || historyLoading || !history.canNewer" @click="navigateHistory('newer')">上一页</button><button class="text-button" :disabled="pending || historyLoading || !history.canOlder" @click="navigateHistory('older')">下一页</button><button class="text-button" :disabled="pending || historyLoading" @click="navigateHistory('latest')">回到最新</button></nav>
+      </aside>
       <aside v-show="compactReference || !conversationFocused" ref="referenceDock" class="agent-reference" :inert="sessionListOpen ? true : undefined" aria-label="视频参考">
         <div class="agent-reference-heading"><h3><span class="agent-video-icon" aria-hidden="true">▶</span> 原视频</h3><span class="agent-reference-caption">点击原句，定位回看</span><button v-if="compactReference && referenceVisible" type="button" class="text-button agent-focus-compact" aria-label="附加当前画面位置" title="暂停并固定当前播放位置，仅作为查找提示，尚未取得截图。需结合画面且定位已完成。" :disabled="!canAttachFocus" @click="attachFocus">附加位置</button><button class="text-button agent-reference-toggle" :aria-expanded="referenceVisible" :aria-controls="`agent-reference-${jobId}`" @click="toggleReference">{{ referenceVisible ? '收起视频' : '展开视频' }}</button></div>
         <div v-show="referenceVisible" :id="`agent-reference-${jobId}`" class="agent-reference-body">
@@ -664,12 +783,12 @@ onBeforeUnmount(() => { scanSubmissions(); stopped = true; mounted = false; clea
         </div>
       </aside>
       <div class="agent-conversation" :inert="sessionListOpen ? true : undefined">
-        <div class="agent-toolbar"><h2><span class="agent-ai-icon" aria-hidden="true">✦</span> 视频助手</h2><div class="agent-toolbar-actions"><button class="secondary agent-focus-toggle" :aria-pressed="conversationFocused" @click="toggleConversationFocus">{{ conversationFocused ? '并排回看' : '专注对话' }}</button><button ref="historyToggle" class="secondary" :aria-expanded="sessionListOpen" :aria-controls="`agent-history-${jobId}`" @click="toggleHistory">对话记录 <span>{{ sessions.length }}</span></button><button class="secondary" :disabled="pending || dirty || submissionBlocked" @click="newSession">＋ 新对话</button></div></div>
-        <div v-if="!selected?.turns.length" class="agent-welcome"><h3>从视频里找答案</h3><p>可以先概括内容，也可以沿着已有回答继续追问。证据不足时会明确说明。</p></div>
+        <div class="agent-toolbar"><h2><span class="agent-ai-icon" aria-hidden="true">✦</span> 视频助手</h2><div class="agent-toolbar-actions"><button class="secondary agent-focus-toggle" :aria-pressed="conversationFocused" @click="toggleConversationFocus">{{ conversationFocused ? '并排回看' : '专注对话' }}</button><button ref="historyToggle" class="secondary" :aria-expanded="sessionListOpen" :aria-controls="`agent-history-${jobId}`" @click="toggleHistory">对话记录 <span>本页 {{ history.items.length }}</span></button><button class="secondary" :disabled="pending || selectionUnavailable || dirty || submissionBlocked" @click="newSession">＋ 新对话</button></div></div>
+        <div v-if="!selected?.turns.length" class="agent-welcome"><template v-if="selectionUnavailable || !history.loaded"><h3>正在核对会话内容</h3><p>完整会话读取并通过来源核对后，才能围绕本轮提问与使用证据。</p></template><template v-else><h3>从视频里找答案</h3><p>可以先概括内容，也可以沿着已有回答继续追问。证据不足时会明确说明。</p></template></div>
         <ol v-else ref="messageList" class="agent-turns" aria-label="对话记录" @scroll.passive="messageScroll"><li v-for="turn in selected.turns" :key="turn.id" class="agent-turn"><div class="agent-question"><span>你的问题 · 第 {{ turn.sequence }} 轮</span><p>{{ turn.question }}</p><small v-if="turn.focus_timestamp_ms !== undefined">附加定位提示 {{ topicTime(turn.focus_timestamp_ms) }}，不是已验证画面证据。</small></div><div class="agent-answer"><div class="agent-answer-heading"><strong>视频助手</strong><span class="agent-status">{{ names[turn.status] }}</span><button v-if="agentTurnActive(turn)" class="text-button" :disabled="pending" @click="cancel(turn)">{{ action === 'cancel' ? '正在取消…' : '取消本轮' }}</button></div><TextRequestProgress :progress="turn.stage.text_progress" :terminal="!agentTurnActive(turn)" /><FailureDiagnostic :diagnostic="turn.stage.diagnostic" :error-code="turn.stage.error_code" :attempt="turn.stage.attempt" />
           <template v-if="turn.result"><span class="agent-scope" :class="turn.result.answer_scope.toLowerCase()">{{ scopes[turn.result.answer_scope] }}</span><AgentAnswer class="agent-answer-text" :text="turn.result.answer" /><p v-if="turn.result.answer_scope === 'GENERAL'" class="help">这部分是通用知识补充，不能当作视频中已经说过的话。</p><p v-else-if="turn.result.answer_scope === 'INSUFFICIENT'" class="help">当前视频证据不足，可换个说法，或补充想找的具体内容。</p>
-            <AgentVisualEvidence :key="turn.id" :turn="turn" :active="active !== false && !sessionListOpen" :followup-unavailable="frameFollowupUnavailable" @locate="locateFrame(turn, $event)" @preview="previewVisualRange(turn, $event)" @followup="continueFromFrame(turn.id, $event)" />
-            <AgentNotePanel v-if="selected" :key="`note-${turn.id}`" :session="selected" :turn="turn" :expanded="noteTurnId === turn.id" :active="active !== false && !sessionListOpen" @toggle="noteTurnId = noteTurnId === turn.id ? '' : turn.id" @close="noteTurnId === turn.id && (noteTurnId = '')" />
+            <AgentVisualEvidence :key="turn.id" :turn="turn" :active="active !== false && !sessionListOpen && !selectionUnavailable" :followup-unavailable="frameFollowupUnavailable" @locate="locateFrame(turn, $event)" @preview="previewVisualRange(turn, $event)" @followup="continueFromFrame(turn.id, $event)" />
+            <AgentNotePanel v-if="selected" :key="`note-${turn.id}`" :session="selected" :turn="turn" :expanded="noteTurnId === turn.id" :active="active !== false && !sessionListOpen && !selectionUnavailable" @toggle="noteTurnId = noteTurnId === turn.id ? '' : turn.id" @close="noteTurnId === turn.id && (noteTurnId = '')" />
             <details v-if="turn.result.citations.length" class="agent-citations"><summary>视频原句依据 · {{ turn.result.citations.length }} 条</summary><p v-if="turn.result.answer_scope === 'VIDEO'" class="agent-anchor-help">从同一回答中选择要保留的原句，剪成一个片段；可以补充前后解释，所选句会完整保留。</p><div v-for="(source, sourceIndex) in turn.result.citations" :key="source.utterance_id" class="agent-citation-row"><label v-if="turn.result.answer_scope === 'VIDEO' && turn.status === 'SUCCEEDED'" class="agent-anchor-choice"><input type="checkbox" :checked="(anchorChoices[turn.id] ?? []).includes(source.utterance_id)" :disabled="pending || clipTargetBusy || active === false" :aria-label="`选择剪辑原句 第${sourceIndex + 1}条 ${topicTime(source.start_ms)}至${topicTime(source.end_ms)}`" @change="chooseAnchor(turn, source.utterance_id, $event)"><span>选择此原句</span></label><button class="agent-citation" :class="{ selected: citation?.utterance_id === source.utterance_id }" @click="preview(source, turn)"><span>回看 {{ topicTime(source.start_ms) }} → {{ topicTime(source.end_ms) }}</span><p>{{ source.text }}</p></button></div><div v-if="turn.result.answer_scope === 'VIDEO'" class="agent-anchor-actions"><span>已选 {{ (anchorChoices[turn.id] ?? []).length }} 条 · 来自第 {{ turn.sequence }} 轮视频回答</span><button class="secondary" :disabled="pending || clipTargetBusy || active === false || !(anchorChoices[turn.id] ?? []).length" @click="suggestAnchors(turn)">按所选原句剪辑</button><small>仅填入剪辑区，不创建请求；初始候选只核对所选句及相邻上下文，仍需人工回看。</small></div></details>
             <details v-if="turn.result.tool_calls.length" class="agent-tools"><summary>查找过程 · {{ turn.result.tool_calls.length }} 步</summary><ol><li v-for="call in turn.result.tool_calls" :key="call.step"><strong>{{ call.step }}. {{ toolNames[call.tool_name] }}<template v-if="call.origin"> · {{ call.origin === 'USER_FOCUS' ? '用户位置触发' : '模型选择' }}</template></strong><p v-if="call.tool_name === 'search_transcript'">查询：{{ call.arguments.query }}</p><p v-else-if="call.tool_name === 'read_context'">补读前 {{ call.arguments.before }} 句、后 {{ call.arguments.after }} 句</p><p v-else-if="call.tool_name === 'list_topics'">查看第 {{ Number(call.arguments.offset) + 1 }} 项起的话题，最多 {{ call.arguments.limit }} 项</p><p v-else-if="call.tool_name === 'inspect_frames'">请求时间：{{ (call.arguments.timestamps_ms as number[]).map(topicTime).join('、') }}</p><p v-else>短片抽样：{{ topicTime(Number(call.arguments.start_ms)) }} → {{ topicTime(Number(call.arguments.end_ms)) }} · 2fps、无原始音轨</p><small>返回 {{ call.result_utterance_ids.length }} 条原句依据<template v-if="call.result_frame_ids"> · {{ call.result_frame_ids.length }} 帧画面</template></small></li></ol></details>
             <div v-if="turn.result.suggested_clip_instruction" class="agent-clip-suggestion"><p>{{ turn.result.suggested_clip_instruction }}</p><button class="secondary" :disabled="pending || clipTargetBusy" @click="suggest(turn.result.suggested_clip_instruction)">送到剪辑要求</button><small v-if="clipTargetBusy">请先保存或放弃剪辑区域的未提交内容。</small><small v-else>仅填入要求，你仍需在剪辑区域点击查找、核对并确认。</small></div>
@@ -685,7 +804,7 @@ onBeforeUnmount(() => { scanSubmissions(); stopped = true; mounted = false; clea
           </section>
           <div v-if="!selected?.turns.length" class="agent-examples"><button v-for="example in examples" :key="example" type="button" class="secondary" :disabled="pending || dirty" @click="chooseExample(example)">{{ example }}</button></div>
           <div class="agent-input-box"><label for="agent-question" class="visually-hidden">向视频助手提问</label><textarea id="agent-question" ref="questionInput" v-model="question" :disabled="pending" maxlength="2000" rows="2" placeholder="问问这段视频，例如：概括主要内容，列出关键观点。"></textarea>
-          <div class="agent-compose-actions"><details class="agent-options"><summary>回答设置 <span>· {{ maxCalls }} 次上限</span></summary><div class="agent-options-body"><label>本轮模型请求上限<input v-model.number="maxCalls" type="number" min="1" max="24" :disabled="pending" aria-label="对话模型请求上限"></label><p>自动重试计入此上限。{{ visualMode === 'frames' ? '结合原句与实际抽查画面，画面采样不等于连续观看。' : '只使用当前视频转写。' }}剪辑建议需另行审核确认。</p></div></details><span class="agent-character-count">{{ question.length }} / 2000</span><button v-if="dirty" class="text-button" type="button" :disabled="pending" @click="discard">放弃输入</button><button class="primary" type="submit" :disabled="pending || !!followupProposal || submissionBlocked || focusSubmissionBlocked || !question.trim() || !!activeTurn">{{ action === 'send' ? '正在提交…' : selected ? '发送问题 ↑' : '开始提问 ↑' }}</button></div></div>
+          <div class="agent-compose-actions"><details class="agent-options"><summary>回答设置 <span>· {{ maxCalls }} 次上限</span></summary><div class="agent-options-body"><label>本轮模型请求上限<input v-model.number="maxCalls" type="number" min="1" max="24" :disabled="pending" aria-label="对话模型请求上限"></label><p>自动重试计入此上限。{{ visualMode === 'frames' ? '结合原句与实际抽查画面，画面采样不等于连续观看。' : '只使用当前视频转写。' }}剪辑建议需另行审核确认。</p></div></details><span class="agent-character-count">{{ question.length }} / 2000</span><button v-if="dirty" class="text-button" type="button" :disabled="pending" @click="discard">放弃输入</button><button class="primary" type="submit" :disabled="pending || selectionUnavailable || (!selected && !history.loaded) || !!followupProposal || submissionBlocked || focusSubmissionBlocked || !question.trim() || !!activeTurn">{{ action === 'send' ? '正在提交…' : selected ? '发送问题 ↑' : '开始提问 ↑' }}</button></div></div>
           <p v-if="activeTurn" class="help" role="status">正在处理上一轮。你可以先编辑问题，等待回答或取消本轮后发送。</p>
         </form>
       </div>
@@ -694,6 +813,7 @@ onBeforeUnmount(() => { scanSubmissions(); stopped = true; mounted = false; clea
 </template>
 
 <style scoped>
+.agent-selection-status{flex:none;max-height:100px;overflow:auto;padding:8px 12px;margin-bottom:8px;border:1px solid #dfc8ae;border-radius:7px;background:#fff8ef;font-size:12px;line-height:1.6;overflow-wrap:anywhere}.agent-selection-status button{margin:5px 10px 0 0;font-size:12px}.agent-history-pagination{display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px;margin-top:10px;padding-top:9px;border-top:1px solid #e2e8f0;font-size:12px}.agent-history-pagination button{font-size:12px}
 .agent-frame-followup-proposal{margin:7px 0;padding:10px;border:1px solid #dcb48d;border-radius:7px;background:#fff8ee;color:#79583c;font-size:12px;line-height:1.7;overflow-wrap:anywhere}.agent-frame-followup-proposal>div{display:flex;flex-wrap:wrap;gap:8px;margin-top:7px}.agent-frame-followup-proposal button{max-width:100%;font-size:12px}
 .agent-panel { container: agent / inline-size; position: relative; display: flex; flex-direction: column; height: 100%; min-height: 0; min-width: 0; margin: 0; padding: 0; overflow: hidden; border: 0; border-radius: 0; background: transparent; color: #1e293b; font-size: 14px; }
 .agent-submission-recovery { flex: none; max-height: min(32vh, 260px); overflow-y: auto; padding: 12px; margin-bottom: 10px; border: 1px solid #e7c895; border-radius: 8px; background: #fff9ef; font-size: 12px; line-height: 1.6; }

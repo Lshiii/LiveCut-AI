@@ -68,9 +68,10 @@ function writeImmutable(storage: AgentSubmissionStorage, entry: AgentSubmissionE
   const saved = decode(storage.getItem(storageKey))
   if (!saved || !sameAgentSubmission(saved, entry)) fail('AGENT_SUBMISSION_STORAGE_UNAVAILABLE')
 }
-function migrateLegacy(storage: AgentSubmissionStorage, legacyKey: string, owner: AgentSubmissionOwner, session?: AgentSession): void {
+function migrateLegacy(storage: AgentSubmissionStorage, legacyKey: string, owner: AgentSubmissionOwner, session?: AgentSession, expectedRaw?: string): void {
   const raw = storage.getItem(legacyKey)
   if (raw === null) return
+  if (expectedRaw !== undefined && raw !== expectedRaw) fail('AGENT_SUBMISSION_LEGACY_CHANGED')
   let old: unknown
   try { old = JSON.parse(raw) } catch { fail('AGENT_SUBMISSION_LEGACY_INVALID') }
   if (!exact(old, ['key', 'input']) || !key(old.key) || typeof old.input !== 'string') fail('AGENT_SUBMISSION_LEGACY_INVALID')
@@ -82,13 +83,67 @@ function migrateLegacy(storage: AgentSubmissionStorage, legacyKey: string, owner
   if (storage.getItem(legacyKey) !== raw) fail('AGENT_SUBMISSION_LEGACY_CHANGED')
   storage.removeItem(legacyKey)
 }
+export interface AgentLegacyTurnSlot { storage_key: string; session_id: string; raw: string }
+export const MAX_AGENT_LEGACY_SLOTS = 128
+/** Unknown legacy slots carry no job id; they cannot disappear from the new-submit gate merely through pagination. */
+export function agentLegacyTurnSlots(storage: AgentSubmissionStorage): AgentLegacyTurnSlot[] {
+  const keys: string[] = []
+  for (let index = 0; index < storage.length; index++) {
+    const name = storage.key(index)
+    if (name?.startsWith('livecut-agent-turn-')) {
+      if (!uuid(name.slice('livecut-agent-turn-'.length))) fail('AGENT_SUBMISSION_LEGACY_INVALID')
+      keys.push(name)
+    }
+  }
+  if (keys.length > MAX_AGENT_LEGACY_SLOTS) fail('AGENT_SUBMISSION_LEGACY_LIMIT')
+  return [...new Set(keys)].sort().flatMap(storage_key => {
+    const raw = storage.getItem(storage_key)
+    return raw === null ? [] : [{ storage_key, session_id: storage_key.slice('livecut-agent-turn-'.length), raw }]
+  })
+}
+/** A mount-local proof is made only from a complete parsed session and the exact durable slot bytes. */
+export class AgentLegacySubmissionContext {
+  private owner: AgentSubmissionOwner
+  private proofs = new Map<string, { raw: string; session: AgentSession; foreign: boolean }>()
+  private disposed = false
+  constructor(owner: AgentSubmissionOwner) { this.owner = { ...owner } }
+  classify(storage: AgentSubmissionStorage, slot: AgentLegacyTurnSlot, rawSession: unknown, current: () => boolean): AgentSession | null {
+    if (!uuid(slot.session_id) || slot.storage_key !== `livecut-agent-turn-${slot.session_id}`) fail('AGENT_SUBMISSION_LEGACY_OWNER_INVALID')
+    if (this.disposed || !current() || storage.getItem(slot.storage_key) !== slot.raw) return null
+    if (!row(rawSession) || !uuid(rawSession.job_id) || !uuid(rawSession.video_id) || !row(rawSession.source) || !hash(rawSession.source.video_sha256)) fail('AGENT_SUBMISSION_LEGACY_OWNER_INVALID')
+    const session = parseAgentSession(rawSession, rawSession.job_id, rawSession.video_id, rawSession.source.video_sha256, slot.session_id)
+    const foreign = session.job_id !== this.owner.job_id
+    if (!foreign && (session.video_id !== this.owner.video_id || session.source.video_sha256 !== this.owner.video_sha256)) fail('AGENT_SUBMISSION_SOURCE_MISMATCH')
+    if (this.disposed || !current() || storage.getItem(slot.storage_key) !== slot.raw) return null
+    this.proofs.set(slot.storage_key, { raw: slot.raw, session: JSON.parse(JSON.stringify(session)) as AgentSession, foreign })
+    return foreign ? null : session
+  }
+  inspect(slot: AgentLegacyTurnSlot, owner: AgentSubmissionOwner): { foreign: boolean; session: AgentSession } | null {
+    if (this.disposed || !sameOwner(this.owner, owner)) return null
+    const proof = this.proofs.get(slot.storage_key)
+    return proof && proof.raw === slot.raw ? { foreign: proof.foreign, session: JSON.parse(JSON.stringify(proof.session)) as AgentSession } : null
+  }
+  unresolved(storage: AgentSubmissionStorage, owner: AgentSubmissionOwner): AgentLegacyTurnSlot[] {
+    return agentLegacyTurnSlots(storage).filter(slot => !this.inspect(slot, owner))
+  }
+  forget(slot: AgentLegacyTurnSlot) { if (this.proofs.get(slot.storage_key)?.raw === slot.raw) this.proofs.delete(slot.storage_key) }
+  dispose() { this.disposed = true; this.proofs.clear() }
+}
 /** Scan every entry for this job, including independent entries created by another page. */
-export function scanAgentSubmissions(storage: AgentSubmissionStorage, owner: AgentSubmissionOwner, sessions: readonly AgentSession[] = []): AgentSubmissionScan {
+export function scanAgentSubmissions(storage: AgentSubmissionStorage, owner: AgentSubmissionOwner, sessions: readonly AgentSession[] = [], legacy?: AgentLegacySubmissionContext): AgentSubmissionScan {
   const result: AgentSubmissionScan = { entries: [], issues: [] }
   const attempt = (storageKey: string, run: () => void) => { try { run() } catch (error) { result.issues.push({ storage_key: storageKey, code: error instanceof AgentSubmissionError ? error.code : 'AGENT_SUBMISSION_STORAGE_UNAVAILABLE' }) } }
   const legacySession = `livecut-agent-session-${owner.job_id}`
   attempt(legacySession, () => migrateLegacy(storage, legacySession, owner))
-  for (const rawSession of sessions) {
+  if (legacy) attempt('livecut-agent-turn-', () => {
+    if (!(legacy instanceof AgentLegacySubmissionContext)) fail('AGENT_SUBMISSION_LEGACY_OWNER_UNVERIFIED')
+    for (const slot of agentLegacyTurnSlots(storage)) attempt(slot.storage_key, () => {
+      const proof = legacy.inspect(slot, owner)
+      if (!proof) fail('AGENT_SUBMISSION_LEGACY_OWNER_UNVERIFIED')
+      if (!proof.foreign) migrateLegacy(storage, slot.storage_key, owner, proof.session, slot.raw)
+    })
+  })
+  else for (const rawSession of sessions) {
     const legacyTurn = `livecut-agent-turn-${rawSession.id}`
     attempt(legacyTurn, () => {
       const session = parseAgentSession(rawSession, owner.job_id, owner.video_id, owner.video_sha256, rawSession.id)
@@ -114,9 +169,9 @@ export function filterAcknowledgedAgentSubmissions(scan: AgentSubmissionScan, ac
   return { entries: scan.entries.filter(entry => !acknowledged.some(known => sameAgentSubmission(known, entry))), issues: [...scan.issues] }
 }
 export function createAgentSubmission(storage: AgentSubmissionStorage, owner: AgentSubmissionOwner, kind: AgentSubmissionEntry['kind'], input: string,
-  newKey: () => string, sessions: readonly AgentSession[] = [], session?: AgentSession, acknowledged: readonly AgentSubmissionEntry[] = []): AgentSubmissionEntry {
+  newKey: () => string, sessions: readonly AgentSession[] = [], session?: AgentSession, acknowledged: readonly AgentSubmissionEntry[] = [], legacy?: AgentLegacySubmissionContext): AgentSubmissionEntry {
   try {
-    const pending = filterAcknowledgedAgentSubmissions(scanAgentSubmissions(storage, owner, sessions), acknowledged)
+    const pending = filterAcknowledgedAgentSubmissions(scanAgentSubmissions(storage, owner, sessions, legacy), acknowledged)
     if (pending.issues.length) fail(pending.issues[0]!.code)
     if (pending.entries.length) fail('AGENT_SUBMISSION_PENDING')
     const validSession = kind === 'TURN' && session ? parseAgentSession(session, owner.job_id, owner.video_id, owner.video_sha256, session.id) : null
@@ -124,7 +179,7 @@ export function createAgentSubmission(storage: AgentSubmissionStorage, owner: Ag
       session_id: validSession?.id ?? null, source: validSession ? { ...validSession.source } : null, input })
     if (!entry) fail('AGENT_SUBMISSION_ENTRY_INVALID')
     writeImmutable(storage, entry)
-    const after = filterAcknowledgedAgentSubmissions(scanAgentSubmissions(storage, owner, sessions), acknowledged)
+    const after = filterAcknowledgedAgentSubmissions(scanAgentSubmissions(storage, owner, sessions, legacy), acknowledged)
     if (after.issues.length || after.entries.length !== 1 || !sameAgentSubmission(after.entries[0]!, entry)) fail('AGENT_SUBMISSION_PENDING')
     return entry
   } catch (error) { if (error instanceof AgentSubmissionError) throw error; fail('AGENT_SUBMISSION_STORAGE_UNAVAILABLE') }
