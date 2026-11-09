@@ -56,7 +56,7 @@ def _provider_failure(status: int, raw: object, partial: bool) -> tuple[str, boo
         for value in candidates:
             if isinstance(value, str) and value.isascii() and len(value) <= 128:
                 codes.append(value.lower())
-    if any(code in {"throttling.allocationquota", "insufficient_quota", "arrearage",
+    if any(code in {"allocationquota.freetieronly", "throttling.allocationquota", "insufficient_quota", "arrearage",
                     "insufficient_balance", "balance_not_enough"} for code in codes) or status == 402:
         return "PROVIDER_QUOTA_EXHAUSTED", True
     if any(code in {"invalidapikey", "invalid_api_key", "authentication_error",

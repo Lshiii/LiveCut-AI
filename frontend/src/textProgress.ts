@@ -38,6 +38,10 @@ export function parseTextProgress(raw: unknown): TextProgress | undefined {
 }
 export function textProgressCopy(progress: TextProgress): { title: string; detail: string } {
   const attempt = `第 ${progress.attempt_number} / ${progress.max_attempts} 次尝试`
+  if (progress.state === 'EXHAUSTED' && progress.error_code === 'PROVIDER_QUOTA_EXHAUSTED') {
+    const failure = textRecoveryFailureCopy(progress.error_code)!
+    return { title: failure.title, detail: `${attempt} · 本轮已用 ${progress.elapsed_seconds} 秒。${failure.detail}` }
+  }
   switch (progress.state) {
     case 'RETRY_WAIT': return { title: '短暂异常，正在自动恢复', detail: `${progress.retry_in_seconds} 秒后重试 · ${attempt}。已完成的语音转写和分析进度会保留。` }
     case 'SWITCHING_PROVIDER': return { title: '正在切换备用文本服务', detail: `${attempt} · 单次上限 ${progress.timeout_seconds} 秒。将继续处理当前内容。` }
@@ -47,6 +51,9 @@ export function textProgressCopy(progress: TextProgress): { title: string; detai
   }
 }
 export function textRecoveryFailureCopy(errorCode: string | null): { title: string; detail: string } | undefined {
+  if (errorCode === 'PROVIDER_QUOTA_EXHAUSTED') {
+    return { title: '模型服务额度不足', detail: '模型平台的免费额度可能已用完，或账户可用额度不足。请先到模型平台核对额度与计费限制，再决定是否调整配置后重试。' }
+  }
   if (errorCode === 'TEXT_RETRIES_EXHAUSTED' || errorCode === 'TEXT_RETRY_DEADLINE_EXCEEDED') {
     return { title: errorCode === 'TEXT_RETRIES_EXHAUSTED' ? '文本服务自动尝试次数已用尽' : '文本服务自动恢复已达时间上限',
       detail: '请稍后再试或检查备用服务配置。已完成的语音转写会保留，重试仍受本任务原调用预算限制。' }
