@@ -7,6 +7,8 @@ import math
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from .agent_focus import MISSING, prime_focus
+from .agent_focus import PROMPT_VERSION as FOCUS_PROMPT_VERSION
 from .agent_frames import (
     FrameStore,
     actual_position,
@@ -46,6 +48,12 @@ citation_ids最多24个，唯一且来自本轮原句。visual_citations最多12
 禁止生成引用的时间、hash、图片URL或文件路径。程序组装这些字段。answer最多6000字。
 未遍历完整原句/目录不能说已完整理解长视频；不得声称已经剪辑/保存/导出。suggested_clip_instruction仅为用户明确要求剪辑时的文字建议，否则null。
 只输出上述JSON，不输出思考过程。"""
+SYSTEM_FOCUS = SYSTEM + """
+本轮用户显式附加了播放器位置，程序已先执行一次USER_FOCUS本地取帧，首张真实图片随本次请求提供。
+该位置只是定位提示，不是已观察事实或语音证据；只有实际图片及工具原句可以作证据。
+不得生成或修改focus_timestamp_ms和tool origin，程序负责记录。后续工具由你选择，仍受剩余步骤限制。
+用户问“他说的原因/解释”时必须查原句，不能由图猜成他说过；预算不足以查证就明确证据不足。
+截图有独立实际PTS，不能声称像素必定等于浏览器暂停画面。"""
 
 
 def endpoint(base: str) -> str:
@@ -103,7 +111,9 @@ def _decision(raw, by_id, visible, frames, tools_left, duration):
 
 def validate_visual_answer(result: dict, utterances: list[dict], *, expected: dict | None = None, expected_frames: list[dict] | None = None, duration_ms: int | None = None) -> dict:
     try:
-        schema = next(parent / "contracts/agent-answer-visual.schema.json" for parent in Path(__file__).resolve().parents if (parent / "contracts/agent-answer-visual.schema.json").is_file())
+        focused = result.get("schema_version") == "1.2"
+        schema_name = "contracts/agent-answer-visual-focus.schema.json" if focused else "contracts/agent-answer-visual.schema.json"
+        schema = next(parent / schema_name for parent in Path(__file__).resolve().parents if (parent / schema_name).is_file())
         _StrictValidator(json.loads(schema.read_text(encoding="utf-8-sig"))).validate(result)
         if expected:
             for key, value in expected.items():
@@ -117,6 +127,11 @@ def validate_visual_answer(result: dict, utterances: list[dict], *, expected: di
         if sum(f["bytes"] for f in frames) > 16*1024*1024 or len({f["requested_ms"] for f in frames}) != len(frames) or len({actual_position(f) for f in frames}) != len(frames):
             raise ValueError("Repeated or oversized frames")
         duration = duration_ms if duration_ms is not None else max((u["end_ms"] for u in utterances), default=0)
+        if focused:
+            focus = result["focus_timestamp_ms"]
+            if (not _int(focus, 0, min(2**53-1, duration-1)) or not frames or not result["tool_calls"]
+                    or frames[0]["requested_ms"] != focus):
+                raise ValueError("Focus input and actual first frame differ")
         for index, frame in enumerate(frames, 1):
             if frame["frame_id"] != f"f{index:04d}":
                 raise ValueError("Visual IDs must follow actual first observation")
@@ -129,6 +144,10 @@ def validate_visual_answer(result: dict, utterances: list[dict], *, expected: di
                 raise ValueError("Non-contiguous visual tool trace")
             name, args = step["tool_name"], step["arguments"]
             ids, visual_ids = step["result_utterance_ids"], step["result_frame_ids"]
+            if focused and (step["origin"] != ("USER_FOCUS" if index == 1 else "MODEL")
+                    or index == 1 and (name != "inspect_frames" or args != {"timestamps_ms": [focus]}
+                                       or ids != [] or visual_ids != ["f0001"])):
+                raise ValueError("Focus origin or initial actual observation changed")
             if name in TEXT_TOOLS:
                 _arguments(name, args, source)
                 if visual_ids or any(uid not in source for uid in ids) or ids != sorted(set(ids), key=order.get):
@@ -174,13 +193,19 @@ def validate_visual_answer(result: dict, utterances: list[dict], *, expected: di
 def build_visual_answer(utterances, topics, duration_ms, question, output_dir, *, source, session_id, turn_id, job_id, video_id,
                        source_hash, transcript_hash, model, api_key, base_url, max_calls=8, max_tool_steps=4, history=None,
                        client=None, timeout_seconds=300, dense_embedder=None, embedding_model_id=None, index_cache_dir=None,
-                       guard=lambda: None, ffmpeg_path="ffmpeg", ffprobe_path="ffprobe", media_info=None, budget_remaining=None, max_request_attempts=1):
+                       guard=lambda: None, ffmpeg_path="ffmpeg", ffprobe_path="ffprobe", media_info=None, budget_remaining=None, max_request_attempts=1,
+                       focus_timestamp_ms=MISSING):
     if client is None:
         raise SegmentationError("DURABLE_BUDGET_REQUIRED", "Visual generation requires an injected budgeted transport")
     target = endpoint(base_url)
     if not isinstance(api_key, str) or not api_key or "\r" in api_key or "\n" in api_key:
         raise SegmentationError("VISUAL_NOT_CONFIGURED", "Configure the independent visual API key")
     items = _inputs(utterances, duration_ms)
+    focused = focus_timestamp_ms is not MISSING
+    if focused and not _int(focus_timestamp_ms, 0, min(2**53-1, duration_ms-1)):
+        raise SegmentationError("INVALID_AGENT_FOCUS_INPUT", "The attached position must be an integer within this video")
+    prompt_version = FOCUS_PROMPT_VERSION if focused else PROMPT_VERSION
+    system = SYSTEM_FOCUS + f"\n本轮明确附加位置：{focus_timestamp_ms}毫秒。" if focused else SYSTEM
     if (not _int(max_calls, 1, 24) or not _int(max_tool_steps, 1, 4) or not _int(max_request_attempts, 1, 3)
             or not isinstance(question, str) or not question.strip() or len(question) > 2000
             or any(not isinstance(v, str) or not _ID.fullmatch(v) for v in (session_id, turn_id, job_id, video_id, model))
@@ -207,20 +232,24 @@ def build_visual_answer(utterances, topics, duration_ms, question, output_dir, *
               "video": video_id, "utterances": items, "topics": safe_topics, "history": history, "max_steps": max_tool_steps,
               "embedding_model": embedding_model_id, "dense": dense_embedder is not None, "max_request_attempts": max_request_attempts, "max_calls": max_calls,
               "central_budget": budget_remaining is not None}
+    if focused:
+        config.update(prompt=prompt_version, focus_timestamp_ms=focus_timestamp_ms,
+                      system_sha256=hashlib.sha256(system.encode()).hexdigest())
     fingerprint = hashlib.sha256(_json(config).encode()).hexdigest()
+    decision_steps = max_tool_steps-1 if focused else max_tool_steps
     with _discovery_directory_lock(directory):
         state_path, plan_path = directory / "state.json", directory / "request-plans.json"
-        state = _state(state_path, fingerprint, max_calls, max_tool_steps)
+        state = _state(state_path, fingerprint, max_calls, decision_steps)
         try:
             plans = json.loads(plan_path.read_text(encoding="utf-8")) if plan_path.exists() else {"config_hash": fingerprint, "requests": []}
-            if set(plans) != {"config_hash", "requests"} or plans["config_hash"] != fingerprint or not isinstance(plans["requests"], list) or len(plans["requests"]) > min(max_calls, 2*(max_tool_steps+1)):
+            if set(plans) != {"config_hash", "requests"} or plans["config_hash"] != fingerprint or not isinstance(plans["requests"], list) or len(plans["requests"]) > min(max_calls, 2*(decision_steps+1)):
                 raise ValueError
             seen = set()
             for p in plans["requests"]:
                 identity = p["window_index"], p["attempt"]
                 if (set(p) != {"window_index", "attempt", "remaining_tool_steps", "remaining_calls", "payload_sha256"}
-                        or identity in seen or not _int(identity[0], 0, max_tool_steps) or not _int(identity[1], 0, 1)
-                        or not _int(p["remaining_tool_steps"], 0, max_tool_steps-identity[0])
+                        or identity in seen or not _int(identity[0], 0, decision_steps) or not _int(identity[1], 0, 1)
+                        or not _int(p["remaining_tool_steps"], 0, decision_steps-identity[0])
                         or p["remaining_calls"] is not None and not _int(p["remaining_calls"], 1, max_calls)
                         or p["payload_sha256"] is not None and not _HASH.fullmatch(p["payload_sha256"])):
                     raise ValueError
@@ -231,7 +260,37 @@ def build_visual_answer(utterances, topics, duration_ms, question, output_dir, *
         store = FrameStore(Path(source), root, source_hash, duration_ms, ffmpeg_path=ffmpeg_path, ffprobe_path=ffprobe_path, media_info=media_info, guard=guard)
         observations, trace, visible, delivered = [], [], set(), []
         index, mode, remaining_context = None, "none", 36000
-        for number in range(max_tool_steps+1):
+        def focus_budget():
+            if budget_remaining is None:
+                return None
+            try:
+                value = budget_remaining()
+            except Exception:
+                value = None
+            guard()
+            return min(max_calls-len(state["calls"]), value) if _int(value, 0, max_calls) else None
+
+        if focused:
+            initial = next((p for p in plans["requests"] if p["window_index"] == 0 and p["attempt"] == 0), None)
+            if initial is None:
+                if state["calls"] or (directory / "focus-observation.json").exists():
+                    raise SegmentationError("INVALID_AGENT_CHECKPOINT", "The original focus request budget plan is missing")
+                remaining = focus_budget()
+                if remaining is None or remaining == 0:
+                    raise SegmentationError("FOCUS_MODEL_BUDGET_UNAVAILABLE" if remaining is None else "BUDGET_EXHAUSTED",
+                                            "The attached frame cannot be observed without a verified model request budget")
+                initial = {"window_index": 0, "attempt": 0, "remaining_calls": remaining, "payload_sha256": None,
+                           "remaining_tool_steps": min(max_tool_steps-1, max(0, remaining-max_request_attempts))}
+                plans["requests"].append(initial)
+                _save(plan_path, plans)
+            frame = prime_focus(store, directory, fingerprint, focus_timestamp_ms)
+            delivered = [frame]
+            trace = [{"step": 1, "tool_name": "inspect_frames", "arguments": {"timestamps_ms": [focus_timestamp_ms]},
+                      "result_utterance_ids": [], "result_frame_ids": ["f0001"], "origin": "USER_FOCUS"}]
+            observations = [{"tool_name": "inspect_frames", "arguments": {"timestamps_ms": [focus_timestamp_ms]}, "origin": "USER_FOCUS",
+                             "result": {"utterances": [], "frames": [frame], "sampling": "keyframes", "audio_included": False}}]
+            remaining_context -= len(_json(observations[0]["result"]))
+        for number in range(decision_steps+1):
             repair_rule = None
             for repair in (0, 1):
                 guard()
@@ -256,18 +315,25 @@ def build_visual_answer(utterances, topics, duration_ms, question, output_dir, *
                             central = None
                         guard()
                         remaining = min(remaining, central) if _int(central, 0, max_calls) else None
-                    if remaining == 0:
+                    if remaining == 0 or focused and remaining is None:
                         raise SegmentationError("BUDGET_EXHAUSTED", "Visual model request limit reached")
                     plan = {"window_index": number, "attempt": repair, "remaining_calls": remaining, "payload_sha256": None,
-                            "remaining_tool_steps": min(max_tool_steps-number, max(0, remaining-max_request_attempts) if remaining is not None else 0)}
+                            "remaining_tool_steps": min(decision_steps-number, max(0, remaining-max_request_attempts) if remaining is not None else 0)}
                     plans["requests"].append(plan)
                     _save(plan_path, plans)
+                if focused and cached is None:
+                    remaining_now = focus_budget()
+                    if remaining_now is None or remaining_now == 0:
+                        raise SegmentationError("FOCUS_MODEL_BUDGET_UNAVAILABLE" if remaining_now is None else "BUDGET_EXHAUSTED",
+                                                "No new focused model request can be dispatched without verified remaining budget")
                 payload = {"video_question": question, "conversation": history, "observations": observations,
                            "video_info": {"duration_ms": duration_ms, "topic_count": len(safe_topics), "utterance_count": len(items)},
                            "remaining_tool_steps": plan["remaining_tool_steps"], "remaining_model_calls": plan["remaining_calls"],
                            "sampling_notice": "Pictures are bounded samples, not continuous audio/video understanding."}
+                if focused:
+                    payload["focus_timestamp_ms"] = focus_timestamp_ms
                 content = [{"type": "text", "text": _json(payload)}, *store.images(delivered)]
-                messages = [{"role": "system", "content": SYSTEM}, {"role": "user", "content": content}]
+                messages = [{"role": "system", "content": system}, {"role": "user", "content": content}]
                 if repair_rule:
                     messages.append({"role": "user", "content": _json({"repair": "仅一次结构修复，不改变证据", "validation_rule": repair_rule})})
                 payload_hash = hashlib.sha256(_json(messages).encode()).hexdigest()
@@ -293,12 +359,15 @@ def build_visual_answer(utterances, topics, duration_ms, question, output_dir, *
             guard()
             if action["type"] == "answer":
                 citations = [{k: by_id[uid][k] for k in ("utterance_id", "start_ms", "end_ms", "text")} for uid in sorted(action["citation_ids"], key=order.get)]
-                result = {"schema_version": "1.1", "session_id": session_id, "turn_id": turn_id, "job_id": job_id, "video_id": video_id,
+                result = {"schema_version": "1.2" if focused else "1.1", "session_id": session_id, "turn_id": turn_id, "job_id": job_id, "video_id": video_id,
                           "source_hash": source_hash, "transcript_hash": transcript_hash, "question": question, "answer": action["answer"],
                           "answer_scope": action["answer_scope"], "citations": citations, "visual_evidence": delivered,
                           "visual_citations": action["visual_citations"], "tool_calls": trace, "suggested_clip_instruction": action["suggested_clip_instruction"],
-                          "provenance": {"text_model_id": model, "prompt_version": PROMPT_VERSION, "retrieval_mode": mode}}
-                validate_visual_answer(result, items, expected_frames=delivered, duration_ms=duration_ms)
+                          "provenance": {"text_model_id": model, "prompt_version": prompt_version, "retrieval_mode": mode}}
+                if focused:
+                    result["focus_timestamp_ms"] = focus_timestamp_ms
+                validate_visual_answer(result, items, expected={"focus_timestamp_ms": focus_timestamp_ms} if focused else None,
+                                       expected_frames=delivered, duration_ms=duration_ms)
                 store.images(delivered)
                 guard()
                 _save(root / "agent-answer.json", result)
@@ -349,6 +418,9 @@ def build_visual_answer(utterances, topics, duration_ms, question, output_dir, *
             remaining_context = max(0, remaining_context-len(_json(observation)))
             ids = [u["utterance_id"] for u in observation["utterances"]]
             visible.update(ids)
-            trace.append({"step": number+1, "tool_name": name, "arguments": args, "result_utterance_ids": ids, "result_frame_ids": frame_ids})
+            trace.append({"step": number+(2 if focused else 1), "tool_name": name, "arguments": args, "result_utterance_ids": ids, "result_frame_ids": frame_ids})
             observations.append({"tool_name": name, "arguments": args, "result": observation})
+            if focused:
+                trace[-1]["origin"] = "MODEL"
+                observations[-1]["origin"] = "MODEL"
         raise AgentOutputError("TOOL_LIMIT")

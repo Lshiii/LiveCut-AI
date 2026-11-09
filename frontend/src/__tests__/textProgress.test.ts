@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { ref, watch } from 'vue'
 import { advanceTextProgress, parseTextProgress, textProgressCopy, textProgressSignature, textRecoveryFailureCopy, type TextProgress } from '../textProgress.ts'
 import { parseAnalysisSnapshot } from '../snapshotStream.ts'
+import { parseAgentTurn, type AgentSession } from '../videoAgent.ts'
 
 const progress = (): TextProgress => ({ state: 'REQUESTING', attempt_number: 1, max_attempts: 3,
   provider: 'primary', model_id: 'deepseek-flash', timeout_seconds: 90, elapsed_seconds: 8, retry_in_seconds: 0 })
@@ -57,6 +58,39 @@ test('bounded recovery failures stay readable when the optional diagnostic is ab
   }
   assert.equal(textRecoveryFailureCopy('https://secret'), undefined)
   assert.equal(textRecoveryFailureCopy('UNKNOWN_FUTURE_FAILURE'), undefined)
+})
+
+test('failed visual turns show exhausted provider quota from progress even when the stage code is generic', () => {
+  const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`
+  const session: AgentSession = { id: id(1), job_id: id(2), video_id: id(3), created_at: '2026-11-09T00:00:00Z',
+    source: { video_sha256: 'a'.repeat(64), transcript_hash: 'b'.repeat(64), duration_ms: 5000 }, turns: [] }
+  const raw = { id: id(4), session_id: session.id, job_id: session.job_id, sequence: 1,
+    question: '合成额度失败回归，不发真实请求', visual_mode: 'frames',
+    status: 'FAILED', state_version: 3, created_at: '2026-11-09T00:00:01Z', updated_at: '2026-11-09T00:00:02Z',
+    budget: { max_text_calls: 1, text_calls_reserved: 1 }, result: null,
+    stage: { id: id(5), stage_type: 'AGENT_VISUAL', status: 'FAILED', attempt: 1, error_code: 'PROVIDER_ERROR',
+      text_progress: { ...progress(), state: 'EXHAUSTED', max_attempts: 1, elapsed_seconds: 2,
+        error_code: 'PROVIDER_QUOTA_EXHAUSTED', message: 'private raw provider error', endpoint: 'https://private.example' } } }
+  const turn = parseAgentTurn(raw, session)
+  assert.equal(turn.stage.error_code, 'PROVIDER_ERROR')
+  assert.equal(turn.stage.diagnostic, undefined)
+  const copy = textProgressCopy(turn.stage.text_progress!)
+  assert.equal(copy.title, '模型服务额度不足')
+  assert.match(copy.detail, /免费额度可能已用完/)
+  assert.match(copy.detail, /核对额度与计费限制/)
+  assert.match(copy.detail, /第 1 \/ 1 次尝试/)
+  assert.doesNotMatch(JSON.stringify(copy), /private|https:|凭证错误|自动开启付费/)
+  assert.equal(turn.status, 'FAILED'); assert.equal(turn.result, null)
+})
+
+test('quota copy requires the exact provider code and cannot mislabel local budgets, authentication or rate limiting', () => {
+  assert.match(textRecoveryFailureCopy('PROVIDER_QUOTA_EXHAUSTED')!.detail, /模型平台/)
+  for (const code of ['PROVIDER_UNAUTHORIZED', 'PROVIDER_RATE_LIMITED', 'BUDGET_EXHAUSTED', 'PROVIDER_ERROR',
+    'AllocationQuota.FreeTierOnly', 'PROVIDER_QUOTA_EXHAUSTED<script>', 'UNKNOWN_FUTURE_FAILURE']) {
+    assert.equal(textRecoveryFailureCopy(code), undefined)
+    assert.notEqual(textProgressCopy({ ...progress(), state: 'EXHAUSTED', error_code: code }).title, '模型服务额度不足')
+  }
+  assert.notEqual(textProgressCopy({ ...progress(), error_code: 'PROVIDER_QUOTA_EXHAUSTED' }).title, '模型服务额度不足', 'an active event is not a terminal quota failure')
 })
 test('progress copy distinguishes retry, switching service and exhaustion using actual bounds', () => {
   assert.match(textProgressCopy(progress()).detail, /单次上限 90 秒/)

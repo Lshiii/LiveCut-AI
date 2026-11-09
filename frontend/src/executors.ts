@@ -1,4 +1,4 @@
-export const EXECUTOR_STAGES = ['MEDIA', 'ASR', 'SEGMENT', 'TIMELINE', 'EXPORT_CLIP', 'CAPTION_PROOFREAD', 'ANCHOR_CLIP', 'AGENT_VISUAL'] as const
+export const EXECUTOR_STAGES = ['MEDIA', 'ASR', 'SEGMENT', 'TIMELINE', 'EXPORT_CLIP', 'CAPTION_PROOFREAD', 'ANCHOR_CLIP', 'AGENT_VISUAL', 'AGENT_VISUAL_FOCUS'] as const
 export type ExecutorStageType = typeof EXECUTOR_STAGES[number]
 export type ExecutorReason = 'AVAILABLE' | 'NO_EXECUTOR' | 'BUSY' | 'RESOURCE_BUSY'
 export interface ExecutorCapacity {
@@ -73,9 +73,10 @@ export function parseExecutorSnapshot(raw: unknown): ExecutorSnapshot {
   // Accept complete deployed generations (five, six, or seven queues), while
   // every worker capability must be backed by a queue in this same snapshot.
   if (resourceIds.size !== 3 || !legacyStages.every(type => stageIds.has(type))
-      || ![5, 6, 7, 8].includes(stageIds.size)
+      || ![5, 6, 7, 8, 9].includes(stageIds.size)
       || (stageIds.has('ANCHOR_CLIP') && !stageIds.has('CAPTION_PROOFREAD'))
       || (stageIds.has('AGENT_VISUAL') && !stageIds.has('ANCHOR_CLIP'))
+      || (stageIds.has('AGENT_VISUAL_FOCUS') && !stageIds.has('AGENT_VISUAL'))
       || workers.some(worker => worker.stage_types.some(type => !stageIds.has(type)))) invalid()
   return { ...top, generated_at: raw.generated_at, heartbeat_timeout_seconds: raw.heartbeat_timeout_seconds,
     workers, stages, resources }

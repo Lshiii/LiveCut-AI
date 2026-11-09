@@ -95,7 +95,7 @@ def test_idle_executor_registers_pulses_and_unregisters_under_one_session(tmp_pa
     assert not thread.is_alive() and not errors and not calls
     assert len(client.registrations) == 1
     wid, session, stages, target = client.registrations[0]
-    assert stages == [stage for stage in STAGES if stage != "AGENT_VISUAL"] and not target
+    assert stages == [stage for stage in STAGES if stage not in {"AGENT_VISUAL", "AGENT_VISUAL_FOCUS"}] and not target
     assert client.presence_heartbeats and set(client.presence_heartbeats) == {(wid, session)}
     assert client.unregistrations == [(wid, session)]
     assert not client.callbacks

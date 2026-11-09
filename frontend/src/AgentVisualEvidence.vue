@@ -6,7 +6,7 @@ import { topicTime } from './topics'
 const props = defineProps<{ turn: AgentTurn; active: boolean }>()
 const emit = defineEmits<{ locate: [timestamp: number]; preview: [range: { start_ms: number; end_ms: number }] }>()
 const failed = ref<Record<string, boolean>>({}); let alive = true
-const frames = computed(() => props.turn.result?.schema_version === '1.1' ? props.turn.result.visual_evidence ?? [] : [])
+const frames = computed(() => props.turn.result?.schema_version !== '1.0' ? props.turn.result?.visual_evidence ?? [] : [])
 const citations = computed(() => props.turn.result?.visual_citations ?? [])
 const observations = computed(() => props.turn.result?.tool_calls.filter(call => call.tool_name === 'inspect_frames' || call.tool_name === 'inspect_clip') ?? [])
 function frame(id: string) { return frames.value.find(value => value.frame_id === id)! }
@@ -19,9 +19,10 @@ onBeforeUnmount(() => { alive = false })
 </script>
 
 <template>
-  <section v-if="turn.result?.schema_version === '1.1'" class="agent-visual-evidence" aria-label="本轮画面依据">
+  <section v-if="turn.result?.schema_version === '1.1' || turn.result?.schema_version === '1.2'" class="agent-visual-evidence" aria-label="本轮画面依据">
     <h4>画面依据 · 引用 {{ citations.length }} 帧 / 本轮观察 {{ frames.length }} 帧</h4>
     <p class="visual-boundary">仅表示实际抽查的画面；不包含原始音轨，不等于连续观看或完整动作证明。原句依据单独列出。</p>
+    <p v-if="turn.focus_timestamp_ms !== undefined" class="visual-boundary">用户附加位置 {{ topicTime(turn.focus_timestamp_ms) }} 是定位提示；下方截图有独立实际 PTS，像素不保证与浏览器暂停画面完全相同。</p>
     <div class="visual-cards"><article v-for="citation in citations" :key="`${turn.id}:${citation.frame_id}`" class="visual-card">
       <img v-if="!failed[imageKey(frame(citation.frame_id))]" :key="imageKey(frame(citation.frame_id))" :src="visualEvidenceUrl(turn.id, citation.frame_id)" :alt="`第 ${turn.sequence} 轮画面 ${citation.frame_id}，原视频 ${topicTime(frame(citation.frame_id).timestamp_ms)}`" loading="lazy" decoding="async" @error="imageFailed(frame(citation.frame_id))">
       <p v-else class="visual-image-error" role="status">截图暂不可用，文字回答仍保留。可按下方时间定位原视频。</p>
@@ -29,7 +30,8 @@ onBeforeUnmount(() => { alive = false })
     </article></div>
     <details v-if="observations.length" class="visual-observations"><summary>画面观察范围 · {{ observations.length }} 步</summary><article v-for="call in observations" :key="call.step">
       <p v-if="call.tool_name === 'inspect_clip'"><strong>第 {{ call.step }} 步 · 短片抽样</strong> 请求 {{ topicTime(Number(call.arguments.start_ms)) }} → {{ topicTime(Number(call.arguments.end_ms)) }}，按 2fps 采样画面。</p>
-      <p v-else><strong>第 {{ call.step }} 步 · 指定时间看图</strong> 请求 {{ (call.arguments.timestamps_ms as number[]).map(topicTime).join('、') }}。</p>
+      <p v-else><strong>第 {{ call.step }} 步 · {{ call.origin === 'USER_FOCUS' ? '用户附加位置触发取帧' : '指定时间看图' }}</strong> 请求 {{ (call.arguments.timestamps_ms as number[]).map(topicTime).join('、') }}。</p>
+      <p v-if="call.origin">{{ call.origin === 'USER_FOCUS' ? '程序按用户定位提示执行；不是模型自主选择。' : '模型选择的后续工具。' }}</p>
       <p v-if="call.result_frame_ids?.length">实际观察 {{ call.result_frame_ids.length }} 帧：{{ observedTimes(call.result_frame_ids) }}。采样间隙的内容未由这些帧证明。</p><p v-else>该步没有返回可用帧，不能据此声称已观察整个区间。</p>
       <button v-if="call.tool_name === 'inspect_clip'" class="text-button" :disabled="!active" @click="emit('preview', {start_ms:Number(call.arguments.start_ms),end_ms:Number(call.arguments.end_ms)})">回看请求区间</button>
     </article></details>

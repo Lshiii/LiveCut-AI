@@ -22,7 +22,9 @@ public final class AgentModels {
                        @JsonProperty("job_id") String jobId,String question,int sequence,String status,
                        @JsonProperty("state_version") long stateVersion,
                        @JsonProperty("created_at") Instant createdAt,@JsonProperty("updated_at") Instant updatedAt,
-                       Budget budget,Stage stage,JsonNode result,@JsonProperty("visual_mode") String visualMode) {}
+                       Budget budget,Stage stage,JsonNode result,@JsonProperty("visual_mode") String visualMode,
+                       @JsonProperty("focus_timestamp_ms") @JsonInclude(JsonInclude.Include.NON_NULL) Long focusTimestampMs) {}
+    public record FocusCapability(@JsonProperty("focus_timestamp_supported") boolean focusTimestampSupported) {}
     public record Capabilities(@JsonProperty("visual_mode") String visualMode,@JsonProperty("visual_model_id") String visualModelId,
                                @JsonProperty("max_frames") int maxFrames,@JsonProperty("max_clip_duration_ms") int maxClipDurationMs,
                                @JsonProperty("clip_sample_interval_ms") int clipSampleIntervalMs) {}

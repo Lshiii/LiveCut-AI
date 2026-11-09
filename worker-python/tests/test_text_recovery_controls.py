@@ -6,7 +6,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import httpx
 import pytest
 from livecut.model_budget import BudgetTransport
-from livecut.text_resilience import DeadlineHTTPTransport, ResilientTextTransport
+from livecut.text_resilience import DeadlineHTTPTransport, ResilientTextTransport, _provider_failure
 from livecut.worker import WorkerError
 from test_text_resilience import BODY, URL, Ledger, backup, backup_context, setup
 
@@ -59,6 +59,8 @@ def test_parameter_faults_are_not_retried_as_internal_errors(tmp_path, status, e
 
 @pytest.mark.parametrize("status,error", [(200, {"code": "Throttling.AllocationQuota"}),
     (429, {"error": {"code": "insufficient_quota"}}), (402, {"error": "balance"}),
+    (403, {"error": {"code": "AllocationQuota.FreeTierOnly"}}),
+    (403, {"error": {"type": "AllocationQuota.FreeTierOnly"}}),
     (200, {"error": {"code": "invalid_api_key"}})])
 def test_quota_or_auth_fault_switches_without_retrying_same_credentials(tmp_path, monkeypatch, status, error):
     backup(monkeypatch)
@@ -73,6 +75,37 @@ def test_quota_or_auth_fault_switches_without_retrying_same_credentials(tmp_path
         assert client.post(URL, json=BODY).status_code == 200
     assert len(hits) == len(ledger.calls) == 2
     assert hits[1].url.host == "backup.example"
+
+
+@pytest.mark.parametrize("status,error", [
+    (403, {"code": "AllocationQuota.FreeTierOnly"}),
+    (403, {"error": {"code": "AllocationQuota.FreeTierOnly", "type": "AllocationQuota.FreeTierOnly"}}),
+    (403, {"error": {"type": "allocationquota.freetieronly"}}),
+    (200, {"error": {"code": "AllocationQuota.FreeTierOnly"}}),
+])
+def test_free_tier_exhaustion_is_quota_and_does_not_repeat_without_backup(tmp_path, status, error):
+    hits, progress = [], []
+
+    def provider(request):
+        hits.append(request)
+        return httpx.Response(status, json=error)
+
+    client, ledger, context = setup(tmp_path, provider, progress=progress.append)
+    with client:
+        assert client.post(URL, json=BODY).json() == error
+        # Re-reading the same original operation replays its recorded refusal.
+        assert client.post(URL, json=BODY).json() == error
+    assert len(hits) == len(ledger.calls) == 1
+    assert next(iter(ledger.calls.values()))["status"] == ("FAILED" if status >= 300 else "UNKNOWN_OUTCOME")
+    terminal = [value for value in progress if value["state"] == "EXHAUSTED"]
+    assert terminal and all(value["error_code"] == "PROVIDER_QUOTA_EXHAUSTED" for value in terminal)
+    assert "PROVIDER_UNAUTHORIZED" not in (context.directory / "text-execution-trace.json").read_text()
+
+
+def test_generic_403_and_auth_codes_do_not_become_quota_from_arbitrary_messages():
+    assert _provider_failure(403, {"error": {"code": "permission_denied", "message": "Free quota exhausted"}}, False) == ("PROVIDER_UNAUTHORIZED", True)
+    assert _provider_failure(403, {"message": "AllocationQuota.FreeTierOnly"}, False) == ("PROVIDER_UNAUTHORIZED", True)
+    assert _provider_failure(401, {"error": {"code": "invalid_api_key"}}, False) == ("PROVIDER_UNAUTHORIZED", True)
 
 
 def test_fenced_lease_interrupts_silent_read_and_does_not_dispatch_retry(tmp_path):

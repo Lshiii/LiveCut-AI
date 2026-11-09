@@ -12,6 +12,8 @@ public class AgentController {
     public AgentController(AgentService agents){this.agents=agents;}
     @GetMapping("/api/agent-capabilities")
     public AgentModels.Capabilities capabilities(){return agents.capabilities();}
+    @GetMapping("/api/agent-capabilities/focus")
+    public AgentModels.FocusCapability focusCapability(){return new AgentModels.FocusCapability(true);}
     @GetMapping("/api/agent-turns/{id}/visual-evidence/{frameId}/content")
     public ResponseEntity<byte[]> visualFrame(@PathVariable String id,@PathVariable String frameId){
         return ResponseEntity.ok().contentType(MediaType.IMAGE_JPEG).cacheControl(CacheControl.noStore())

@@ -14,8 +14,11 @@ public final class AgentAnswerValidator {
         "source_hash","transcript_hash","question","answer","answer_scope","citations","tool_calls","provenance","suggested_clip_instruction");
     public static JsonNode validate(JsonNode answer,Map<String,Object> owner){
         boolean visual="frames".equals(owner.get("visual_mode"));
+        Long focus=AgentFocus.value(owner);boolean focused=focus!=null;
         Set<String> expected=new HashSet<>(ANSWER);if(visual)expected.addAll(Set.of("visual_evidence","visual_citations"));
-        fields(answer,expected);equal(answer,"schema_version",visual?"1.1":"1.0");
+        if(focused)expected.add("focus_timestamp_ms");
+        fields(answer,expected);equal(answer,"schema_version",focused?"1.2":visual?"1.1":"1.0");
+        if(focused&&number(answer,"focus_timestamp_ms")!=focus)throw bad("Focus must match the immutable user locator");
         for(String name:List.of("session_id","job_id","video_id","source_hash","transcript_hash","question"))equal(answer,name,String.valueOf(owner.get(name)));
         equal(answer,"turn_id",String.valueOf(owner.get("id")));text(answer,"answer",6000);
         String scope=text(answer,"answer_scope",20);if(!Set.of("VIDEO","GENERAL","INSUFFICIENT").contains(scope))throw bad("Unknown answer scope");
@@ -23,10 +26,15 @@ public final class AgentAnswerValidator {
         Map<String,JsonNode> utterances=new HashMap<>();Map<String,Integer> order=new HashMap<>();
         for(JsonNode row:source){String id=text(row,"utterance_id",128);order.put(id,order.size());utterances.put(id,row);}
         Set<String> observed=new HashSet<>();int expectedStep=1;boolean searched=false;
-        for(JsonNode call:array(answer,"tool_calls",0,4)){
-            fields(call,visual?Set.of("step","tool_name","arguments","result_utterance_ids","result_frame_ids"):Set.of("step","tool_name","arguments","result_utterance_ids"));
+        for(JsonNode call:array(answer,"tool_calls",focused?1:0,4)){
+            fields(call,focused?Set.of("step","tool_name","arguments","result_utterance_ids","result_frame_ids","origin"):visual?Set.of("step","tool_name","arguments","result_utterance_ids","result_frame_ids"):Set.of("step","tool_name","arguments","result_utterance_ids"));
             if(number(call,"step")!=expectedStep++)throw bad("Tool steps must be contiguous");
             String tool=text(call,"tool_name",40);JsonNode args=call.path("arguments");
+            if(focused){boolean first=expectedStep==2;equal(call,"origin",first?"USER_FOCUS":"MODEL");if(first){
+                if(!tool.equals("inspect_frames")||!args.path("timestamps_ms").isArray()||args.path("timestamps_ms").size()!=1
+                        ||!args.path("timestamps_ms").get(0).isIntegralNumber()||!args.path("timestamps_ms").get(0).canConvertToLong()||args.path("timestamps_ms").get(0).longValue()!=focus
+                        ||!call.path("result_frame_ids").isArray()||call.path("result_frame_ids").size()!=1||!call.path("result_frame_ids").get(0).asText().equals("f0001"))throw bad("The first user focus observation must contain its actual frame");
+            }}
             switch(tool){
                 case "search_transcript" -> {
                     searched=true;
@@ -59,7 +67,7 @@ public final class AgentAnswerValidator {
                     ||!text(citation,"text",100000).equals(original.path("text").asText()))throw bad("Citation must exactly match original ASR");
         }
         JsonNode provenance=answer.path("provenance");fields(provenance,Set.of("text_model_id","prompt_version","retrieval_mode"));
-        equal(provenance,"text_model_id",String.valueOf(owner.get("text_model_id")));equal(provenance,"prompt_version",visual?"video-agent-visual-v1":"video-agent-v1");
+        equal(provenance,"text_model_id",String.valueOf(owner.get("text_model_id")));equal(provenance,"prompt_version",focused?"video-agent-visual-focus-v1":visual?"video-agent-visual-v1":"video-agent-v1");
         String mode=text(provenance,"retrieval_mode",40);
         if(!Set.of("none","bm25","bm25_dense_rrf").contains(mode)||searched==mode.equals("none"))throw bad("Retrieval mode must describe the actual tools");
         JsonNode suggested=answer.path("suggested_clip_instruction");

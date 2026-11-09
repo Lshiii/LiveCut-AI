@@ -16,7 +16,7 @@ public final class AgentVisualArtifacts {
     private AgentVisualArtifacts() {}
     public static Map<String,byte[]> verify(JdbcTemplate jdbc,ArtifactVerifier artifacts,Map<String,Object> job,
             Map<String,Object> owner,JsonNode answer,ArtifactVerifier.VerifiedManifest manifest,ArtifactVerifier.ManifestIdentity identity){
-        if(!"frames".equals(owner.get("visual_mode"))||!"AGENT_VISUAL".equals(identity.stageType()))throw invalid();
+        if(!"frames".equals(owner.get("visual_mode"))||!AgentFocus.stage(owner).equals(identity.stageType()))throw invalid();
         var mediaStages=jdbc.queryForList("SELECT * FROM job_stage WHERE job_id=? AND owner_type='ANALYSIS' AND stage_type='MEDIA' AND status='SUCCEEDED' FOR UPDATE",job.get("id"));
         if(mediaStages.size()!=1)throw invalid();var mediaStage=mediaStages.getFirst();
         var mediaIdentity=new ArtifactVerifier.ManifestIdentity(identity.jobId(),identity.videoId(),identity.generation(),String.valueOf(mediaStage.get("id")),"MEDIA",((Number)mediaStage.get("attempt")).intValue(),String.valueOf(mediaStage.get("run_token")),identity.sourceHash());

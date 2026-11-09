@@ -26,13 +26,16 @@ const hash = (raw: unknown): raw is string => typeof raw === 'string' && HASH.te
 const sameSource = (a: AgentSession['source'], b: AgentSession['source']) => a.video_sha256 === b.video_sha256 && a.transcript_hash === b.transcript_hash && a.duration_ms === b.duration_ms
 function fail(code?: string): never { throw new AgentSubmissionError(code) }
 function sameOwner(entry: AgentSubmissionOwner, owner: AgentSubmissionOwner) { return entry.job_id === owner.job_id && entry.video_id === owner.video_id && entry.video_sha256 === owner.video_sha256 }
-export interface AgentTurnSubmissionInput { question: string; max_text_calls: number; visual_mode?: 'none' | 'frames' }
+export interface AgentTurnSubmissionInput { question: string; max_text_calls: number; visual_mode?: 'none' | 'frames'; focus_timestamp_ms?: number }
 export function agentSubmissionInput(kind: AgentSubmissionEntry['kind'], raw: unknown): {} | AgentTurnSubmissionInput | null {
   if (kind === 'SESSION') return exact(raw, []) ? {} : null
-  if (!row(raw) || !(exact(raw, ['question', 'max_text_calls']) || exact(raw, ['question', 'max_text_calls', 'visual_mode']))
+  if (!row(raw) || !Object.hasOwn(raw, 'question') || !Object.hasOwn(raw, 'max_text_calls')
+    || !Object.keys(raw).every(key => ['question', 'max_text_calls', 'visual_mode', 'focus_timestamp_ms'].includes(key))
     || !(raw.visual_mode === undefined || raw.visual_mode === 'none' || raw.visual_mode === 'frames') || typeof raw.question !== 'string' || !raw.question.trim() || raw.question !== raw.question.trim()
-    || raw.question.length > 2000 || !integer(raw.max_text_calls, 1, 24)) return null
-  return { question: raw.question, max_text_calls: raw.max_text_calls, ...(Object.hasOwn(raw, 'visual_mode') ? { visual_mode: raw.visual_mode as 'none' | 'frames' } : {}) }
+    || raw.question.length > 2000 || !integer(raw.max_text_calls, 1, 24)
+    || Object.hasOwn(raw, 'focus_timestamp_ms') && (raw.visual_mode !== 'frames' || !integer(raw.focus_timestamp_ms))) return null
+  return { question: raw.question, max_text_calls: raw.max_text_calls, ...(Object.hasOwn(raw, 'visual_mode') ? { visual_mode: raw.visual_mode as 'none' | 'frames' } : {}),
+    ...(Object.hasOwn(raw, 'focus_timestamp_ms') ? { focus_timestamp_ms: raw.focus_timestamp_ms as number } : {}) }
 }
 export function parseAgentSubmissionEntry(raw: unknown): AgentSubmissionEntry | null {
   if (!exact(raw, ['schema_version', 'kind', 'key', 'job_id', 'video_id', 'video_sha256', 'session_id', 'source', 'input'])
@@ -41,7 +44,10 @@ export function parseAgentSubmissionEntry(raw: unknown): AgentSubmissionEntry | 
   if (raw.kind === 'SESSION') { if (raw.session_id !== null || raw.source !== null) return null }
   else if (!uuid(raw.session_id) || !exact(raw.source, ['video_sha256', 'transcript_hash', 'duration_ms'])
     || raw.source.video_sha256 !== raw.video_sha256 || !hash(raw.source.transcript_hash) || !integer(raw.source.duration_ms, 1)) return null
-  try { if (!agentSubmissionInput(raw.kind as AgentSubmissionEntry['kind'], JSON.parse(raw.input))) return null } catch { return null }
+  try {
+    const input = agentSubmissionInput(raw.kind as AgentSubmissionEntry['kind'], JSON.parse(raw.input)) as AgentTurnSubmissionInput | null
+    if (!input || raw.kind === 'TURN' && input.focus_timestamp_ms !== undefined && input.focus_timestamp_ms >= (raw.source as { duration_ms: number }).duration_ms) return null
+  } catch { return null }
   return raw as unknown as AgentSubmissionEntry
 }
 export function agentSubmissionStorageKey(entry: AgentSubmissionEntry): string {
@@ -171,7 +177,8 @@ export function parseAgentSubmissionResponse(raw: unknown, entry: AgentSubmissio
   if (!session || session.id !== entry.session_id || session.job_id !== entry.job_id || session.video_id !== entry.video_id || !entry.source || !sameSource(session.source, entry.source)) fail()
   const verified = parseAgentSession(session, entry.job_id, entry.video_id, entry.video_sha256, entry.session_id!)
   const turn = parseAgentTurn(raw, verified), input = agentSubmissionInput('TURN', JSON.parse(entry.input)) as AgentTurnSubmissionInput
-  if (turn.question !== input.question || turn.budget.max_text_calls !== input.max_text_calls || (turn.visual_mode ?? 'none') !== (input.visual_mode ?? 'none')) fail()
+  if (turn.question !== input.question || turn.budget.max_text_calls !== input.max_text_calls || (turn.visual_mode ?? 'none') !== (input.visual_mode ?? 'none')
+    || turn.focus_timestamp_ms !== input.focus_timestamp_ms) fail()
   return { kind: 'TURN', session: verified, turn }
 }
 export function agentSubmissionBusinessNotFound(error: unknown, kind: AgentSubmissionEntry['kind']): boolean {
@@ -202,10 +209,14 @@ export async function resolveAgentSubmission(entry: AgentSubmissionEntry, io: {
   return io.current() ? result : null
 }
 /** Only completed acknowledgement in the original session may clear the still-identical submitted draft. */
-export function agentDraftAfterSubmission(entry: AgentSubmissionEntry, draft: { session_id: string; question: string; budget: number; visual_mode?: 'none' | 'frames' }): string {
-  if (entry.kind !== 'TURN' || draft.session_id !== entry.session_id) return draft.question
+export interface AgentSubmissionDraft { session_id: string; question: string; budget: number; visual_mode?: 'none' | 'frames'; focus_timestamp_ms?: number }
+export function agentDraftMatchesSubmission(entry: AgentSubmissionEntry, draft: AgentSubmissionDraft): boolean {
+  if (entry.kind !== 'TURN' || draft.session_id !== entry.session_id) return false
   const input = agentSubmissionInput('TURN', JSON.parse(entry.input)) as AgentTurnSubmissionInput
-  return draft.question.trim() === input.question && draft.budget === input.max_text_calls && (draft.visual_mode ?? 'none') === (input.visual_mode ?? 'none') ? '' : draft.question
+  return draft.question.trim() === input.question && draft.budget === input.max_text_calls && (draft.visual_mode ?? 'none') === (input.visual_mode ?? 'none') && draft.focus_timestamp_ms === input.focus_timestamp_ms
+}
+export function agentDraftAfterSubmission(entry: AgentSubmissionEntry, draft: AgentSubmissionDraft): string {
+  return agentDraftMatchesSubmission(entry, draft) ? '' : draft.question
 }
 /** Called only after this exact original POST returned AGENT_SESSION_LIMIT. Purely read-only inspection. */
 export async function inspectAgentSubmissionLimit(entry: AgentSubmissionEntry, io: {
