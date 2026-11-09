@@ -80,3 +80,25 @@ export function parseAgentAnswer(text: string): AgentAnswerBlock[] {
   }
   return blocks
 }
+
+/** Decode only the renderer's escaped text after parsing; never reinterpret it as markup. */
+function decodeMarkdownText(text: string): string {
+  const named: Record<string, string> = { '&amp;': '&', '&lt;': '<', '&gt;': '>', '&quot;': '"', '&apos;': "'" }
+  return text.replace(/\\([\x21-\x2f\x3a-\x40\x5b-\x60\x7b-\x7e])|&(?:amp|lt|gt|quot|apos|#(?:[0-9]{1,7}|[xX][0-9a-fA-F]{1,6}));/g,
+    (token: string, punctuation: string | undefined) => {
+      if (punctuation !== undefined) return punctuation
+      if (named[token] !== undefined) return named[token]!
+      const hex = token[2]?.toLowerCase() === 'x', point = Number.parseInt(token.slice(hex ? 3 : 2, -1), hex ? 16 : 10)
+      return point > 0 && point <= 0x10ffff && !(point >= 0xd800 && point <= 0xdfff) ? String.fromCodePoint(point) : token
+    })
+}
+/** Notes are safe Markdown documents, while ordinary answers retain their original grammar. */
+export function parseEscapedAgentAnswer(text: string): AgentAnswerBlock[] {
+  const runs = (line: AgentAnswerRun[]) => line.map(run => run.kind === 'code' ? { ...run } : { ...run, text: decodeMarkdownText(run.text) })
+  return parseAgentAnswer(text).map(block => {
+    if (block.kind === 'heading') return { ...block, content: runs(block.content) }
+    if (block.kind === 'paragraph') return { ...block, lines: block.lines.map(runs) }
+    if (block.kind === 'list') return { ...block, items: block.items.map(item => ({ ...item, lines: item.lines.map(runs) })) }
+    return block
+  })
+}

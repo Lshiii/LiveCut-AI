@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { parseAgentAnswer, parseAgentAnswerInline } from '../agentAnswer.ts'
+import { parseAgentAnswer, parseAgentAnswerInline, parseEscapedAgentAnswer } from '../agentAnswer.ts'
 
 test('paragraphs preserve physical line breaks and separate blank lines', () => {
   assert.deepEqual(parseAgentAnswer('第一行\r\n第二行\r\n\r\n下一段'), [
@@ -67,4 +67,40 @@ test('timestamps, decimal values, unicode and long tokens are never truncated or
   const blocks = parseAgentAnswer(text)
   assert.ok(blocks[0]?.kind === 'paragraph')
   assert.equal(blocks[0].lines.map(line => line.map(run => run.text).join('')).join('\n'), text)
+})
+
+test('note preview decodes escaped filenames and timestamps once while the ordinary answer path remains unchanged', () => {
+  const original = String.raw`视频\-v1\.2\.mp4 · 00\:02\:42\.533`
+  assert.deepEqual(parseEscapedAgentAnswer(original), [{ kind: 'paragraph', lines: [[
+    { kind: 'text', text: '视频-v1.2.mp4 · 00:02:42.533', strong: false },
+  ]] }])
+  assert.equal((parseAgentAnswer(original)[0] as any).lines[0][0].text, original)
+})
+
+test('note preview decodes a single entity layer into text, including renderer indentation and supplementary Unicode', () => {
+  const original = '&amp;lt;img&amp;gt; &lt;img src=x&gt; &#32;A&#9;B &#x1F600; &#128512; &#92;*'
+  const block = parseEscapedAgentAnswer(original)[0]
+  assert.equal(block?.kind, 'paragraph')
+  assert.equal((block as any).lines[0][0].text, '&lt;img&gt; <img src=x>  A\tB 😀 😀 \\*')
+  for (const invalid of ['&#0;', '&#xD800;', '&#1114112;', '&unknown;']) {
+    assert.equal((parseEscapedAgentAnswer(invalid)[0] as any).lines[0][0].text, invalid)
+  }
+})
+
+test('decoding follows AST parsing so literal emphasis, headings, lists and links never become active markup', () => {
+  const original = String.raw`\*\*字面强调\*\* &ast;\n\# 字面标题\n\- 字面列表`
+  const literal = parseEscapedAgentAnswer(original)[0] as any
+  assert.equal(literal.kind, 'paragraph'); assert.equal(literal.lines[0][0].strong, false)
+  assert.match(literal.lines[0][0].text, /^\*\*字面强调\*\*/)
+  const blocks = parseEscapedAgentAnswer(String.raw`\# 字面标题` + '\n' + String.raw`\- 字面列表` + '\n&#35; 实体标题')
+  assert.equal(blocks.length, 1); assert.equal(blocks[0]?.kind, 'paragraph')
+  const strong = parseEscapedAgentAnswer(String.raw`**已强调\: &lt;原句&gt;**`)[0] as any
+  assert.equal(strong.lines[0][0].text, '已强调: <原句>'); assert.equal(strong.lines[0][0].strong, true)
+})
+
+test('inline code retains its original escapes and entities while adjacent note text is decoded', () => {
+  const original = '`&lt; \\* &#32;` 外部\\: &amp;lt;'
+  assert.deepEqual((parseEscapedAgentAnswer(original)[0] as any).lines[0], [
+    { kind: 'code', text: '&lt; \\* &#32;', strong: false }, { kind: 'text', text: ' 外部: &lt;', strong: false },
+  ])
 })

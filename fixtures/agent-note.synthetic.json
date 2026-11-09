@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "turn_id": "00000000-0000-4000-8000-000000000004",
+  "session_id": "00000000-0000-4000-8000-000000000001",
+  "job_id": "00000000-0000-4000-8000-000000000002",
+  "video_id": "00000000-0000-4000-8000-000000000003",
+  "source_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "transcript_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "result_hash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "source_filename": "synthetic-note-example.mp4",
+  "answer_scope": "VIDEO",
+  "citation_count": 1,
+  "image_count": 1,
+  "markdown": "# 视频问答笔记\n\n这是合成协议夹具，不是真实模型输出或媒体证据。\n\n## 问题\n\n为什么分成两条路径？\n\n## 回答\n\n来自视频：本例按状态选择处理路径。\n\n## 原句依据\n\n00:00.000 → 00:01.000：合成原句。\n\n## 画面依据\n\nf0001，原视频00:00.000；图片在含图ZIP的 images/f0001.jpg 中。\n",
+  "download_filename": "video-note-00000000-0000-4000-8000-000000000004.zip"
+}
