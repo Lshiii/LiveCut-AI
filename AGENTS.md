@@ -43,6 +43,7 @@
 - 已收首答零调用恢复按 docs/75-已收回答零调用恢复.md：显式核对快照与幂等动作，新建协议3/额度0的派生轮次，原FAILED/账本/缓存只读保留。原SUCCEEDED响应wrapper与首答缓存/输入必须强绑定；仅在原身份验证后重绑定turn_id，新manifest走正常租约与来源验收。UNKNOWN、缺缓存、tool首答或仍需模型均拒绝；Java reserve硬拒与Python无密钥离线分支共同保证不新增请求，旧v1/v2不能领取。恢复回执与普通新问题草稿/未决提交分开，未知先查精确原key，不认领另一个key的既有child。
 - 单JAR工作台按 docs/76-单JAR工作台交付.md：仅opt-in workbench profile与全新独立输出，完整冻结UI及上传hash Worker，保持API/internal真实404和鉴权，不加SPA兜底。profile clean必须固定跳过防validate之前误删；源码/dist/包字节一致且不加载私有配置、不启动服务/Worker/模型。普通target不得污染，失败产物保留而不冒充成功。外置配置及repo/portable相对路径基准分开，切origin不自动迁移或清除草稿/未决回执；运行Java仍可能迁移DB与扫描维护，不称只读。此前自动UI启动被审批拒绝，不可换服务或端口绕过；无监听MockMvc、包检与有限静态浏览器验收需标明实际范围。
 - OCR高帧发布按 docs/77-OCR高帧结果发布.md：仅普通分析SEGMENT超过64项时放行完整固定OCR清单，最多120个连续编号JPEG、5项固定产物及可选trace，共126项；其他类型、旧≤64行为及来源/hash/租约守卫保持。Java与Python共享合成边界Fixture，不把结构验收说成识别效果，也不自动复活旧失败任务、重置预算或重发UNKNOWN请求。
+- Agent画面文字定位按 docs/78-Agent画面文字定位.md：显式screen_search_v1/1.5/协议4，仅同任务已发布完整OCR，冻结私有来源及公开index摘要，不读取全局cache或自动重跑；复合MODEL工具用原requested取标准新图并核exact有理PTS，不把OCR当ASR/图片或变化证据。HashRow只对raw UTF-8文字先SHA，保旧canonical；全部请求含重试仍计原账本，500 UNKNOWN记录保留。旧1.0～1.4、未决body及协议3恢复不扩范围；公开验证不假称重算完整index，内部投影不改真实轨迹。
 - 按 docs/03-AI开发任务书.md 的关口推进，先真实算法验证，再扩建前端与 MQ。
 - contracts 是跨 Java/Python/前端的共同契约；字段变更同步文档与各调用方。
 

@@ -23,6 +23,8 @@ def test_bootstrap_controls_exact_legacy_or_versioned_register_and_ready_wire(su
             return httpx.Response(200, json={"speech_lookup_supported": True, "worker_protocol": 2}) if supported else httpx.Response(404, text="old server")
         if request.url.path == "/api/agent-capabilities/cached-answer-replay":
             return httpx.Response(404, text="old server")
+        if request.url.path == "/api/agent-capabilities/screen-search":
+            return httpx.Response(404, text="old server")
         if request.url.path == "/internal/workers/register":
             return httpx.Response(200, json={"worker_id": worker_id, "session_id": session_id, "outcome": "REGISTERED",
                 "heartbeat_timeout_seconds": 35, "last_seen_at": "2026-11-11T00:00:00Z"})
@@ -65,7 +67,7 @@ def test_only_actual_http_404_can_select_old_protocol(status, body):
     assert requests == ["/api/agent-capabilities/speech-lookup"]
 
 
-@pytest.mark.parametrize("versions", [[], [True], [1, 1], [4], [None], "1,2"])
+@pytest.mark.parametrize("versions", [[], [True], [1, 1], [5], [None], "1,2"])
 def test_invalid_registration_versions_are_rejected_before_dispatch(versions):
     client = WorkerClient("http://localhost", "synthetic-key", transport=httpx.MockTransport(lambda _: pytest.fail("No register dispatch")))
     try:

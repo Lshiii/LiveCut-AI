@@ -9,12 +9,12 @@ public final class AgentSpeechLookup {
     private AgentSpeechLookup() {}
     public static final String POLICY="speech_lookup_v1",PROMPT="video-agent-evidence-speech-v1";
     public static boolean enabled(Map<String,Object> owner){
-        Object value=owner.get("evidence_policy");if(value==null||"none".equals(value))return false;
+        Object value=owner.get("evidence_policy");if(value==null||"none".equals(value)||AgentScreenSearch.POLICY.equals(value)){if(AgentScreenSearch.POLICY.equals(value))AgentScreenSearch.enabled(owner);return false;}
         if(!POLICY.equals(value)||!AgentEvidence.structured(owner))throw new JobException(HttpStatus.CONFLICT,"AGENT_SUBMISSION_INVALID","Stored speech lookup policy no longer matches its frozen mode");
         return true;
     }
-    public static String publicPolicy(Map<String,Object> owner){return enabled(owner)?POLICY:null;}
-    public static int requiredProtocol(Map<String,Object> owner){return AgentResponseReplayData.isReplay(owner)?3:enabled(owner)?2:1;}
+    public static String publicPolicy(Map<String,Object> owner){return AgentScreenSearch.enabled(owner)?AgentScreenSearch.POLICY:enabled(owner)?POLICY:null;}
+    public static int requiredProtocol(Map<String,Object> owner){return AgentResponseReplayData.isReplay(owner)?3:AgentScreenSearch.enabled(owner)?4:enabled(owner)?2:1;}
     public record Query(String text,boolean truncated) {}
     public static Query query(String question){
         int start=0,end=question.length();while(start<end&&trimSpace(question.charAt(start)))start++;while(end>start&&trimSpace(question.charAt(end-1)))end--;

@@ -1,0 +1,4984 @@
+{
+  "schema_version": 1,
+  "data_kind": "synthetic_fixture",
+  "note": "Protocol/lookup vectors only. Marker hashes and frame metadata are synthetic; no real JPEG, provider result, semantic quality or full-published-source claim.",
+  "duration_ms": 120000,
+  "source_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "utterances": [
+    {
+      "utterance_id": "u1",
+      "start_ms": 0,
+      "end_ms": 1500,
+      "text": "这里增加缓存层来承接重复读取。",
+      "source_chunk_id": "chunk0"
+    }
+  ],
+  "rows": [
+    {
+      "ocr_frame_id": "ocr_000001",
+      "requested_ms": 20000,
+      "ocr_timestamp_ms": 20001,
+      "source_pts": 20000,
+      "source_time_base": "1/1000",
+      "observed_text": "Redis L1 缓存",
+      "ocr_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+    },
+    {
+      "ocr_frame_id": "ocr_000002",
+      "requested_ms": 60000,
+      "ocr_timestamp_ms": 60000,
+      "source_pts": 60000,
+      "source_time_base": "1/1000",
+      "observed_text": "Redis L2 缓存",
+      "ocr_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+    },
+    {
+      "ocr_frame_id": "ocr_000003",
+      "requested_ms": 100000,
+      "ocr_timestamp_ms": 100000,
+      "source_pts": 100000,
+      "source_time_base": "1/1000",
+      "observed_text": "缓存失效 CacheMiss Straße ＡＡ \u0000 \u001b \\u001B payload",
+      "ocr_sha256": "0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a"
+    }
+  ],
+  "screen_source": {
+    "segment_stage_id": "55555555-5555-4555-8555-555555555555",
+    "segment_manifest_hash": "1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a",
+    "frames_hash": "2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
+    "observations_hash": "3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c",
+    "index_version": "screen-text-literal-v1",
+    "index_hash": "5b0f2b36168883f100f980a33eb4c9ada0179667cb4dcea50c7ca732c828e0de",
+    "duration_ms": 120000,
+    "sampling_policy": "uniform",
+    "interval_ms": 45000,
+    "frame_count": 3,
+    "text_frame_count": 3,
+    "coverage_truncated": false
+  },
+  "query_cases": [
+    {
+      "case_id": "ascii_case",
+      "arguments": {
+        "query": "rEdIs",
+        "top_k": 3
+      },
+      "expected_valid": true,
+      "expected_frame_ids": [
+        "ocr_000001",
+        "ocr_000002"
+      ],
+      "expected_total_match_count": 2
+    },
+    {
+      "case_id": "literal_and",
+      "arguments": {
+        "query": "Redis L2",
+        "top_k": 3
+      },
+      "expected_valid": true,
+      "expected_frame_ids": [
+        "ocr_000002"
+      ],
+      "expected_total_match_count": 1
+    },
+    {
+      "case_id": "chinese_literal",
+      "arguments": {
+        "query": "缓存失效",
+        "top_k": 1
+      },
+      "expected_valid": true,
+      "expected_frame_ids": [
+        "ocr_000003"
+      ],
+      "expected_total_match_count": 1
+    },
+    {
+      "case_id": "no_nfkc",
+      "arguments": {
+        "query": "AA",
+        "top_k": 3
+      },
+      "expected_valid": true,
+      "expected_frame_ids": [],
+      "expected_total_match_count": 0
+    },
+    {
+      "case_id": "no_unicode_casefold",
+      "arguments": {
+        "query": "strasse",
+        "top_k": 3
+      },
+      "expected_valid": true,
+      "expected_frame_ids": [],
+      "expected_total_match_count": 0
+    },
+    {
+      "case_id": "sharp_s_literal",
+      "arguments": {
+        "query": "straße",
+        "top_k": 3
+      },
+      "expected_valid": true,
+      "expected_frame_ids": [
+        "ocr_000003"
+      ],
+      "expected_total_match_count": 1
+    },
+    {
+      "case_id": "ideographic_space",
+      "arguments": {
+        "query": " Redis　L1 ",
+        "top_k": 3
+      },
+      "expected_valid": true,
+      "expected_frame_ids": [
+        "ocr_000001"
+      ],
+      "expected_total_match_count": 1
+    },
+    {
+      "case_id": "vertical_tab_separator",
+      "arguments": {
+        "query": "Redis\u000bL1",
+        "top_k": 3
+      },
+      "expected_valid": true,
+      "expected_frame_ids": [
+        "ocr_000001"
+      ],
+      "expected_total_match_count": 1
+    },
+    {
+      "case_id": "raw_8_duplicates",
+      "arguments": {
+        "query": "Redis Redis Redis Redis Redis Redis Redis Redis",
+        "top_k": 3
+      },
+      "expected_valid": true,
+      "expected_frame_ids": [
+        "ocr_000001",
+        "ocr_000002"
+      ],
+      "expected_total_match_count": 2
+    },
+    {
+      "case_id": "raw_9_duplicates",
+      "arguments": {
+        "query": "Redis Redis Redis Redis Redis Redis Redis Redis Redis",
+        "top_k": 3
+      },
+      "expected_valid": false,
+      "expected_frame_ids": [],
+      "expected_total_match_count": 0
+    },
+    {
+      "case_id": "all_js_space",
+      "arguments": {
+        "query": "﻿　\u000b",
+        "top_k": 3
+      },
+      "expected_valid": false,
+      "expected_frame_ids": [],
+      "expected_total_match_count": 0
+    },
+    {
+      "case_id": "utf16_ascii_120",
+      "arguments": {
+        "query": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        "top_k": 3
+      },
+      "expected_valid": true,
+      "expected_frame_ids": [],
+      "expected_total_match_count": 0
+    },
+    {
+      "case_id": "utf16_ascii_121",
+      "arguments": {
+        "query": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        "top_k": 3
+      },
+      "expected_valid": false,
+      "expected_frame_ids": [],
+      "expected_total_match_count": 0
+    },
+    {
+      "case_id": "utf16_emoji_120",
+      "arguments": {
+        "query": "😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀",
+        "top_k": 3
+      },
+      "expected_valid": true,
+      "expected_frame_ids": [],
+      "expected_total_match_count": 0
+    },
+    {
+      "case_id": "utf16_emoji_122",
+      "arguments": {
+        "query": "😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀",
+        "top_k": 3
+      },
+      "expected_valid": false,
+      "expected_frame_ids": [],
+      "expected_total_match_count": 0
+    },
+    {
+      "case_id": "c1_not_js_space",
+      "arguments": {
+        "query": "RedisL1",
+        "top_k": 3
+      },
+      "expected_valid": false,
+      "expected_frame_ids": [],
+      "expected_total_match_count": 0
+    },
+    {
+      "case_id": "query_nul",
+      "arguments": {
+        "query": "Redis\u0000",
+        "top_k": 3
+      },
+      "expected_valid": false,
+      "expected_frame_ids": [],
+      "expected_total_match_count": 0
+    },
+    {
+      "case_id": "source_nul_preserved",
+      "arguments": {
+        "query": "payload",
+        "top_k": 3
+      },
+      "expected_valid": true,
+      "expected_frame_ids": [
+        "ocr_000003"
+      ],
+      "expected_total_match_count": 1
+    },
+    {
+      "case_id": "top_k_keeps_full_count",
+      "arguments": {
+        "query": "Redis",
+        "top_k": 1
+      },
+      "expected_valid": true,
+      "expected_frame_ids": [
+        "ocr_000001"
+      ],
+      "expected_total_match_count": 2
+    },
+    {
+      "case_id": "literal_backslash_unicode_is_not_escape",
+      "arguments": {
+        "query": "\\u001b",
+        "top_k": 1
+      },
+      "expected_valid": true,
+      "expected_frame_ids": [
+        "ocr_000003"
+      ],
+      "expected_total_match_count": 1
+    }
+  ],
+  "cases": [
+    {
+      "case_id": "observed_old_display_rounding",
+      "expected_valid": true,
+      "reason": "valid public source and receipt",
+      "duration_ms": 120000,
+      "screen_source": {
+        "segment_stage_id": "55555555-5555-4555-8555-555555555555",
+        "segment_manifest_hash": "1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a",
+        "frames_hash": "2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
+        "observations_hash": "3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c",
+        "index_version": "screen-text-literal-v1",
+        "index_hash": "5b0f2b36168883f100f980a33eb4c9ada0179667cb4dcea50c7ca732c828e0de",
+        "duration_ms": 120000,
+        "sampling_policy": "uniform",
+        "interval_ms": 45000,
+        "frame_count": 3,
+        "text_frame_count": 3,
+        "coverage_truncated": false
+      },
+      "rows": [
+        {
+          "ocr_frame_id": "ocr_000001",
+          "requested_ms": 20000,
+          "ocr_timestamp_ms": 20001,
+          "source_pts": 20000,
+          "source_time_base": "1/1000",
+          "observed_text": "Redis L1 缓存",
+          "ocr_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        },
+        {
+          "ocr_frame_id": "ocr_000002",
+          "requested_ms": 60000,
+          "ocr_timestamp_ms": 60000,
+          "source_pts": 60000,
+          "source_time_base": "1/1000",
+          "observed_text": "Redis L2 缓存",
+          "ocr_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+        },
+        {
+          "ocr_frame_id": "ocr_000003",
+          "requested_ms": 100000,
+          "ocr_timestamp_ms": 100000,
+          "source_pts": 100000,
+          "source_time_base": "1/1000",
+          "observed_text": "缓存失效 CacheMiss Straße ＡＡ \u0000 \u001b \\u001B payload",
+          "ocr_sha256": "0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a"
+        }
+      ],
+      "result": {
+        "schema_version": "1.5",
+        "session_id": "11111111-1111-4111-8111-111111111111",
+        "turn_id": "22222222-2222-4222-8222-222222222222",
+        "job_id": "33333333-3333-4333-8333-333333333333",
+        "video_id": "44444444-4444-4444-8444-444444444444",
+        "source_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "transcript_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "question": "合成协议样例：按画面中的缓存术语查找并看图。",
+        "answer": "【画面观察 b01】\n合成截图中包含缓存术语。",
+        "answer_scope": "VIDEO",
+        "citations": [],
+        "tool_calls": [
+          {
+            "step": 1,
+            "tool_name": "search_screen_text",
+            "arguments": {
+              "query": "redis l1",
+              "top_k": 1
+            },
+            "result_utterance_ids": [],
+            "result_frame_ids": [
+              "f0001"
+            ],
+            "origin": "MODEL"
+          }
+        ],
+        "provenance": {
+          "text_model_id": "synthetic-vl",
+          "prompt_version": "video-agent-evidence-screen-v1",
+          "retrieval_mode": "none"
+        },
+        "suggested_clip_instruction": null,
+        "visual_evidence": [
+          {
+            "frame_id": "f0001",
+            "requested_ms": 20000,
+            "timestamp_ms": 20000,
+            "source_pts": 20000,
+            "source_time_base": "1/1000",
+            "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "bytes": 1234,
+            "width": 1280,
+            "height": 720
+          }
+        ],
+        "visual_citations": [
+          {
+            "frame_id": "f0001",
+            "explanation": "关联分项：b01"
+          }
+        ],
+        "evidence_mode": "structured",
+        "answer_blocks": [
+          {
+            "block_id": "b01",
+            "kind": "FRAME",
+            "text": "合成截图中包含缓存术语。",
+            "utterance_ids": [],
+            "frame_ids": [
+              "f0001"
+            ]
+          }
+        ],
+        "evidence_policy": "screen_search_v1",
+        "screen_source": {
+          "segment_stage_id": "55555555-5555-4555-8555-555555555555",
+          "segment_manifest_hash": "1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a",
+          "frames_hash": "2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
+          "observations_hash": "3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c",
+          "index_version": "screen-text-literal-v1",
+          "index_hash": "5b0f2b36168883f100f980a33eb4c9ada0179667cb4dcea50c7ca732c828e0de",
+          "duration_ms": 120000,
+          "sampling_policy": "uniform",
+          "interval_ms": 45000,
+          "frame_count": 3,
+          "text_frame_count": 3,
+          "coverage_truncated": false
+        },
+        "screen_searches": [
+          {
+            "tool_step": 1,
+            "status": "OBSERVED",
+            "error_code": null,
+            "total_match_count": 1,
+            "hits": [
+              {
+                "ocr_frame_id": "ocr_000001",
+                "requested_ms": 20000,
+                "ocr_timestamp_ms": 20001,
+                "source_pts": 20000,
+                "source_time_base": "1/1000",
+                "observed_text": "Redis L1 缓存",
+                "frame_id": "f0001"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "old_display_one_below_requested",
+      "expected_valid": true,
+      "reason": "valid public source and receipt",
+      "duration_ms": 120000,
+      "screen_source": {
+        "segment_stage_id": "55555555-5555-4555-8555-555555555555",
+        "segment_manifest_hash": "1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a",
+        "frames_hash": "2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
+        "observations_hash": "3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c",
+        "index_version": "screen-text-literal-v1",
+        "index_hash": "07e8cdf2059d3fbc1e173ab4ef8627fc8165c08308e78017dbd645ab734ce8c5",
+        "duration_ms": 120000,
+        "sampling_policy": "uniform",
+        "interval_ms": 45000,
+        "frame_count": 3,
+        "text_frame_count": 3,
+        "coverage_truncated": false
+      },
+      "rows": [
+        {
+          "ocr_frame_id": "ocr_000001",
+          "requested_ms": 20000,
+          "ocr_timestamp_ms": 19999,
+          "source_pts": 20000,
+          "source_time_base": "1/1000",
+          "observed_text": "Redis L1 缓存",
+          "ocr_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        },
+        {
+          "ocr_frame_id": "ocr_000002",
+          "requested_ms": 60000,
+          "ocr_timestamp_ms": 60000,
+          "source_pts": 60000,
+          "source_time_base": "1/1000",
+          "observed_text": "Redis L2 缓存",
+          "ocr_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+        },
+        {
+          "ocr_frame_id": "ocr_000003",
+          "requested_ms": 100000,
+          "ocr_timestamp_ms": 100000,
+          "source_pts": 100000,
+          "source_time_base": "1/1000",
+          "observed_text": "缓存失效 CacheMiss Straße ＡＡ \u0000 \u001b \\u001B payload",
+          "ocr_sha256": "0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a"
+        }
+      ],
+      "result": {
+        "schema_version": "1.5",
+        "session_id": "11111111-1111-4111-8111-111111111111",
+        "turn_id": "22222222-2222-4222-8222-222222222222",
+        "job_id": "33333333-3333-4333-8333-333333333333",
+        "video_id": "44444444-4444-4444-8444-444444444444",
+        "source_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "transcript_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "question": "合成协议样例：按画面中的缓存术语查找并看图。",
+        "answer": "【画面观察 b01】\n合成截图中包含缓存术语。",
+        "answer_scope": "VIDEO",
+        "citations": [],
+        "tool_calls": [
+          {
+            "step": 1,
+            "tool_name": "search_screen_text",
+            "arguments": {
+              "query": "redis l1",
+              "top_k": 1
+            },
+            "result_utterance_ids": [],
+            "result_frame_ids": [
+              "f0001"
+            ],
+            "origin": "MODEL"
+          }
+        ],
+        "provenance": {
+          "text_model_id": "synthetic-vl",
+          "prompt_version": "video-agent-evidence-screen-v1",
+          "retrieval_mode": "none"
+        },
+        "suggested_clip_instruction": null,
+        "visual_evidence": [
+          {
+            "frame_id": "f0001",
+            "requested_ms": 20000,
+            "timestamp_ms": 20000,
+            "source_pts": 20000,
+            "source_time_base": "1/1000",
+            "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "bytes": 1234,
+            "width": 1280,
+            "height": 720
+          }
+        ],
+        "visual_citations": [
+          {
+            "frame_id": "f0001",
+            "explanation": "关联分项：b01"
+          }
+        ],
+        "evidence_mode": "structured",
+        "answer_blocks": [
+          {
+            "block_id": "b01",
+            "kind": "FRAME",
+            "text": "合成截图中包含缓存术语。",
+            "utterance_ids": [],
+            "frame_ids": [
+              "f0001"
+            ]
+          }
+        ],
+        "evidence_policy": "screen_search_v1",
+        "screen_source": {
+          "segment_stage_id": "55555555-5555-4555-8555-555555555555",
+          "segment_manifest_hash": "1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a",
+          "frames_hash": "2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
+          "observations_hash": "3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c",
+          "index_version": "screen-text-literal-v1",
+          "index_hash": "07e8cdf2059d3fbc1e173ab4ef8627fc8165c08308e78017dbd645ab734ce8c5",
+          "duration_ms": 120000,
+          "sampling_policy": "uniform",
+          "interval_ms": 45000,
+          "frame_count": 3,
+          "text_frame_count": 3,
+          "coverage_truncated": false
+        },
+        "screen_searches": [
+          {
+            "tool_step": 1,
+            "status": "OBSERVED",
+            "error_code": null,
+            "total_match_count": 1,
+            "hits": [
+              {
+                "ocr_frame_id": "ocr_000001",
+                "requested_ms": 20000,
+                "ocr_timestamp_ms": 19999,
+                "source_pts": 20000,
+                "source_time_base": "1/1000",
+                "observed_text": "Redis L1 缓存",
+                "frame_id": "f0001"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "old_display_one_above_agent_delta",
+      "expected_valid": true,
+      "reason": "valid public source and receipt",
+      "duration_ms": 120000,
+      "screen_source": {
+        "segment_stage_id": "55555555-5555-4555-8555-555555555555",
+        "segment_manifest_hash": "1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a",
+        "frames_hash": "2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
+        "observations_hash": "3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c",
+        "index_version": "screen-text-literal-v1",
+        "index_hash": "52044ff1d951b2d6a063df06e178b25fc862a11ca5968c9b8bfe44ef2a071cd2",
+        "duration_ms": 120000,
+        "sampling_policy": "uniform",
+        "interval_ms": 45000,
+        "frame_count": 3,
+        "text_frame_count": 3,
+        "coverage_truncated": false
+      },
+      "rows": [
+        {
+          "ocr_frame_id": "ocr_000001",
+          "requested_ms": 20000,
+          "ocr_timestamp_ms": 21001,
+          "source_pts": 21000,
+          "source_time_base": "1/1000",
+          "observed_text": "Redis L1 缓存",
+          "ocr_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        },
+        {
+          "ocr_frame_id": "ocr_000002",
+          "requested_ms": 60000,
+          "ocr_timestamp_ms": 60000,
+          "source_pts": 60000,
+          "source_time_base": "1/1000",
+          "observed_text": "Redis L2 缓存",
+          "ocr_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+        },
+        {
+          "ocr_frame_id": "ocr_000003",
+          "requested_ms": 100000,
+          "ocr_timestamp_ms": 100000,
+          "source_pts": 100000,
+          "source_time_base": "1/1000",
+          "observed_text": "缓存失效 CacheMiss Straße ＡＡ \u0000 \u001b \\u001B payload",
+          "ocr_sha256": "0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a"
+        }
+      ],
+      "result": {
+        "schema_version": "1.5",
+        "session_id": "11111111-1111-4111-8111-111111111111",
+        "turn_id": "22222222-2222-4222-8222-222222222222",
+        "job_id": "33333333-3333-4333-8333-333333333333",
+        "video_id": "44444444-4444-4444-8444-444444444444",
+        "source_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "transcript_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "question": "合成协议样例：按画面中的缓存术语查找并看图。",
+        "answer": "【画面观察 b01】\n合成截图中包含缓存术语。",
+        "answer_scope": "VIDEO",
+        "citations": [],
+        "tool_calls": [
+          {
+            "step": 1,
+            "tool_name": "search_screen_text",
+            "arguments": {
+              "query": "redis l1",
+              "top_k": 1
+            },
+            "result_utterance_ids": [],
+            "result_frame_ids": [
+              "f0001"
+            ],
+            "origin": "MODEL"
+          }
+        ],
+        "provenance": {
+          "text_model_id": "synthetic-vl",
+          "prompt_version": "video-agent-evidence-screen-v1",
+          "retrieval_mode": "none"
+        },
+        "suggested_clip_instruction": null,
+        "visual_evidence": [
+          {
+            "frame_id": "f0001",
+            "requested_ms": 20000,
+            "timestamp_ms": 21000,
+            "source_pts": 21000,
+            "source_time_base": "1/1000",
+            "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "bytes": 1234,
+            "width": 1280,
+            "height": 720
+          }
+        ],
+        "visual_citations": [
+          {
+            "frame_id": "f0001",
+            "explanation": "关联分项：b01"
+          }
+        ],
+        "evidence_mode": "structured",
+        "answer_blocks": [
+          {
+            "block_id": "b01",
+            "kind": "FRAME",
+            "text": "合成截图中包含缓存术语。",
+            "utterance_ids": [],
+            "frame_ids": [
+              "f0001"
+            ]
+          }
+        ],
+        "evidence_policy": "screen_search_v1",
+        "screen_source": {
+          "segment_stage_id": "55555555-5555-4555-8555-555555555555",
+          "segment_manifest_hash": "1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a",
+          "frames_hash": "2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
+          "observations_hash": "3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c",
+          "index_version": "screen-text-literal-v1",
+          "index_hash": "52044ff1d951b2d6a063df06e178b25fc862a11ca5968c9b8bfe44ef2a071cd2",
+          "duration_ms": 120000,
+          "sampling_policy": "uniform",
+          "interval_ms": 45000,
+          "frame_count": 3,
+          "text_frame_count": 3,
+          "coverage_truncated": false
+        },
+        "screen_searches": [
+          {
+            "tool_step": 1,
+            "status": "OBSERVED",
+            "error_code": null,
+            "total_match_count": 1,
+            "hits": [
+              {
+                "ocr_frame_id": "ocr_000001",
+                "requested_ms": 20000,
+                "ocr_timestamp_ms": 21001,
+                "source_pts": 21000,
+                "source_time_base": "1/1000",
+                "observed_text": "Redis L1 缓存",
+                "frame_id": "f0001"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "two_chronological_hits",
+      "expected_valid": true,
+      "reason": "valid public source and receipt",
+      "duration_ms": 120000,
+      "screen_source": {
+        "segment_stage_id": "55555555-5555-4555-8555-555555555555",
+        "segment_manifest_hash": "1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a",
+        "frames_hash": "2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
+        "observations_hash": "3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c",
+        "index_version": "screen-text-literal-v1",
+        "index_hash": "5b0f2b36168883f100f980a33eb4c9ada0179667cb4dcea50c7ca732c828e0de",
+        "duration_ms": 120000,
+        "sampling_policy": "uniform",
+        "interval_ms": 45000,
+        "frame_count": 3,
+        "text_frame_count": 3,
+        "coverage_truncated": false
+      },
+      "rows": [
+        {
+          "ocr_frame_id": "ocr_000001",
+          "requested_ms": 20000,
+          "ocr_timestamp_ms": 20001,
+          "source_pts": 20000,
+          "source_time_base": "1/1000",
+          "observed_text": "Redis L1 缓存",
+          "ocr_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        },
+        {
+          "ocr_frame_id": "ocr_000002",
+          "requested_ms": 60000,
+          "ocr_timestamp_ms": 60000,
+          "source_pts": 60000,
+          "source_time_base": "1/1000",
+          "observed_text": "Redis L2 缓存",
+          "ocr_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+        },
+        {
+          "ocr_frame_id": "ocr_000003",
+          "requested_ms": 100000,
+          "ocr_timestamp_ms": 100000,
+          "source_pts": 100000,
+          "source_time_base": "1/1000",
+          "observed_text": "缓存失效 CacheMiss Straße ＡＡ \u0000 \u001b \\u001B payload",
+          "ocr_sha256": "0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a"
+        }
+      ],
+      "result": {
+        "schema_version": "1.5",
+        "session_id": "11111111-1111-4111-8111-111111111111",
+        "turn_id": "22222222-2222-4222-8222-222222222222",
+        "job_id": "33333333-3333-4333-8333-333333333333",
+        "video_id": "44444444-4444-4444-8444-444444444444",
+        "source_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "transcript_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "question": "合成协议样例：按画面中的缓存术语查找并看图。",
+        "answer": "【画面观察 b01】\n合成截图中包含缓存术语。",
+        "answer_scope": "VIDEO",
+        "citations": [],
+        "tool_calls": [
+          {
+            "step": 1,
+            "tool_name": "search_screen_text",
+            "arguments": {
+              "query": "Redis 缓存",
+              "top_k": 3
+            },
+            "result_utterance_ids": [],
+            "result_frame_ids": [
+              "f0001",
+              "f0002"
+            ],
+            "origin": "MODEL"
+          }
+        ],
+        "provenance": {
+          "text_model_id": "synthetic-vl",
+          "prompt_version": "video-agent-evidence-screen-v1",
+          "retrieval_mode": "none"
+        },
+        "suggested_clip_instruction": null,
+        "visual_evidence": [
+          {
+            "frame_id": "f0001",
+            "requested_ms": 20000,
+            "timestamp_ms": 20000,
+            "source_pts": 20000,
+            "source_time_base": "1/1000",
+            "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "bytes": 1234,
+            "width": 1280,
+            "height": 720
+          },
+          {
+            "frame_id": "f0002",
+            "requested_ms": 60000,
+            "timestamp_ms": 60000,
+            "source_pts": 60000,
+            "source_time_base": "1/1000",
+            "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "bytes": 1234,
+            "width": 1280,
+            "height": 720
+          }
+        ],
+        "visual_citations": [
+          {
+            "frame_id": "f0001",
+            "explanation": "关联分项：b01"
+          },
+          {
+            "frame_id": "f0002",
+            "explanation": "关联分项：b01"
+          }
+        ],
+        "evidence_mode": "structured",
+        "answer_blocks": [
+          {
+            "block_id": "b01",
+            "kind": "FRAME",
+            "text": "合成截图中包含缓存术语。",
+            "utterance_ids": [],
+            "frame_ids": [
+              "f0001",
+              "f0002"
+            ]
+          }
+        ],
+        "evidence_policy": "screen_search_v1",
+        "screen_source": {
+          "segment_stage_id": "55555555-5555-4555-8555-555555555555",
+          "segment_manifest_hash": "1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a",
+          "frames_hash": "2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
+          "observations_hash": "3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c",
+          "index_version": "screen-text-literal-v1",
+          "index_hash": "5b0f2b36168883f100f980a33eb4c9ada0179667cb4dcea50c7ca732c828e0de",
+          "duration_ms": 120000,
+          "sampling_policy": "uniform",
+          "interval_ms": 45000,
+          "frame_count": 3,
+          "text_frame_count": 3,
+          "coverage_truncated": false
+        },
+        "screen_searches": [
+          {
+            "tool_step": 1,
+            "status": "OBSERVED",
+            "error_code": null,
+            "total_match_count": 2,
+            "hits": [
+              {
+                "ocr_frame_id": "ocr_000001",
+                "requested_ms": 20000,
+                "ocr_timestamp_ms": 20001,
+                "source_pts": 20000,
+                "source_time_base": "1/1000",
+                "observed_text": "Redis L1 缓存",
+                "frame_id": "f0001"
+              },
+              {
+                "ocr_frame_id": "ocr_000002",
+                "requested_ms": 60000,
+                "ocr_timestamp_ms": 60000,
+                "source_pts": 60000,
+                "source_time_base": "1/1000",
+                "observed_text": "Redis L2 缓存",
+                "frame_id": "f0002"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "focus_late_then_early_ids_not_sorted",
+      "expected_valid": true,
+      "reason": "valid public source and receipt",
+      "duration_ms": 120000,
+      "screen_source": {
+        "segment_stage_id": "55555555-5555-4555-8555-555555555555",
+        "segment_manifest_hash": "1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a",
+        "frames_hash": "2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
+        "observations_hash": "3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c",
+        "index_version": "screen-text-literal-v1",
+        "index_hash": "5b0f2b36168883f100f980a33eb4c9ada0179667cb4dcea50c7ca732c828e0de",
+        "duration_ms": 120000,
+        "sampling_policy": "uniform",
+        "interval_ms": 45000,
+        "frame_count": 3,
+        "text_frame_count": 3,
+        "coverage_truncated": false
+      },
+      "rows": [
+        {
+          "ocr_frame_id": "ocr_000001",
+          "requested_ms": 20000,
+          "ocr_timestamp_ms": 20001,
+          "source_pts": 20000,
+          "source_time_base": "1/1000",
+          "observed_text": "Redis L1 缓存",
+          "ocr_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        },
+        {
+          "ocr_frame_id": "ocr_000002",
+          "requested_ms": 60000,
+          "ocr_timestamp_ms": 60000,
+          "source_pts": 60000,
+          "source_time_base": "1/1000",
+          "observed_text": "Redis L2 缓存",
+          "ocr_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+        },
+        {
+          "ocr_frame_id": "ocr_000003",
+          "requested_ms": 100000,
+          "ocr_timestamp_ms": 100000,
+          "source_pts": 100000,
+          "source_time_base": "1/1000",
+          "observed_text": "缓存失效 CacheMiss Straße ＡＡ \u0000 \u001b \\u001B payload",
+          "ocr_sha256": "0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a"
+        }
+      ],
+      "result": {
+        "schema_version": "1.5",
+        "session_id": "11111111-1111-4111-8111-111111111111",
+        "turn_id": "22222222-2222-4222-8222-222222222222",
+        "job_id": "33333333-3333-4333-8333-333333333333",
+        "video_id": "44444444-4444-4444-8444-444444444444",
+        "source_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "transcript_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "question": "合成协议样例：按画面中的缓存术语查找并看图。",
+        "answer": "【画面观察 b01】\n合成截图中包含缓存术语。",
+        "answer_scope": "VIDEO",
+        "citations": [],
+        "tool_calls": [
+          {
+            "step": 1,
+            "tool_name": "inspect_frames",
+            "arguments": {
+              "timestamps_ms": [
+                60000
+              ]
+            },
+            "result_utterance_ids": [],
+            "result_frame_ids": [
+              "f0001"
+            ],
+            "origin": "USER_FOCUS"
+          },
+          {
+            "step": 2,
+            "tool_name": "search_screen_text",
+            "arguments": {
+              "query": "Redis",
+              "top_k": 3
+            },
+            "result_utterance_ids": [],
+            "result_frame_ids": [
+              "f0002",
+              "f0001"
+            ],
+            "origin": "MODEL"
+          }
+        ],
+        "provenance": {
+          "text_model_id": "synthetic-vl",
+          "prompt_version": "video-agent-evidence-screen-v1",
+          "retrieval_mode": "none"
+        },
+        "suggested_clip_instruction": null,
+        "visual_evidence": [
+          {
+            "frame_id": "f0001",
+            "requested_ms": 60000,
+            "timestamp_ms": 60000,
+            "source_pts": 60000,
+            "source_time_base": "1/1000",
+            "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "bytes": 1234,
+            "width": 1280,
+            "height": 720
+          },
+          {
+            "frame_id": "f0002",
+            "requested_ms": 20000,
+            "timestamp_ms": 20000,
+            "source_pts": 20000,
+            "source_time_base": "1/1000",
+            "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "bytes": 1234,
+            "width": 1280,
+            "height": 720
+          }
+        ],
+        "visual_citations": [
+          {
+            "frame_id": "f0001",
+            "explanation": "关联分项：b01"
+          },
+          {
+            "frame_id": "f0002",
+            "explanation": "关联分项：b01"
+          }
+        ],
+        "evidence_mode": "structured",
+        "answer_blocks": [
+          {
+            "block_id": "b01",
+            "kind": "FRAME",
+            "text": "合成截图中包含缓存术语。",
+            "utterance_ids": [],
+            "frame_ids": [
+              "f0001",
+              "f0002"
+            ]
+          }
+        ],
+        "evidence_policy": "screen_search_v1",
+        "screen_source": {
+          "segment_stage_id": "55555555-5555-4555-8555-555555555555",
+          "segment_manifest_hash": "1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a",
+          "frames_hash": "2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
+          "observations_hash": "3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c",
+          "index_version": "screen-text-literal-v1",
+          "index_hash": "5b0f2b36168883f100f980a33eb4c9ada0179667cb4dcea50c7ca732c828e0de",
+          "duration_ms": 120000,
+          "sampling_policy": "uniform",
+          "interval_ms": 45000,
+          "frame_count": 3,
+          "text_frame_count": 3,
+          "coverage_truncated": false
+        },
+        "screen_searches": [
+          {
+            "tool_step": 2,
+            "status": "OBSERVED",
+            "error_code": null,
+            "total_match_count": 2,
+            "hits": [
+              {
+                "ocr_frame_id": "ocr_000001",
+                "requested_ms": 20000,
+                "ocr_timestamp_ms": 20001,
+                "source_pts": 20000,
+                "source_time_base": "1/1000",
+                "observed_text": "Redis L1 缓存",
+                "frame_id": "f0002"
+              },
+              {
+                "ocr_frame_id": "ocr_000002",
+                "requested_ms": 60000,
+                "ocr_timestamp_ms": 60000,
+                "source_pts": 60000,
+                "source_time_base": "1/1000",
+                "observed_text": "Redis L2 缓存",
+                "frame_id": "f0001"
+              }
+            ]
+          }
+        ],
+        "focus_timestamp_ms": 60000
+      }
+    },
+    {
+      "case_id": "focus_full_reuse",
+      "expected_valid": true,
+      "reason": "valid public source and receipt",
+      "duration_ms": 120000,
+      "screen_source": {
+        "segment_stage_id": "55555555-5555-4555-8555-555555555555",
+        "segment_manifest_hash": "1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a",
+        "frames_hash": "2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
+        "observations_hash": "3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c",
+        "index_version": "screen-text-literal-v1",
+        "index_hash": "5b0f2b36168883f100f980a33eb4c9ada0179667cb4dcea50c7ca732c828e0de",
+        "duration_ms": 120000,
+        "sampling_policy": "uniform",
+        "interval_ms": 45000,
+        "frame_count": 3,
+        "text_frame_count": 3,
+        "coverage_truncated": false
+      },
+      "rows": [
+        {
+          "ocr_frame_id": "ocr_000001",
+          "requested_ms": 20000,
+          "ocr_timestamp_ms": 20001,
+          "source_pts": 20000,
+          "source_time_base": "1/1000",
+          "observed_text": "Redis L1 缓存",
+          "ocr_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        },
+        {
+          "ocr_frame_id": "ocr_000002",
+          "requested_ms": 60000,
+          "ocr_timestamp_ms": 60000,
+          "source_pts": 60000,
+          "source_time_base": "1/1000",
+          "observed_text": "Redis L2 缓存",
+          "ocr_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+        },
+        {
+          "ocr_frame_id": "ocr_000003",
+          "requested_ms": 100000,
+          "ocr_timestamp_ms": 100000,
+          "source_pts": 100000,
+          "source_time_base": "1/1000",
+          "observed_text": "缓存失效 CacheMiss Straße ＡＡ \u0000 \u001b \\u001B payload",
+          "ocr_sha256": "0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a"
+        }
+      ],
+      "result": {
+        "schema_version": "1.5",
+        "session_id": "11111111-1111-4111-8111-111111111111",
+        "turn_id": "22222222-2222-4222-8222-222222222222",
+        "job_id": "33333333-3333-4333-8333-333333333333",
+        "video_id": "44444444-4444-4444-8444-444444444444",
+        "source_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "transcript_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "question": "合成协议样例：按画面中的缓存术语查找并看图。",
+        "answer": "【画面观察 b01】\n合成截图中包含缓存术语。",
+        "answer_scope": "VIDEO",
+        "citations": [],
+        "tool_calls": [
+          {
+            "step": 1,
+            "tool_name": "inspect_frames",
+            "arguments": {
+              "timestamps_ms": [
+                60000
+              ]
+            },
+            "result_utterance_ids": [],
+            "result_frame_ids": [
+              "f0001"
+            ],
+            "origin": "USER_FOCUS"
+          },
+          {
+            "step": 2,
+            "tool_name": "search_screen_text",
+            "arguments": {
+              "query": "Redis L2",
+              "top_k": 1
+            },
+            "result_utterance_ids": [],
+            "result_frame_ids": [
+              "f0001"
+            ],
+            "origin": "MODEL"
+          }
+        ],
+        "provenance": {
+          "text_model_id": "synthetic-vl",
+          "prompt_version": "video-agent-evidence-screen-v1",
+          "retrieval_mode": "none"
+        },
+        "suggested_clip_instruction": null,
+        "visual_evidence": [
+          {
+            "frame_id": "f0001",
+            "requested_ms": 60000,
+            "timestamp_ms": 60000,
+            "source_pts": 60000,
+            "source_time_base": "1/1000",
+            "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "bytes": 1234,
+            "width": 1280,
+            "height": 720
+          }
+        ],
+        "visual_citations": [
+          {
+            "frame_id": "f0001",
+            "explanation": "关联分项：b01"
+          }
+        ],
+        "evidence_mode": "structured",
+        "answer_blocks": [
+          {
+            "block_id": "b01",
+            "kind": "FRAME",
+            "text": "合成截图中包含缓存术语。",
+            "utterance_ids": [],
+            "frame_ids": [
+              "f0001"
+            ]
+          }
+        ],
+        "evidence_policy": "screen_search_v1",
+        "screen_source": {
+          "segment_stage_id": "55555555-5555-4555-8555-555555555555",
+          "segment_manifest_hash": "1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a",
+          "frames_hash": "2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
+          "observations_hash": "3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c",
+          "index_version": "screen-text-literal-v1",
+          "index_hash": "5b0f2b36168883f100f980a33eb4c9ada0179667cb4dcea50c7ca732c828e0de",
+          "duration_ms": 120000,
+          "sampling_policy": "uniform",
+          "interval_ms": 45000,
+          "frame_count": 3,
+          "text_frame_count": 3,
+          "coverage_truncated": false
+        },
+        "screen_searches": [
+          {
+            "tool_step": 2,
+            "status": "OBSERVED",
+            "error_code": null,
+            "total_match_count": 1,
+            "hits": [
+              {
+                "ocr_frame_id": "ocr_000002",
+                "requested_ms": 60000,
+                "ocr_timestamp_ms": 60000,
+                "source_pts": 60000,
+                "source_time_base": "1/1000",
+                "observed_text": "Redis L2 缓存",
+                "frame_id": "f0001"
+              }
+            ]
+          }
+        ],
+        "focus_timestamp_ms": 60000
+      }
+    },
+    {
+      "case_id": "no_match",
+      "expected_valid": true,
+      "reason": "valid public source and receipt",
+      "duration_ms": 120000,
+      "screen_source": {
+        "segment_stage_id": "55555555-5555-4555-8555-555555555555",
+        "segment_manifest_hash": "1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a",
+        "frames_hash": "2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
+        "observations_hash": "3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c",
+        "index_version": "screen-text-literal-v1",
+        "index_hash": "5b0f2b36168883f100f980a33eb4c9ada0179667cb4dcea50c7ca732c828e0de",
+        "duration_ms": 120000,
+        "sampling_policy": "uniform",
+        "interval_ms": 45000,
+        "frame_count": 3,
+        "text_frame_count": 3,
+        "coverage_truncated": false
+      },
+      "rows": [
+        {
+          "ocr_frame_id": "ocr_000001",
+          "requested_ms": 20000,
+          "ocr_timestamp_ms": 20001,
+          "source_pts": 20000,
+          "source_time_base": "1/1000",
+          "observed_text": "Redis L1 缓存",
+          "ocr_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        },
+        {
+          "ocr_frame_id": "ocr_000002",
+          "requested_ms": 60000,
+          "ocr_timestamp_ms": 60000,
+          "source_pts": 60000,
+          "source_time_base": "1/1000",
+          "observed_text": "Redis L2 缓存",
+          "ocr_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+        },
+        {
+          "ocr_frame_id": "ocr_000003",
+          "requested_ms": 100000,
+          "ocr_timestamp_ms": 100000,
+          "source_pts": 100000,
+          "source_time_base": "1/1000",
+          "observed_text": "缓存失效 CacheMiss Straße ＡＡ \u0000 \u001b \\u001B payload",
+          "ocr_sha256": "0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a"
+        }
+      ],
+      "result": {
+        "schema_version": "1.5",
+        "session_id": "11111111-1111-4111-8111-111111111111",
+        "turn_id": "22222222-2222-4222-8222-222222222222",
+        "job_id": "33333333-3333-4333-8333-333333333333",
+        "video_id": "44444444-4444-4444-8444-444444444444",
+        "source_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "transcript_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "question": "合成协议样例：按画面中的缓存术语查找并看图。",
+        "answer": "【证据不足 b01】\n合成协议样例：此次未取得可引用截图。",
+        "answer_scope": "INSUFFICIENT",
+        "citations": [],
+        "tool_calls": [
+          {
+            "step": 1,
+            "tool_name": "search_screen_text",
+            "arguments": {
+              "query": "not-present",
+              "top_k": 3
+            },
+            "result_utterance_ids": [],
+            "result_frame_ids": [],
+            "origin": "MODEL"
+          }
+        ],
+        "provenance": {
+          "text_model_id": "synthetic-vl",
+          "prompt_version": "video-agent-evidence-screen-v1",
+          "retrieval_mode": "none"
+        },
+        "suggested_clip_instruction": null,
+        "visual_evidence": [],
+        "visual_citations": [],
+        "evidence_mode": "structured",
+        "answer_blocks": [
+          {
+            "block_id": "b01",
+            "kind": "INSUFFICIENT",
+            "text": "合成协议样例：此次未取得可引用截图。",
+            "utterance_ids": [],
+            "frame_ids": []
+          }
+        ],
+        "evidence_policy": "screen_search_v1",
+        "screen_source": {
+          "segment_stage_id": "55555555-5555-4555-8555-555555555555",
+          "segment_manifest_hash": "1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a",
+          "frames_hash": "2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
+          "observations_hash": "3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c",
+          "index_version": "screen-text-literal-v1",
+          "index_hash": "5b0f2b36168883f100f980a33eb4c9ada0179667cb4dcea50c7ca732c828e0de",
+          "duration_ms": 120000,
+          "sampling_policy": "uniform",
+          "interval_ms": 45000,
+          "frame_count": 3,
+          "text_frame_count": 3,
+          "coverage_truncated": false
+        },
+        "screen_searches": [
+          {
+            "tool_step": 1,
+            "status": "NO_MATCH",
+            "error_code": null,
+            "total_match_count": 0,
+            "hits": []
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "empty_text_index",
+      "expected_valid": true,
+      "reason": "valid public source and receipt",
+      "duration_ms": 120000,
+      "screen_source": {
+        "segment_stage_id": "55555555-5555-4555-8555-555555555555",
+        "segment_manifest_hash": "1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a",
+        "frames_hash": "2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
+        "observations_hash": "3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c",
+        "index_version": "screen-text-literal-v1",
+        "index_hash": "415b2177f3d5935ba0cb4fc666a3c54d18f4da586d7836726a55bdd5911546f0",
+        "duration_ms": 120000,
+        "sampling_policy": "uniform",
+        "interval_ms": 45000,
+        "frame_count": 3,
+        "text_frame_count": 0,
+        "coverage_truncated": false
+      },
+      "rows": [
+        {
+          "ocr_frame_id": "ocr_000001",
+          "requested_ms": 20000,
+          "ocr_timestamp_ms": 20001,
+          "source_pts": 20000,
+          "source_time_base": "1/1000",
+          "observed_text": "",
+          "ocr_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        },
+        {
+          "ocr_frame_id": "ocr_000002",
+          "requested_ms": 60000,
+          "ocr_timestamp_ms": 60000,
+          "source_pts": 60000,
+          "source_time_base": "1/1000",
+          "observed_text": "",
+          "ocr_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+        },
+        {
+          "ocr_frame_id": "ocr_000003",
+          "requested_ms": 100000,
+          "ocr_timestamp_ms": 100000,
+          "source_pts": 100000,
+          "source_time_base": "1/1000",
+          "observed_text": "",
+          "ocr_sha256": "0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a"
+        }
+      ],
+      "result": {
+        "schema_version": "1.5",
+        "session_id": "11111111-1111-4111-8111-111111111111",
+        "turn_id": "22222222-2222-4222-8222-222222222222",
+        "job_id": "33333333-3333-4333-8333-333333333333",
+        "video_id": "44444444-4444-4444-8444-444444444444",
+        "source_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "transcript_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "question": "合成协议样例：按画面中的缓存术语查找并看图。",
+        "answer": "【证据不足 b01】\n合成协议样例：此次未取得可引用截图。",
+        "answer_scope": "INSUFFICIENT",
+        "citations": [],
+        "tool_calls": [
+          {
+            "step": 1,
+            "tool_name": "search_screen_text",
+            "arguments": {
+              "query": "Redis",
+              "top_k": 3
+            },
+            "result_utterance_ids": [],
+            "result_frame_ids": [],
+            "origin": "MODEL"
+          }
+        ],
+        "provenance": {
+          "text_model_id": "synthetic-vl",
+          "prompt_version": "video-agent-evidence-screen-v1",
+          "retrieval_mode": "none"
+        },
+        "suggested_clip_instruction": null,
+        "visual_evidence": [],
+        "visual_citations": [],
+        "evidence_mode": "structured",
+        "answer_blocks": [
+          {
+            "block_id": "b01",
+            "kind": "INSUFFICIENT",
+            "text": "合成协议样例：此次未取得可引用截图。",
+            "utterance_ids": [],
+            "frame_ids": []
+          }
+        ],
+        "evidence_policy": "screen_search_v1",
+        "screen_source": {
+          "segment_stage_id": "55555555-5555-4555-8555-555555555555",
+          "segment_manifest_hash": "1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a",
+          "frames_hash": "2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
+          "observations_hash": "3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c",
+          "index_version": "screen-text-literal-v1",
+          "index_hash": "415b2177f3d5935ba0cb4fc666a3c54d18f4da586d7836726a55bdd5911546f0",
+          "duration_ms": 120000,
+          "sampling_policy": "uniform",
+          "interval_ms": 45000,
+          "frame_count": 3,
+          "text_frame_count": 0,
+          "coverage_truncated": false
+        },
+        "screen_searches": [
+          {
+            "tool_step": 1,
+            "status": "EMPTY",
+            "error_code": null,
+            "total_match_count": 0,
+            "hits": []
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "context_limit_keeps_actual_match_count",
+      "expected_valid": true,
+      "reason": "valid public source and receipt",
+      "duration_ms": 120000,
+      "screen_source": {
+        "segment_stage_id": "55555555-5555-4555-8555-555555555555",
+        "segment_manifest_hash": "1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a",
+        "frames_hash": "2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
+        "observations_hash": "3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c",
+        "index_version": "screen-text-literal-v1",
+        "index_hash": "5b0f2b36168883f100f980a33eb4c9ada0179667cb4dcea50c7ca732c828e0de",
+        "duration_ms": 120000,
+        "sampling_policy": "uniform",
+        "interval_ms": 45000,
+        "frame_count": 3,
+        "text_frame_count": 3,
+        "coverage_truncated": false
+      },
+      "rows": [
+        {
+          "ocr_frame_id": "ocr_000001",
+          "requested_ms": 20000,
+          "ocr_timestamp_ms": 20001,
+          "source_pts": 20000,
+          "source_time_base": "1/1000",
+          "observed_text": "Redis L1 缓存",
+          "ocr_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        },
+        {
+          "ocr_frame_id": "ocr_000002",
+          "requested_ms": 60000,
+          "ocr_timestamp_ms": 60000,
+          "source_pts": 60000,
+          "source_time_base": "1/1000",
+          "observed_text": "Redis L2 缓存",
+          "ocr_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+        },
+        {
+          "ocr_frame_id": "ocr_000003",
+          "requested_ms": 100000,
+          "ocr_timestamp_ms": 100000,
+          "source_pts": 100000,
+          "source_time_base": "1/1000",
+          "observed_text": "缓存失效 CacheMiss Straße ＡＡ \u0000 \u001b \\u001B payload",
+          "ocr_sha256": "0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a"
+        }
+      ],
+      "result": {
+        "schema_version": "1.5",
+        "session_id": "11111111-1111-4111-8111-111111111111",
+        "turn_id": "22222222-2222-4222-8222-222222222222",
+        "job_id": "33333333-3333-4333-8333-333333333333",
+        "video_id": "44444444-4444-4444-8444-444444444444",
+        "source_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "transcript_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "question": "合成协议样例：按画面中的缓存术语查找并看图。",
+        "answer": "【证据不足 b01】\n合成协议样例：此次未取得可引用截图。",
+        "answer_scope": "INSUFFICIENT",
+        "citations": [],
+        "tool_calls": [
+          {
+            "step": 1,
+            "tool_name": "search_screen_text",
+            "arguments": {
+              "query": "Redis",
+              "top_k": 3
+            },
+            "result_utterance_ids": [],
+            "result_frame_ids": [],
+            "origin": "MODEL"
+          }
+        ],
+        "provenance": {
+          "text_model_id": "synthetic-vl",
+          "prompt_version": "video-agent-evidence-screen-v1",
+          "retrieval_mode": "none"
+        },
+        "suggested_clip_instruction": null,
+        "visual_evidence": [],
+        "visual_citations": [],
+        "evidence_mode": "structured",
+        "answer_blocks": [
+          {
+            "block_id": "b01",
+            "kind": "INSUFFICIENT",
+            "text": "合成协议样例：此次未取得可引用截图。",
+            "utterance_ids": [],
+            "frame_ids": []
+          }
+        ],
+        "evidence_policy": "screen_search_v1",
+        "screen_source": {
+          "segment_stage_id": "55555555-5555-4555-8555-555555555555",
+          "segment_manifest_hash": "1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a",
+          "frames_hash": "2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
+          "observations_hash": "3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c",
+          "index_version": "screen-text-literal-v1",
+          "index_hash": "5b0f2b36168883f100f980a33eb4c9ada0179667cb4dcea50c7ca732c828e0de",
+          "duration_ms": 120000,
+          "sampling_policy": "uniform",
+          "interval_ms": 45000,
+          "frame_count": 3,
+          "text_frame_count": 3,
+          "coverage_truncated": false
+        },
+        "screen_searches": [
+          {
+            "tool_step": 1,
+            "status": "TOOL_ERROR",
+            "error_code": "CONTEXT_LIMIT",
+            "total_match_count": 2,
+            "hits": []
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "native_failed_then_screen_observed",
+      "expected_valid": true,
+      "reason": "valid public source and receipt",
+      "duration_ms": 120000,
+      "screen_source": {
+        "segment_stage_id": "55555555-5555-4555-8555-555555555555",
+        "segment_manifest_hash": "1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a",
+        "frames_hash": "2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
+        "observations_hash": "3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c",
+        "index_version": "screen-text-literal-v1",
+        "index_hash": "5b0f2b36168883f100f980a33eb4c9ada0179667cb4dcea50c7ca732c828e0de",
+        "duration_ms": 120000,
+        "sampling_policy": "uniform",
+        "interval_ms": 45000,
+        "frame_count": 3,
+        "text_frame_count": 3,
+        "coverage_truncated": false
+      },
+      "rows": [
+        {
+          "ocr_frame_id": "ocr_000001",
+          "requested_ms": 20000,
+          "ocr_timestamp_ms": 20001,
+          "source_pts": 20000,
+          "source_time_base": "1/1000",
+          "observed_text": "Redis L1 缓存",
+          "ocr_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        },
+        {
+          "ocr_frame_id": "ocr_000002",
+          "requested_ms": 60000,
+          "ocr_timestamp_ms": 60000,
+          "source_pts": 60000,
+          "source_time_base": "1/1000",
+          "observed_text": "Redis L2 缓存",
+          "ocr_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+        },
+        {
+          "ocr_frame_id": "ocr_000003",
+          "requested_ms": 100000,
+          "ocr_timestamp_ms": 100000,
+          "source_pts": 100000,
+          "source_time_base": "1/1000",
+          "observed_text": "缓存失效 CacheMiss Straße ＡＡ \u0000 \u001b \\u001B payload",
+          "ocr_sha256": "0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a"
+        }
+      ],
+      "result": {
+        "schema_version": "1.5",
+        "session_id": "11111111-1111-4111-8111-111111111111",
+        "turn_id": "22222222-2222-4222-8222-222222222222",
+        "job_id": "33333333-3333-4333-8333-333333333333",
+        "video_id": "44444444-4444-4444-8444-444444444444",
+        "source_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "transcript_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "question": "合成协议样例：按画面中的缓存术语查找并看图。",
+        "answer": "【画面观察 b01】\n合成截图中包含缓存术语。",
+        "answer_scope": "VIDEO",
+        "citations": [],
+        "tool_calls": [
+          {
+            "step": 1,
+            "tool_name": "inspect_frames",
+            "arguments": {
+              "timestamps_ms": [
+                20000
+              ]
+            },
+            "result_utterance_ids": [],
+            "result_frame_ids": [],
+            "origin": "MODEL"
+          },
+          {
+            "step": 2,
+            "tool_name": "search_screen_text",
+            "arguments": {
+              "query": "Redis L1",
+              "top_k": 1
+            },
+            "result_utterance_ids": [],
+            "result_frame_ids": [
+              "f0001"
+            ],
+            "origin": "MODEL"
+          }
+        ],
+        "provenance": {
+          "text_model_id": "synthetic-vl",
+          "prompt_version": "video-agent-evidence-screen-v1",
+          "retrieval_mode": "none"
+        },
+        "suggested_clip_instruction": null,
+        "visual_evidence": [
+          {
+            "frame_id": "f0001",
+            "requested_ms": 20000,
+            "timestamp_ms": 20000,
+            "source_pts": 20000,
+            "source_time_base": "1/1000",
+            "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "bytes": 1234,
+            "width": 1280,
+            "height": 720
+          }
+        ],
+        "visual_citations": [
+          {
+            "frame_id": "f0001",
+            "explanation": "关联分项：b01"
+          }
+        ],
+        "evidence_mode": "structured",
+        "answer_blocks": [
+          {
+            "block_id": "b01",
+            "kind": "FRAME",
+            "text": "合成截图中包含缓存术语。",
+            "utterance_ids": [],
+            "frame_ids": [
+              "f0001"
+            ]
+          }
+        ],
+        "evidence_policy": "screen_search_v1",
+        "screen_source": {
+          "segment_stage_id": "55555555-5555-4555-8555-555555555555",
+          "segment_manifest_hash": "1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a",
+          "frames_hash": "2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
+          "observations_hash": "3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c",
+          "index_version": "screen-text-literal-v1",
+          "index_hash": "5b0f2b36168883f100f980a33eb4c9ada0179667cb4dcea50c7ca732c828e0de",
+          "duration_ms": 120000,
+          "sampling_policy": "uniform",
+          "interval_ms": 45000,
+          "frame_count": 3,
+          "text_frame_count": 3,
+          "coverage_truncated": false
+        },
+        "screen_searches": [
+          {
+            "tool_step": 2,
+            "status": "OBSERVED",
+            "error_code": null,
+            "total_match_count": 1,
+            "hits": [
+              {
+                "ocr_frame_id": "ocr_000001",
+                "requested_ms": 20000,
+                "ocr_timestamp_ms": 20001,
+                "source_pts": 20000,
+                "source_time_base": "1/1000",
+                "observed_text": "Redis L1 缓存",
+                "frame_id": "f0001"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "screen_then_native_reuses_same_batch",
+      "expected_valid": true,
+      "reason": "valid public source and receipt",
+      "duration_ms": 120000,
+      "screen_source": {
+        "segment_stage_id": "55555555-5555-4555-8555-555555555555",
+        "segment_manifest_hash": "1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a",
+        "frames_hash": "2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
+        "observations_hash": "3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c",
+        "index_version": "screen-text-literal-v1",
+        "index_hash": "5b0f2b36168883f100f980a33eb4c9ada0179667cb4dcea50c7ca732c828e0de",
+        "duration_ms": 120000,
+        "sampling_policy": "uniform",
+        "interval_ms": 45000,
+        "frame_count": 3,
+        "text_frame_count": 3,
+        "coverage_truncated": false
+      },
+      "rows": [
+        {
+          "ocr_frame_id": "ocr_000001",
+          "requested_ms": 20000,
+          "ocr_timestamp_ms": 20001,
+          "source_pts": 20000,
+          "source_time_base": "1/1000",
+          "observed_text": "Redis L1 缓存",
+          "ocr_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        },
+        {
+          "ocr_frame_id": "ocr_000002",
+          "requested_ms": 60000,
+          "ocr_timestamp_ms": 60000,
+          "source_pts": 60000,
+          "source_time_base": "1/1000",
+          "observed_text": "Redis L2 缓存",
+          "ocr_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+        },
+        {
+          "ocr_frame_id": "ocr_000003",
+          "requested_ms": 100000,
+          "ocr_timestamp_ms": 100000,
+          "source_pts": 100000,
+          "source_time_base": "1/1000",
+          "observed_text": "缓存失效 CacheMiss Straße ＡＡ \u0000 \u001b \\u001B payload",
+          "ocr_sha256": "0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a"
+        }
+      ],
+      "result": {
+        "schema_version": "1.5",
+        "session_id": "11111111-1111-4111-8111-111111111111",
+        "turn_id": "22222222-2222-4222-8222-222222222222",
+        "job_id": "33333333-3333-4333-8333-333333333333",
+        "video_id": "44444444-4444-4444-8444-444444444444",
+        "source_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "transcript_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "question": "合成协议样例：按画面中的缓存术语查找并看图。",
+        "answer": "【画面观察 b01】\n合成截图中包含缓存术语。",
+        "answer_scope": "VIDEO",
+        "citations": [],
+        "tool_calls": [
+          {
+            "step": 1,
+            "tool_name": "search_screen_text",
+            "arguments": {
+              "query": "redis l1",
+              "top_k": 1
+            },
+            "result_utterance_ids": [],
+            "result_frame_ids": [
+              "f0001"
+            ],
+            "origin": "MODEL"
+          },
+          {
+            "step": 2,
+            "tool_name": "inspect_frames",
+            "arguments": {
+              "timestamps_ms": [
+                20000
+              ]
+            },
+            "result_utterance_ids": [],
+            "result_frame_ids": [
+              "f0001"
+            ],
+            "origin": "MODEL"
+          }
+        ],
+        "provenance": {
+          "text_model_id": "synthetic-vl",
+          "prompt_version": "video-agent-evidence-screen-v1",
+          "retrieval_mode": "none"
+        },
+        "suggested_clip_instruction": null,
+        "visual_evidence": [
+          {
+            "frame_id": "f0001",
+            "requested_ms": 20000,
+            "timestamp_ms": 20000,
+            "source_pts": 20000,
+            "source_time_base": "1/1000",
+            "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "bytes": 1234,
+            "width": 1280,
+            "height": 720
+          }
+        ],
+        "visual_citations": [
+          {
+            "frame_id": "f0001",
+            "explanation": "关联分项：b01"
+          }
+        ],
+        "evidence_mode": "structured",
+        "answer_blocks": [
+          {
+            "block_id": "b01",
+            "kind": "FRAME",
+            "text": "合成截图中包含缓存术语。",
+            "utterance_ids": [],
+            "frame_ids": [
+              "f0001"
+            ]
+          }
+        ],
+        "evidence_policy": "screen_search_v1",
+        "screen_source": {
+          "segment_stage_id": "55555555-5555-4555-8555-555555555555",
+          "segment_manifest_hash": "1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a",
+          "frames_hash": "2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
+          "observations_hash": "3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c",
+          "index_version": "screen-text-literal-v1",
+          "index_hash": "5b0f2b36168883f100f980a33eb4c9ada0179667cb4dcea50c7ca732c828e0de",
+          "duration_ms": 120000,
+          "sampling_policy": "uniform",
+          "interval_ms": 45000,
+          "frame_count": 3,
+          "text_frame_count": 3,
+          "coverage_truncated": false
+        },
+        "screen_searches": [
+          {
+            "tool_step": 1,
+            "status": "OBSERVED",
+            "error_code": null,
+            "total_match_count": 1,
+            "hits": [
+              {
+                "ocr_frame_id": "ocr_000001",
+                "requested_ms": 20000,
+                "ocr_timestamp_ms": 20001,
+                "source_pts": 20000,
+                "source_time_base": "1/1000",
+                "observed_text": "Redis L1 缓存",
+                "frame_id": "f0001"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "two_queries_reuse_same_frame",
+      "expected_valid": true,
+      "reason": "valid public source and receipt",
+      "duration_ms": 120000,
+      "screen_source": {
+        "segment_stage_id": "55555555-5555-4555-8555-555555555555",
+        "segment_manifest_hash": "1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a",
+        "frames_hash": "2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
+        "observations_hash": "3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c",
+        "index_version": "screen-text-literal-v1",
+        "index_hash": "5b0f2b36168883f100f980a33eb4c9ada0179667cb4dcea50c7ca732c828e0de",
+        "duration_ms": 120000,
+        "sampling_policy": "uniform",
+        "interval_ms": 45000,
+        "frame_count": 3,
+        "text_frame_count": 3,
+        "coverage_truncated": false
+      },
+      "rows": [
+        {
+          "ocr_frame_id": "ocr_000001",
+          "requested_ms": 20000,
+          "ocr_timestamp_ms": 20001,
+          "source_pts": 20000,
+          "source_time_base": "1/1000",
+          "observed_text": "Redis L1 缓存",
+          "ocr_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        },
+        {
+          "ocr_frame_id": "ocr_000002",
+          "requested_ms": 60000,
+          "ocr_timestamp_ms": 60000,
+          "source_pts": 60000,
+          "source_time_base": "1/1000",
+          "observed_text": "Redis L2 缓存",
+          "ocr_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+        },
+        {
+          "ocr_frame_id": "ocr_000003",
+          "requested_ms": 100000,
+          "ocr_timestamp_ms": 100000,
+          "source_pts": 100000,
+          "source_time_base": "1/1000",
+          "observed_text": "缓存失效 CacheMiss Straße ＡＡ \u0000 \u001b \\u001B payload",
+          "ocr_sha256": "0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a"
+        }
+      ],
+      "result": {
+        "schema_version": "1.5",
+        "session_id": "11111111-1111-4111-8111-111111111111",
+        "turn_id": "22222222-2222-4222-8222-222222222222",
+        "job_id": "33333333-3333-4333-8333-333333333333",
+        "video_id": "44444444-4444-4444-8444-444444444444",
+        "source_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "transcript_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "question": "合成协议样例：按画面中的缓存术语查找并看图。",
+        "answer": "【画面观察 b01】\n合成截图中包含缓存术语。",
+        "answer_scope": "VIDEO",
+        "citations": [],
+        "tool_calls": [
+          {
+            "step": 1,
+            "tool_name": "search_screen_text",
+            "arguments": {
+              "query": "redis l1",
+              "top_k": 1
+            },
+            "result_utterance_ids": [],
+            "result_frame_ids": [
+              "f0001"
+            ],
+            "origin": "MODEL"
+          },
+          {
+            "step": 2,
+            "tool_name": "search_screen_text",
+            "arguments": {
+              "query": "L1 缓存",
+              "top_k": 2
+            },
+            "result_utterance_ids": [],
+            "result_frame_ids": [
+              "f0001"
+            ],
+            "origin": "MODEL"
+          }
+        ],
+        "provenance": {
+          "text_model_id": "synthetic-vl",
+          "prompt_version": "video-agent-evidence-screen-v1",
+          "retrieval_mode": "none"
+        },
+        "suggested_clip_instruction": null,
+        "visual_evidence": [
+          {
+            "frame_id": "f0001",
+            "requested_ms": 20000,
+            "timestamp_ms": 20000,
+            "source_pts": 20000,
+            "source_time_base": "1/1000",
+            "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "bytes": 1234,
+            "width": 1280,
+            "height": 720
+          }
+        ],
+        "visual_citations": [
+          {
+            "frame_id": "f0001",
+            "explanation": "关联分项：b01"
+          }
+        ],
+        "evidence_mode": "structured",
+        "answer_blocks": [
+          {
+            "block_id": "b01",
+            "kind": "FRAME",
+            "text": "合成截图中包含缓存术语。",
+            "utterance_ids": [],
+            "frame_ids": [
+              "f0001"
+            ]
+          }
+        ],
+        "evidence_policy": "screen_search_v1",
+        "screen_source": {
+          "segment_stage_id": "55555555-5555-4555-8555-555555555555",
+          "segment_manifest_hash": "1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a",
+          "frames_hash": "2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
+          "observations_hash": "3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c",
+          "index_version": "screen-text-literal-v1",
+          "index_hash": "5b0f2b36168883f100f980a33eb4c9ada0179667cb4dcea50c7ca732c828e0de",
+          "duration_ms": 120000,
+          "sampling_policy": "uniform",
+          "interval_ms": 45000,
+          "frame_count": 3,
+          "text_frame_count": 3,
+          "coverage_truncated": false
+        },
+        "screen_searches": [
+          {
+            "tool_step": 1,
+            "status": "OBSERVED",
+            "error_code": null,
+            "total_match_count": 1,
+            "hits": [
+              {
+                "ocr_frame_id": "ocr_000001",
+                "requested_ms": 20000,
+                "ocr_timestamp_ms": 20001,
+                "source_pts": 20000,
+                "source_time_base": "1/1000",
+                "observed_text": "Redis L1 缓存",
+                "frame_id": "f0001"
+              }
+            ]
+          },
+          {
+            "tool_step": 2,
+            "status": "OBSERVED",
+            "error_code": null,
+            "total_match_count": 1,
+            "hits": [
+              {
+                "ocr_frame_id": "ocr_000001",
+                "requested_ms": 20000,
+                "ocr_timestamp_ms": 20001,
+                "source_pts": 20000,
+                "source_time_base": "1/1000",
+                "observed_text": "Redis L1 缓存",
+                "frame_id": "f0001"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "duplicate_query_returns_explicit_error",
+      "expected_valid": true,
+      "reason": "valid public source and receipt",
+      "duration_ms": 120000,
+      "screen_source": {
+        "segment_stage_id": "55555555-5555-4555-8555-555555555555",
+        "segment_manifest_hash": "1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a",
+        "frames_hash": "2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
+        "observations_hash": "3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c",
+        "index_version": "screen-text-literal-v1",
+        "index_hash": "5b0f2b36168883f100f980a33eb4c9ada0179667cb4dcea50c7ca732c828e0de",
+        "duration_ms": 120000,
+        "sampling_policy": "uniform",
+        "interval_ms": 45000,
+        "frame_count": 3,
+        "text_frame_count": 3,
+        "coverage_truncated": false
+      },
+      "rows": [
+        {
+          "ocr_frame_id": "ocr_000001",
+          "requested_ms": 20000,
+          "ocr_timestamp_ms": 20001,
+          "source_pts": 20000,
+          "source_time_base": "1/1000",
+          "observed_text": "Redis L1 缓存",
+          "ocr_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        },
+        {
+          "ocr_frame_id": "ocr_000002",
+          "requested_ms": 60000,
+          "ocr_timestamp_ms": 60000,
+          "source_pts": 60000,
+          "source_time_base": "1/1000",
+          "observed_text": "Redis L2 缓存",
+          "ocr_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+        },
+        {
+          "ocr_frame_id": "ocr_000003",
+          "requested_ms": 100000,
+          "ocr_timestamp_ms": 100000,
+          "source_pts": 100000,
+          "source_time_base": "1/1000",
+          "observed_text": "缓存失效 CacheMiss Straße ＡＡ \u0000 \u001b \\u001B payload",
+          "ocr_sha256": "0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a"
+        }
+      ],
+      "result": {
+        "schema_version": "1.5",
+        "session_id": "11111111-1111-4111-8111-111111111111",
+        "turn_id": "22222222-2222-4222-8222-222222222222",
+        "job_id": "33333333-3333-4333-8333-333333333333",
+        "video_id": "44444444-4444-4444-8444-444444444444",
+        "source_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "transcript_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "question": "合成协议样例：按画面中的缓存术语查找并看图。",
+        "answer": "【画面观察 b01】\n合成截图中包含缓存术语。",
+        "answer_scope": "VIDEO",
+        "citations": [],
+        "tool_calls": [
+          {
+            "step": 1,
+            "tool_name": "search_screen_text",
+            "arguments": {
+              "query": "redis l1",
+              "top_k": 1
+            },
+            "result_utterance_ids": [],
+            "result_frame_ids": [
+              "f0001"
+            ],
+            "origin": "MODEL"
+          },
+          {
+            "step": 2,
+            "tool_name": "search_screen_text",
+            "arguments": {
+              "query": "redis l1",
+              "top_k": 1
+            },
+            "result_utterance_ids": [],
+            "result_frame_ids": [],
+            "origin": "MODEL"
+          }
+        ],
+        "provenance": {
+          "text_model_id": "synthetic-vl",
+          "prompt_version": "video-agent-evidence-screen-v1",
+          "retrieval_mode": "none"
+        },
+        "suggested_clip_instruction": null,
+        "visual_evidence": [
+          {
+            "frame_id": "f0001",
+            "requested_ms": 20000,
+            "timestamp_ms": 20000,
+            "source_pts": 20000,
+            "source_time_base": "1/1000",
+            "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "bytes": 1234,
+            "width": 1280,
+            "height": 720
+          }
+        ],
+        "visual_citations": [
+          {
+            "frame_id": "f0001",
+            "explanation": "关联分项：b01"
+          }
+        ],
+        "evidence_mode": "structured",
+        "answer_blocks": [
+          {
+            "block_id": "b01",
+            "kind": "FRAME",
+            "text": "合成截图中包含缓存术语。",
+            "utterance_ids": [],
+            "frame_ids": [
+              "f0001"
+            ]
+          }
+        ],
+        "evidence_policy": "screen_search_v1",
+        "screen_source": {
+          "segment_stage_id": "55555555-5555-4555-8555-555555555555",
+          "segment_manifest_hash": "1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a",
+          "frames_hash": "2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
+          "observations_hash": "3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c",
+          "index_version": "screen-text-literal-v1",
+          "index_hash": "5b0f2b36168883f100f980a33eb4c9ada0179667cb4dcea50c7ca732c828e0de",
+          "duration_ms": 120000,
+          "sampling_policy": "uniform",
+          "interval_ms": 45000,
+          "frame_count": 3,
+          "text_frame_count": 3,
+          "coverage_truncated": false
+        },
+        "screen_searches": [
+          {
+            "tool_step": 1,
+            "status": "OBSERVED",
+            "error_code": null,
+            "total_match_count": 1,
+            "hits": [
+              {
+                "ocr_frame_id": "ocr_000001",
+                "requested_ms": 20000,
+                "ocr_timestamp_ms": 20001,
+                "source_pts": 20000,
+                "source_time_base": "1/1000",
+                "observed_text": "Redis L1 缓存",
+                "frame_id": "f0001"
+              }
+            ]
+          },
+          {
+            "tool_step": 2,
+            "status": "TOOL_ERROR",
+            "error_code": "DUPLICATE_TOOL_CALL",
+            "total_match_count": 1,
+            "hits": []
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "speech_and_screen_are_separate",
+      "expected_valid": true,
+      "reason": "valid public source and receipt",
+      "duration_ms": 120000,
+      "screen_source": {
+        "segment_stage_id": "55555555-5555-4555-8555-555555555555",
+        "segment_manifest_hash": "1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a",
+        "frames_hash": "2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
+        "observations_hash": "3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c",
+        "index_version": "screen-text-literal-v1",
+        "index_hash": "5b0f2b36168883f100f980a33eb4c9ada0179667cb4dcea50c7ca732c828e0de",
+        "duration_ms": 120000,
+        "sampling_policy": "uniform",
+        "interval_ms": 45000,
+        "frame_count": 3,
+        "text_frame_count": 3,
+        "coverage_truncated": false
+      },
+      "rows": [
+        {
+          "ocr_frame_id": "ocr_000001",
+          "requested_ms": 20000,
+          "ocr_timestamp_ms": 20001,
+          "source_pts": 20000,
+          "source_time_base": "1/1000",
+          "observed_text": "Redis L1 缓存",
+          "ocr_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        },
+        {
+          "ocr_frame_id": "ocr_000002",
+          "requested_ms": 60000,
+          "ocr_timestamp_ms": 60000,
+          "source_pts": 60000,
+          "source_time_base": "1/1000",
+          "observed_text": "Redis L2 缓存",
+          "ocr_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+        },
+        {
+          "ocr_frame_id": "ocr_000003",
+          "requested_ms": 100000,
+          "ocr_timestamp_ms": 100000,
+          "source_pts": 100000,
+          "source_time_base": "1/1000",
+          "observed_text": "缓存失效 CacheMiss Straße ＡＡ \u0000 \u001b \\u001B payload",
+          "ocr_sha256": "0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a"
+        }
+      ],
+      "result": {
+        "schema_version": "1.5",
+        "session_id": "11111111-1111-4111-8111-111111111111",
+        "turn_id": "22222222-2222-4222-8222-222222222222",
+        "job_id": "33333333-3333-4333-8333-333333333333",
+        "video_id": "44444444-4444-4444-8444-444444444444",
+        "source_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "transcript_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "question": "合成协议样例：按画面中的缓存术语查找并看图。",
+        "answer": "【原句依据 b01】\n这里增加缓存层来承接重复读取。\n\n【画面观察 b02】\n合成截图中包含缓存术语。",
+        "answer_scope": "VIDEO",
+        "citations": [
+          {
+            "utterance_id": "u1",
+            "start_ms": 0,
+            "end_ms": 1500,
+            "text": "这里增加缓存层来承接重复读取。"
+          }
+        ],
+        "tool_calls": [
+          {
+            "step": 1,
+            "tool_name": "search_transcript",
+            "arguments": {
+              "query": "缓存",
+              "top_k": 1
+            },
+            "result_utterance_ids": [
+              "u1"
+            ],
+            "result_frame_ids": [],
+            "origin": "MODEL"
+          },
+          {
+            "step": 2,
+            "tool_name": "search_screen_text",
+            "arguments": {
+              "query": "Redis L1",
+              "top_k": 1
+            },
+            "result_utterance_ids": [],
+            "result_frame_ids": [
+              "f0001"
+            ],
+            "origin": "MODEL"
+          }
+        ],
+        "provenance": {
+          "text_model_id": "synthetic-vl",
+          "prompt_version": "video-agent-evidence-screen-v1",
+          "retrieval_mode": "bm25"
+        },
+        "suggested_clip_instruction": null,
+        "visual_evidence": [
+          {
+            "frame_id": "f0001",
+            "requested_ms": 20000,
+            "timestamp_ms": 20000,
+            "source_pts": 20000,
+            "source_time_base": "1/1000",
+            "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "bytes": 1234,
+            "width": 1280,
+            "height": 720
+          }
+        ],
+        "visual_citations": [
+          {
+            "frame_id": "f0001",
+            "explanation": "关联分项：b02"
+          }
+        ],
+        "evidence_mode": "structured",
+        "answer_blocks": [
+          {
+            "block_id": "b01",
+            "kind": "SPEECH",
+            "text": "这里增加缓存层来承接重复读取。",
+            "utterance_ids": [
+              "u1"
+            ],
+            "frame_ids": []
+          },
+          {
+            "block_id": "b02",
+            "kind": "FRAME",
+            "text": "合成截图中包含缓存术语。",
+            "utterance_ids": [],
+            "frame_ids": [
+              "f0001"
+            ]
+          }
+        ],
+        "evidence_policy": "screen_search_v1",
+        "screen_source": {
+          "segment_stage_id": "55555555-5555-4555-8555-555555555555",
+          "segment_manifest_hash": "1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a",
+          "frames_hash": "2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
+          "observations_hash": "3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c",
+          "index_version": "screen-text-literal-v1",
+          "index_hash": "5b0f2b36168883f100f980a33eb4c9ada0179667cb4dcea50c7ca732c828e0de",
+          "duration_ms": 120000,
+          "sampling_policy": "uniform",
+          "interval_ms": 45000,
+          "frame_count": 3,
+          "text_frame_count": 3,
+          "coverage_truncated": false
+        },
+        "screen_searches": [
+          {
+            "tool_step": 2,
+            "status": "OBSERVED",
+            "error_code": null,
+            "total_match_count": 1,
+            "hits": [
+              {
+                "ocr_frame_id": "ocr_000001",
+                "requested_ms": 20000,
+                "ocr_timestamp_ms": 20001,
+                "source_pts": 20000,
+                "source_time_base": "1/1000",
+                "observed_text": "Redis L1 缓存",
+                "frame_id": "f0001"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "source_raw_controls_preserved",
+      "expected_valid": true,
+      "reason": "valid public source and receipt",
+      "duration_ms": 120000,
+      "screen_source": {
+        "segment_stage_id": "55555555-5555-4555-8555-555555555555",
+        "segment_manifest_hash": "1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a",
+        "frames_hash": "2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
+        "observations_hash": "3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c",
+        "index_version": "screen-text-literal-v1",
+        "index_hash": "5b0f2b36168883f100f980a33eb4c9ada0179667cb4dcea50c7ca732c828e0de",
+        "duration_ms": 120000,
+        "sampling_policy": "uniform",
+        "interval_ms": 45000,
+        "frame_count": 3,
+        "text_frame_count": 3,
+        "coverage_truncated": false
+      },
+      "rows": [
+        {
+          "ocr_frame_id": "ocr_000001",
+          "requested_ms": 20000,
+          "ocr_timestamp_ms": 20001,
+          "source_pts": 20000,
+          "source_time_base": "1/1000",
+          "observed_text": "Redis L1 缓存",
+          "ocr_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        },
+        {
+          "ocr_frame_id": "ocr_000002",
+          "requested_ms": 60000,
+          "ocr_timestamp_ms": 60000,
+          "source_pts": 60000,
+          "source_time_base": "1/1000",
+          "observed_text": "Redis L2 缓存",
+          "ocr_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+        },
+        {
+          "ocr_frame_id": "ocr_000003",
+          "requested_ms": 100000,
+          "ocr_timestamp_ms": 100000,
+          "source_pts": 100000,
+          "source_time_base": "1/1000",
+          "observed_text": "缓存失效 CacheMiss Straße ＡＡ \u0000 \u001b \\u001B payload",
+          "ocr_sha256": "0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a"
+        }
+      ],
+      "result": {
+        "schema_version": "1.5",
+        "session_id": "11111111-1111-4111-8111-111111111111",
+        "turn_id": "22222222-2222-4222-8222-222222222222",
+        "job_id": "33333333-3333-4333-8333-333333333333",
+        "video_id": "44444444-4444-4444-8444-444444444444",
+        "source_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "transcript_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "question": "合成协议样例：按画面中的缓存术语查找并看图。",
+        "answer": "【画面观察 b01】\n合成截图中包含缓存术语。",
+        "answer_scope": "VIDEO",
+        "citations": [],
+        "tool_calls": [
+          {
+            "step": 1,
+            "tool_name": "search_screen_text",
+            "arguments": {
+              "query": "payload",
+              "top_k": 1
+            },
+            "result_utterance_ids": [],
+            "result_frame_ids": [
+              "f0001"
+            ],
+            "origin": "MODEL"
+          }
+        ],
+        "provenance": {
+          "text_model_id": "synthetic-vl",
+          "prompt_version": "video-agent-evidence-screen-v1",
+          "retrieval_mode": "none"
+        },
+        "suggested_clip_instruction": null,
+        "visual_evidence": [
+          {
+            "frame_id": "f0001",
+            "requested_ms": 100000,
+            "timestamp_ms": 100000,
+            "source_pts": 100000,
+            "source_time_base": "1/1000",
+            "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "bytes": 1234,
+            "width": 1280,
+            "height": 720
+          }
+        ],
+        "visual_citations": [
+          {
+            "frame_id": "f0001",
+            "explanation": "关联分项：b01"
+          }
+        ],
+        "evidence_mode": "structured",
+        "answer_blocks": [
+          {
+            "block_id": "b01",
+            "kind": "FRAME",
+            "text": "合成截图中包含缓存术语。",
+            "utterance_ids": [],
+            "frame_ids": [
+              "f0001"
+            ]
+          }
+        ],
+        "evidence_policy": "screen_search_v1",
+        "screen_source": {
+          "segment_stage_id": "55555555-5555-4555-8555-555555555555",
+          "segment_manifest_hash": "1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a",
+          "frames_hash": "2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
+          "observations_hash": "3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c",
+          "index_version": "screen-text-literal-v1",
+          "index_hash": "5b0f2b36168883f100f980a33eb4c9ada0179667cb4dcea50c7ca732c828e0de",
+          "duration_ms": 120000,
+          "sampling_policy": "uniform",
+          "interval_ms": 45000,
+          "frame_count": 3,
+          "text_frame_count": 3,
+          "coverage_truncated": false
+        },
+        "screen_searches": [
+          {
+            "tool_step": 1,
+            "status": "OBSERVED",
+            "error_code": null,
+            "total_match_count": 1,
+            "hits": [
+              {
+                "ocr_frame_id": "ocr_000003",
+                "requested_ms": 100000,
+                "ocr_timestamp_ms": 100000,
+                "source_pts": 100000,
+                "source_time_base": "1/1000",
+                "observed_text": "缓存失效 CacheMiss Straße ＡＡ \u0000 \u001b \\u001B payload",
+                "frame_id": "f0001"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "repeated_asr_without_new_evidence",
+      "expected_valid": true,
+      "reason": "valid public source and receipt",
+      "duration_ms": 120000,
+      "screen_source": {
+        "segment_stage_id": "55555555-5555-4555-8555-555555555555",
+        "segment_manifest_hash": "1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a",
+        "frames_hash": "2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
+        "observations_hash": "3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c",
+        "index_version": "screen-text-literal-v1",
+        "index_hash": "5b0f2b36168883f100f980a33eb4c9ada0179667cb4dcea50c7ca732c828e0de",
+        "duration_ms": 120000,
+        "sampling_policy": "uniform",
+        "interval_ms": 45000,
+        "frame_count": 3,
+        "text_frame_count": 3,
+        "coverage_truncated": false
+      },
+      "rows": [
+        {
+          "ocr_frame_id": "ocr_000001",
+          "requested_ms": 20000,
+          "ocr_timestamp_ms": 20001,
+          "source_pts": 20000,
+          "source_time_base": "1/1000",
+          "observed_text": "Redis L1 缓存",
+          "ocr_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        },
+        {
+          "ocr_frame_id": "ocr_000002",
+          "requested_ms": 60000,
+          "ocr_timestamp_ms": 60000,
+          "source_pts": 60000,
+          "source_time_base": "1/1000",
+          "observed_text": "Redis L2 缓存",
+          "ocr_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+        },
+        {
+          "ocr_frame_id": "ocr_000003",
+          "requested_ms": 100000,
+          "ocr_timestamp_ms": 100000,
+          "source_pts": 100000,
+          "source_time_base": "1/1000",
+          "observed_text": "缓存失效 CacheMiss Straße ＡＡ \u0000 \u001b \\u001B payload",
+          "ocr_sha256": "0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a"
+        }
+      ],
+      "result": {
+        "schema_version": "1.5",
+        "session_id": "11111111-1111-4111-8111-111111111111",
+        "turn_id": "22222222-2222-4222-8222-222222222222",
+        "job_id": "33333333-3333-4333-8333-333333333333",
+        "video_id": "44444444-4444-4444-8444-444444444444",
+        "source_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "transcript_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "question": "合成协议样例：按画面中的缓存术语查找并看图。",
+        "answer": "【原句依据 b01】\n这里增加缓存层来承接重复读取。\n\n【画面观察 b02】\n合成截图中包含缓存术语。",
+        "answer_scope": "VIDEO",
+        "citations": [
+          {
+            "utterance_id": "u1",
+            "start_ms": 0,
+            "end_ms": 1500,
+            "text": "这里增加缓存层来承接重复读取。"
+          }
+        ],
+        "tool_calls": [
+          {
+            "step": 1,
+            "tool_name": "search_transcript",
+            "arguments": {
+              "query": "缓存",
+              "top_k": 1
+            },
+            "result_utterance_ids": [
+              "u1"
+            ],
+            "result_frame_ids": [],
+            "origin": "MODEL"
+          },
+          {
+            "step": 2,
+            "tool_name": "search_transcript",
+            "arguments": {
+              "query": "缓存",
+              "top_k": 1
+            },
+            "result_utterance_ids": [],
+            "result_frame_ids": [],
+            "origin": "MODEL"
+          },
+          {
+            "step": 3,
+            "tool_name": "search_screen_text",
+            "arguments": {
+              "query": "Redis L1",
+              "top_k": 1
+            },
+            "result_utterance_ids": [],
+            "result_frame_ids": [
+              "f0001"
+            ],
+            "origin": "MODEL"
+          }
+        ],
+        "provenance": {
+          "text_model_id": "synthetic-vl",
+          "prompt_version": "video-agent-evidence-screen-v1",
+          "retrieval_mode": "bm25"
+        },
+        "suggested_clip_instruction": null,
+        "visual_evidence": [
+          {
+            "frame_id": "f0001",
+            "requested_ms": 20000,
+            "timestamp_ms": 20000,
+            "source_pts": 20000,
+            "source_time_base": "1/1000",
+            "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "bytes": 1234,
+            "width": 1280,
+            "height": 720
+          }
+        ],
+        "visual_citations": [
+          {
+            "frame_id": "f0001",
+            "explanation": "关联分项：b02"
+          }
+        ],
+        "evidence_mode": "structured",
+        "answer_blocks": [
+          {
+            "block_id": "b01",
+            "kind": "SPEECH",
+            "text": "这里增加缓存层来承接重复读取。",
+            "utterance_ids": [
+              "u1"
+            ],
+            "frame_ids": []
+          },
+          {
+            "block_id": "b02",
+            "kind": "FRAME",
+            "text": "合成截图中包含缓存术语。",
+            "utterance_ids": [],
+            "frame_ids": [
+              "f0001"
+            ]
+          }
+        ],
+        "evidence_policy": "screen_search_v1",
+        "screen_source": {
+          "segment_stage_id": "55555555-5555-4555-8555-555555555555",
+          "segment_manifest_hash": "1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a",
+          "frames_hash": "2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
+          "observations_hash": "3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c",
+          "index_version": "screen-text-literal-v1",
+          "index_hash": "5b0f2b36168883f100f980a33eb4c9ada0179667cb4dcea50c7ca732c828e0de",
+          "duration_ms": 120000,
+          "sampling_policy": "uniform",
+          "interval_ms": 45000,
+          "frame_count": 3,
+          "text_frame_count": 3,
+          "coverage_truncated": false
+        },
+        "screen_searches": [
+          {
+            "tool_step": 3,
+            "status": "OBSERVED",
+            "error_code": null,
+            "total_match_count": 1,
+            "hits": [
+              {
+                "ocr_frame_id": "ocr_000001",
+                "requested_ms": 20000,
+                "ocr_timestamp_ms": 20001,
+                "source_pts": 20000,
+                "source_time_base": "1/1000",
+                "observed_text": "Redis L1 缓存",
+                "frame_id": "f0001"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "repeated_asr_cannot_claim_evidence",
+      "expected_valid": false,
+      "reason": "same named tool and canonical arguments cannot return evidence twice",
+      "duration_ms": 120000,
+      "screen_source": {
+        "segment_stage_id": "55555555-5555-4555-8555-555555555555",
+        "segment_manifest_hash": "1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a",
+        "frames_hash": "2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
+        "observations_hash": "3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c",
+        "index_version": "screen-text-literal-v1",
+        "index_hash": "5b0f2b36168883f100f980a33eb4c9ada0179667cb4dcea50c7ca732c828e0de",
+        "duration_ms": 120000,
+        "sampling_policy": "uniform",
+        "interval_ms": 45000,
+        "frame_count": 3,
+        "text_frame_count": 3,
+        "coverage_truncated": false
+      },
+      "rows": [
+        {
+          "ocr_frame_id": "ocr_000001",
+          "requested_ms": 20000,
+          "ocr_timestamp_ms": 20001,
+          "source_pts": 20000,
+          "source_time_base": "1/1000",
+          "observed_text": "Redis L1 缓存",
+          "ocr_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        },
+        {
+          "ocr_frame_id": "ocr_000002",
+          "requested_ms": 60000,
+          "ocr_timestamp_ms": 60000,
+          "source_pts": 60000,
+          "source_time_base": "1/1000",
+          "observed_text": "Redis L2 缓存",
+          "ocr_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+        },
+        {
+          "ocr_frame_id": "ocr_000003",
+          "requested_ms": 100000,
+          "ocr_timestamp_ms": 100000,
+          "source_pts": 100000,
+          "source_time_base": "1/1000",
+          "observed_text": "缓存失效 CacheMiss Straße ＡＡ \u0000 \u001b \\u001B payload",
+          "ocr_sha256": "0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a"
+        }
+      ],
+      "result": {
+        "schema_version": "1.5",
+        "session_id": "11111111-1111-4111-8111-111111111111",
+        "turn_id": "22222222-2222-4222-8222-222222222222",
+        "job_id": "33333333-3333-4333-8333-333333333333",
+        "video_id": "44444444-4444-4444-8444-444444444444",
+        "source_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "transcript_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "question": "合成协议样例：按画面中的缓存术语查找并看图。",
+        "answer": "【原句依据 b01】\n这里增加缓存层来承接重复读取。\n\n【画面观察 b02】\n合成截图中包含缓存术语。",
+        "answer_scope": "VIDEO",
+        "citations": [
+          {
+            "utterance_id": "u1",
+            "start_ms": 0,
+            "end_ms": 1500,
+            "text": "这里增加缓存层来承接重复读取。"
+          }
+        ],
+        "tool_calls": [
+          {
+            "step": 1,
+            "tool_name": "search_transcript",
+            "arguments": {
+              "query": "缓存",
+              "top_k": 1
+            },
+            "result_utterance_ids": [
+              "u1"
+            ],
+            "result_frame_ids": [],
+            "origin": "MODEL"
+          },
+          {
+            "step": 2,
+            "tool_name": "search_transcript",
+            "arguments": {
+              "query": "缓存",
+              "top_k": 1
+            },
+            "result_utterance_ids": [
+              "u1"
+            ],
+            "result_frame_ids": [],
+            "origin": "MODEL"
+          },
+          {
+            "step": 3,
+            "tool_name": "search_screen_text",
+            "arguments": {
+              "query": "Redis L1",
+              "top_k": 1
+            },
+            "result_utterance_ids": [],
+            "result_frame_ids": [
+              "f0001"
+            ],
+            "origin": "MODEL"
+          }
+        ],
+        "provenance": {
+          "text_model_id": "synthetic-vl",
+          "prompt_version": "video-agent-evidence-screen-v1",
+          "retrieval_mode": "bm25"
+        },
+        "suggested_clip_instruction": null,
+        "visual_evidence": [
+          {
+            "frame_id": "f0001",
+            "requested_ms": 20000,
+            "timestamp_ms": 20000,
+            "source_pts": 20000,
+            "source_time_base": "1/1000",
+            "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "bytes": 1234,
+            "width": 1280,
+            "height": 720
+          }
+        ],
+        "visual_citations": [
+          {
+            "frame_id": "f0001",
+            "explanation": "关联分项：b02"
+          }
+        ],
+        "evidence_mode": "structured",
+        "answer_blocks": [
+          {
+            "block_id": "b01",
+            "kind": "SPEECH",
+            "text": "这里增加缓存层来承接重复读取。",
+            "utterance_ids": [
+              "u1"
+            ],
+            "frame_ids": []
+          },
+          {
+            "block_id": "b02",
+            "kind": "FRAME",
+            "text": "合成截图中包含缓存术语。",
+            "utterance_ids": [],
+            "frame_ids": [
+              "f0001"
+            ]
+          }
+        ],
+        "evidence_policy": "screen_search_v1",
+        "screen_source": {
+          "segment_stage_id": "55555555-5555-4555-8555-555555555555",
+          "segment_manifest_hash": "1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a",
+          "frames_hash": "2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
+          "observations_hash": "3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c",
+          "index_version": "screen-text-literal-v1",
+          "index_hash": "5b0f2b36168883f100f980a33eb4c9ada0179667cb4dcea50c7ca732c828e0de",
+          "duration_ms": 120000,
+          "sampling_policy": "uniform",
+          "interval_ms": 45000,
+          "frame_count": 3,
+          "text_frame_count": 3,
+          "coverage_truncated": false
+        },
+        "screen_searches": [
+          {
+            "tool_step": 3,
+            "status": "OBSERVED",
+            "error_code": null,
+            "total_match_count": 1,
+            "hits": [
+              {
+                "ocr_frame_id": "ocr_000001",
+                "requested_ms": 20000,
+                "ocr_timestamp_ms": 20001,
+                "source_pts": 20000,
+                "source_time_base": "1/1000",
+                "observed_text": "Redis L1 缓存",
+                "frame_id": "f0001"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "reordered_keys_still_repeated_asr",
+      "expected_valid": false,
+      "reason": "same named tool and canonical arguments cannot return evidence twice",
+      "duration_ms": 120000,
+      "screen_source": {
+        "segment_stage_id": "55555555-5555-4555-8555-555555555555",
+        "segment_manifest_hash": "1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a",
+        "frames_hash": "2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
+        "observations_hash": "3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c",
+        "index_version": "screen-text-literal-v1",
+        "index_hash": "5b0f2b36168883f100f980a33eb4c9ada0179667cb4dcea50c7ca732c828e0de",
+        "duration_ms": 120000,
+        "sampling_policy": "uniform",
+        "interval_ms": 45000,
+        "frame_count": 3,
+        "text_frame_count": 3,
+        "coverage_truncated": false
+      },
+      "rows": [
+        {
+          "ocr_frame_id": "ocr_000001",
+          "requested_ms": 20000,
+          "ocr_timestamp_ms": 20001,
+          "source_pts": 20000,
+          "source_time_base": "1/1000",
+          "observed_text": "Redis L1 缓存",
+          "ocr_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        },
+        {
+          "ocr_frame_id": "ocr_000002",
+          "requested_ms": 60000,
+          "ocr_timestamp_ms": 60000,
+          "source_pts": 60000,
+          "source_time_base": "1/1000",
+          "observed_text": "Redis L2 缓存",
+          "ocr_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+        },
+        {
+          "ocr_frame_id": "ocr_000003",
+          "requested_ms": 100000,
+          "ocr_timestamp_ms": 100000,
+          "source_pts": 100000,
+          "source_time_base": "1/1000",
+          "observed_text": "缓存失效 CacheMiss Straße ＡＡ \u0000 \u001b \\u001B payload",
+          "ocr_sha256": "0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a"
+        }
+      ],
+      "result": {
+        "schema_version": "1.5",
+        "session_id": "11111111-1111-4111-8111-111111111111",
+        "turn_id": "22222222-2222-4222-8222-222222222222",
+        "job_id": "33333333-3333-4333-8333-333333333333",
+        "video_id": "44444444-4444-4444-8444-444444444444",
+        "source_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "transcript_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "question": "合成协议样例：按画面中的缓存术语查找并看图。",
+        "answer": "【原句依据 b01】\n这里增加缓存层来承接重复读取。\n\n【画面观察 b02】\n合成截图中包含缓存术语。",
+        "answer_scope": "VIDEO",
+        "citations": [
+          {
+            "utterance_id": "u1",
+            "start_ms": 0,
+            "end_ms": 1500,
+            "text": "这里增加缓存层来承接重复读取。"
+          }
+        ],
+        "tool_calls": [
+          {
+            "step": 1,
+            "tool_name": "search_transcript",
+            "arguments": {
+              "query": "缓存",
+              "top_k": 1
+            },
+            "result_utterance_ids": [
+              "u1"
+            ],
+            "result_frame_ids": [],
+            "origin": "MODEL"
+          },
+          {
+            "step": 2,
+            "tool_name": "search_transcript",
+            "arguments": {
+              "top_k": 1,
+              "query": "缓存"
+            },
+            "result_utterance_ids": [
+              "u1"
+            ],
+            "result_frame_ids": [],
+            "origin": "MODEL"
+          },
+          {
+            "step": 3,
+            "tool_name": "search_screen_text",
+            "arguments": {
+              "query": "Redis L1",
+              "top_k": 1
+            },
+            "result_utterance_ids": [],
+            "result_frame_ids": [
+              "f0001"
+            ],
+            "origin": "MODEL"
+          }
+        ],
+        "provenance": {
+          "text_model_id": "synthetic-vl",
+          "prompt_version": "video-agent-evidence-screen-v1",
+          "retrieval_mode": "bm25"
+        },
+        "suggested_clip_instruction": null,
+        "visual_evidence": [
+          {
+            "frame_id": "f0001",
+            "requested_ms": 20000,
+            "timestamp_ms": 20000,
+            "source_pts": 20000,
+            "source_time_base": "1/1000",
+            "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "bytes": 1234,
+            "width": 1280,
+            "height": 720
+          }
+        ],
+        "visual_citations": [
+          {
+            "frame_id": "f0001",
+            "explanation": "关联分项：b02"
+          }
+        ],
+        "evidence_mode": "structured",
+        "answer_blocks": [
+          {
+            "block_id": "b01",
+            "kind": "SPEECH",
+            "text": "这里增加缓存层来承接重复读取。",
+            "utterance_ids": [
+              "u1"
+            ],
+            "frame_ids": []
+          },
+          {
+            "block_id": "b02",
+            "kind": "FRAME",
+            "text": "合成截图中包含缓存术语。",
+            "utterance_ids": [],
+            "frame_ids": [
+              "f0001"
+            ]
+          }
+        ],
+        "evidence_policy": "screen_search_v1",
+        "screen_source": {
+          "segment_stage_id": "55555555-5555-4555-8555-555555555555",
+          "segment_manifest_hash": "1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a",
+          "frames_hash": "2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
+          "observations_hash": "3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c",
+          "index_version": "screen-text-literal-v1",
+          "index_hash": "5b0f2b36168883f100f980a33eb4c9ada0179667cb4dcea50c7ca732c828e0de",
+          "duration_ms": 120000,
+          "sampling_policy": "uniform",
+          "interval_ms": 45000,
+          "frame_count": 3,
+          "text_frame_count": 3,
+          "coverage_truncated": false
+        },
+        "screen_searches": [
+          {
+            "tool_step": 3,
+            "status": "OBSERVED",
+            "error_code": null,
+            "total_match_count": 1,
+            "hits": [
+              {
+                "ocr_frame_id": "ocr_000001",
+                "requested_ms": 20000,
+                "ocr_timestamp_ms": 20001,
+                "source_pts": 20000,
+                "source_time_base": "1/1000",
+                "observed_text": "Redis L1 缓存",
+                "frame_id": "f0001"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "wrong_source_hash",
+      "expected_valid": false,
+      "reason": "wrong_source_hash",
+      "duration_ms": 120000,
+      "screen_source": {
+        "segment_stage_id": "55555555-5555-4555-8555-555555555555",
+        "segment_manifest_hash": "1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a",
+        "frames_hash": "2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
+        "observations_hash": "3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c",
+        "index_version": "screen-text-literal-v1",
+        "index_hash": "5b0f2b36168883f100f980a33eb4c9ada0179667cb4dcea50c7ca732c828e0de",
+        "duration_ms": 120000,
+        "sampling_policy": "uniform",
+        "interval_ms": 45000,
+        "frame_count": 3,
+        "text_frame_count": 3,
+        "coverage_truncated": false
+      },
+      "rows": [
+        {
+          "ocr_frame_id": "ocr_000001",
+          "requested_ms": 20000,
+          "ocr_timestamp_ms": 20001,
+          "source_pts": 20000,
+          "source_time_base": "1/1000",
+          "observed_text": "Redis L1 缓存",
+          "ocr_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        },
+        {
+          "ocr_frame_id": "ocr_000002",
+          "requested_ms": 60000,
+          "ocr_timestamp_ms": 60000,
+          "source_pts": 60000,
+          "source_time_base": "1/1000",
+          "observed_text": "Redis L2 缓存",
+          "ocr_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+        },
+        {
+          "ocr_frame_id": "ocr_000003",
+          "requested_ms": 100000,
+          "ocr_timestamp_ms": 100000,
+          "source_pts": 100000,
+          "source_time_base": "1/1000",
+          "observed_text": "缓存失效 CacheMiss Straße ＡＡ \u0000 \u001b \\u001B payload",
+          "ocr_sha256": "0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a"
+        }
+      ],
+      "result": {
+        "schema_version": "1.5",
+        "session_id": "11111111-1111-4111-8111-111111111111",
+        "turn_id": "22222222-2222-4222-8222-222222222222",
+        "job_id": "33333333-3333-4333-8333-333333333333",
+        "video_id": "44444444-4444-4444-8444-444444444444",
+        "source_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "transcript_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "question": "合成协议样例：按画面中的缓存术语查找并看图。",
+        "answer": "【画面观察 b01】\n合成截图中包含缓存术语。",
+        "answer_scope": "VIDEO",
+        "citations": [],
+        "tool_calls": [
+          {
+            "step": 1,
+            "tool_name": "search_screen_text",
+            "arguments": {
+              "query": "redis l1",
+              "top_k": 1
+            },
+            "result_utterance_ids": [],
+            "result_frame_ids": [
+              "f0001"
+            ],
+            "origin": "MODEL"
+          }
+        ],
+        "provenance": {
+          "text_model_id": "synthetic-vl",
+          "prompt_version": "video-agent-evidence-screen-v1",
+          "retrieval_mode": "none"
+        },
+        "suggested_clip_instruction": null,
+        "visual_evidence": [
+          {
+            "frame_id": "f0001",
+            "requested_ms": 20000,
+            "timestamp_ms": 20000,
+            "source_pts": 20000,
+            "source_time_base": "1/1000",
+            "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "bytes": 1234,
+            "width": 1280,
+            "height": 720
+          }
+        ],
+        "visual_citations": [
+          {
+            "frame_id": "f0001",
+            "explanation": "关联分项：b01"
+          }
+        ],
+        "evidence_mode": "structured",
+        "answer_blocks": [
+          {
+            "block_id": "b01",
+            "kind": "FRAME",
+            "text": "合成截图中包含缓存术语。",
+            "utterance_ids": [],
+            "frame_ids": [
+              "f0001"
+            ]
+          }
+        ],
+        "evidence_policy": "screen_search_v1",
+        "screen_source": {
+          "segment_stage_id": "55555555-5555-4555-8555-555555555555",
+          "segment_manifest_hash": "1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a",
+          "frames_hash": "2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
+          "observations_hash": "3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c",
+          "index_version": "screen-text-literal-v1",
+          "index_hash": "9999999999999999999999999999999999999999999999999999999999999999",
+          "duration_ms": 120000,
+          "sampling_policy": "uniform",
+          "interval_ms": 45000,
+          "frame_count": 3,
+          "text_frame_count": 3,
+          "coverage_truncated": false
+        },
+        "screen_searches": [
+          {
+            "tool_step": 1,
+            "status": "OBSERVED",
+            "error_code": null,
+            "total_match_count": 1,
+            "hits": [
+              {
+                "ocr_frame_id": "ocr_000001",
+                "requested_ms": 20000,
+                "ocr_timestamp_ms": 20001,
+                "source_pts": 20000,
+                "source_time_base": "1/1000",
+                "observed_text": "Redis L1 缓存",
+                "frame_id": "f0001"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "missing_receipt",
+      "expected_valid": false,
+      "reason": "missing_receipt",
+      "duration_ms": 120000,
+      "screen_source": {
+        "segment_stage_id": "55555555-5555-4555-8555-555555555555",
+        "segment_manifest_hash": "1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a",
+        "frames_hash": "2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
+        "observations_hash": "3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c",
+        "index_version": "screen-text-literal-v1",
+        "index_hash": "5b0f2b36168883f100f980a33eb4c9ada0179667cb4dcea50c7ca732c828e0de",
+        "duration_ms": 120000,
+        "sampling_policy": "uniform",
+        "interval_ms": 45000,
+        "frame_count": 3,
+        "text_frame_count": 3,
+        "coverage_truncated": false
+      },
+      "rows": [
+        {
+          "ocr_frame_id": "ocr_000001",
+          "requested_ms": 20000,
+          "ocr_timestamp_ms": 20001,
+          "source_pts": 20000,
+          "source_time_base": "1/1000",
+          "observed_text": "Redis L1 缓存",
+          "ocr_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        },
+        {
+          "ocr_frame_id": "ocr_000002",
+          "requested_ms": 60000,
+          "ocr_timestamp_ms": 60000,
+          "source_pts": 60000,
+          "source_time_base": "1/1000",
+          "observed_text": "Redis L2 缓存",
+          "ocr_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+        },
+        {
+          "ocr_frame_id": "ocr_000003",
+          "requested_ms": 100000,
+          "ocr_timestamp_ms": 100000,
+          "source_pts": 100000,
+          "source_time_base": "1/1000",
+          "observed_text": "缓存失效 CacheMiss Straße ＡＡ \u0000 \u001b \\u001B payload",
+          "ocr_sha256": "0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a"
+        }
+      ],
+      "result": {
+        "schema_version": "1.5",
+        "session_id": "11111111-1111-4111-8111-111111111111",
+        "turn_id": "22222222-2222-4222-8222-222222222222",
+        "job_id": "33333333-3333-4333-8333-333333333333",
+        "video_id": "44444444-4444-4444-8444-444444444444",
+        "source_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "transcript_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "question": "合成协议样例：按画面中的缓存术语查找并看图。",
+        "answer": "【画面观察 b01】\n合成截图中包含缓存术语。",
+        "answer_scope": "VIDEO",
+        "citations": [],
+        "tool_calls": [
+          {
+            "step": 1,
+            "tool_name": "search_screen_text",
+            "arguments": {
+              "query": "redis l1",
+              "top_k": 1
+            },
+            "result_utterance_ids": [],
+            "result_frame_ids": [
+              "f0001"
+            ],
+            "origin": "MODEL"
+          }
+        ],
+        "provenance": {
+          "text_model_id": "synthetic-vl",
+          "prompt_version": "video-agent-evidence-screen-v1",
+          "retrieval_mode": "none"
+        },
+        "suggested_clip_instruction": null,
+        "visual_evidence": [
+          {
+            "frame_id": "f0001",
+            "requested_ms": 20000,
+            "timestamp_ms": 20000,
+            "source_pts": 20000,
+            "source_time_base": "1/1000",
+            "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "bytes": 1234,
+            "width": 1280,
+            "height": 720
+          }
+        ],
+        "visual_citations": [
+          {
+            "frame_id": "f0001",
+            "explanation": "关联分项：b01"
+          }
+        ],
+        "evidence_mode": "structured",
+        "answer_blocks": [
+          {
+            "block_id": "b01",
+            "kind": "FRAME",
+            "text": "合成截图中包含缓存术语。",
+            "utterance_ids": [],
+            "frame_ids": [
+              "f0001"
+            ]
+          }
+        ],
+        "evidence_policy": "screen_search_v1",
+        "screen_source": {
+          "segment_stage_id": "55555555-5555-4555-8555-555555555555",
+          "segment_manifest_hash": "1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a",
+          "frames_hash": "2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
+          "observations_hash": "3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c",
+          "index_version": "screen-text-literal-v1",
+          "index_hash": "5b0f2b36168883f100f980a33eb4c9ada0179667cb4dcea50c7ca732c828e0de",
+          "duration_ms": 120000,
+          "sampling_policy": "uniform",
+          "interval_ms": 45000,
+          "frame_count": 3,
+          "text_frame_count": 3,
+          "coverage_truncated": false
+        },
+        "screen_searches": []
+      }
+    },
+    {
+      "case_id": "unseen_frame",
+      "expected_valid": false,
+      "reason": "unseen_frame",
+      "duration_ms": 120000,
+      "screen_source": {
+        "segment_stage_id": "55555555-5555-4555-8555-555555555555",
+        "segment_manifest_hash": "1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a",
+        "frames_hash": "2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
+        "observations_hash": "3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c",
+        "index_version": "screen-text-literal-v1",
+        "index_hash": "5b0f2b36168883f100f980a33eb4c9ada0179667cb4dcea50c7ca732c828e0de",
+        "duration_ms": 120000,
+        "sampling_policy": "uniform",
+        "interval_ms": 45000,
+        "frame_count": 3,
+        "text_frame_count": 3,
+        "coverage_truncated": false
+      },
+      "rows": [
+        {
+          "ocr_frame_id": "ocr_000001",
+          "requested_ms": 20000,
+          "ocr_timestamp_ms": 20001,
+          "source_pts": 20000,
+          "source_time_base": "1/1000",
+          "observed_text": "Redis L1 缓存",
+          "ocr_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        },
+        {
+          "ocr_frame_id": "ocr_000002",
+          "requested_ms": 60000,
+          "ocr_timestamp_ms": 60000,
+          "source_pts": 60000,
+          "source_time_base": "1/1000",
+          "observed_text": "Redis L2 缓存",
+          "ocr_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+        },
+        {
+          "ocr_frame_id": "ocr_000003",
+          "requested_ms": 100000,
+          "ocr_timestamp_ms": 100000,
+          "source_pts": 100000,
+          "source_time_base": "1/1000",
+          "observed_text": "缓存失效 CacheMiss Straße ＡＡ \u0000 \u001b \\u001B payload",
+          "ocr_sha256": "0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a"
+        }
+      ],
+      "result": {
+        "schema_version": "1.5",
+        "session_id": "11111111-1111-4111-8111-111111111111",
+        "turn_id": "22222222-2222-4222-8222-222222222222",
+        "job_id": "33333333-3333-4333-8333-333333333333",
+        "video_id": "44444444-4444-4444-8444-444444444444",
+        "source_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "transcript_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "question": "合成协议样例：按画面中的缓存术语查找并看图。",
+        "answer": "【画面观察 b01】\n合成截图中包含缓存术语。",
+        "answer_scope": "VIDEO",
+        "citations": [],
+        "tool_calls": [
+          {
+            "step": 1,
+            "tool_name": "search_screen_text",
+            "arguments": {
+              "query": "redis l1",
+              "top_k": 1
+            },
+            "result_utterance_ids": [],
+            "result_frame_ids": [
+              "f0001"
+            ],
+            "origin": "MODEL"
+          }
+        ],
+        "provenance": {
+          "text_model_id": "synthetic-vl",
+          "prompt_version": "video-agent-evidence-screen-v1",
+          "retrieval_mode": "none"
+        },
+        "suggested_clip_instruction": null,
+        "visual_evidence": [
+          {
+            "frame_id": "f0001",
+            "requested_ms": 20000,
+            "timestamp_ms": 20000,
+            "source_pts": 20000,
+            "source_time_base": "1/1000",
+            "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "bytes": 1234,
+            "width": 1280,
+            "height": 720
+          }
+        ],
+        "visual_citations": [
+          {
+            "frame_id": "f0001",
+            "explanation": "关联分项：b01"
+          }
+        ],
+        "evidence_mode": "structured",
+        "answer_blocks": [
+          {
+            "block_id": "b01",
+            "kind": "FRAME",
+            "text": "合成截图中包含缓存术语。",
+            "utterance_ids": [],
+            "frame_ids": [
+              "f0001"
+            ]
+          }
+        ],
+        "evidence_policy": "screen_search_v1",
+        "screen_source": {
+          "segment_stage_id": "55555555-5555-4555-8555-555555555555",
+          "segment_manifest_hash": "1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a",
+          "frames_hash": "2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
+          "observations_hash": "3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c",
+          "index_version": "screen-text-literal-v1",
+          "index_hash": "5b0f2b36168883f100f980a33eb4c9ada0179667cb4dcea50c7ca732c828e0de",
+          "duration_ms": 120000,
+          "sampling_policy": "uniform",
+          "interval_ms": 45000,
+          "frame_count": 3,
+          "text_frame_count": 3,
+          "coverage_truncated": false
+        },
+        "screen_searches": [
+          {
+            "tool_step": 1,
+            "status": "OBSERVED",
+            "error_code": null,
+            "total_match_count": 1,
+            "hits": [
+              {
+                "ocr_frame_id": "ocr_000001",
+                "requested_ms": 20000,
+                "ocr_timestamp_ms": 20001,
+                "source_pts": 20000,
+                "source_time_base": "1/1000",
+                "observed_text": "Redis L1 缓存",
+                "frame_id": "f0009"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "wrong_locator_pts",
+      "expected_valid": false,
+      "reason": "wrong_locator_pts",
+      "duration_ms": 120000,
+      "screen_source": {
+        "segment_stage_id": "55555555-5555-4555-8555-555555555555",
+        "segment_manifest_hash": "1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a",
+        "frames_hash": "2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
+        "observations_hash": "3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c",
+        "index_version": "screen-text-literal-v1",
+        "index_hash": "5b0f2b36168883f100f980a33eb4c9ada0179667cb4dcea50c7ca732c828e0de",
+        "duration_ms": 120000,
+        "sampling_policy": "uniform",
+        "interval_ms": 45000,
+        "frame_count": 3,
+        "text_frame_count": 3,
+        "coverage_truncated": false
+      },
+      "rows": [
+        {
+          "ocr_frame_id": "ocr_000001",
+          "requested_ms": 20000,
+          "ocr_timestamp_ms": 20001,
+          "source_pts": 20000,
+          "source_time_base": "1/1000",
+          "observed_text": "Redis L1 缓存",
+          "ocr_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        },
+        {
+          "ocr_frame_id": "ocr_000002",
+          "requested_ms": 60000,
+          "ocr_timestamp_ms": 60000,
+          "source_pts": 60000,
+          "source_time_base": "1/1000",
+          "observed_text": "Redis L2 缓存",
+          "ocr_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+        },
+        {
+          "ocr_frame_id": "ocr_000003",
+          "requested_ms": 100000,
+          "ocr_timestamp_ms": 100000,
+          "source_pts": 100000,
+          "source_time_base": "1/1000",
+          "observed_text": "缓存失效 CacheMiss Straße ＡＡ \u0000 \u001b \\u001B payload",
+          "ocr_sha256": "0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a"
+        }
+      ],
+      "result": {
+        "schema_version": "1.5",
+        "session_id": "11111111-1111-4111-8111-111111111111",
+        "turn_id": "22222222-2222-4222-8222-222222222222",
+        "job_id": "33333333-3333-4333-8333-333333333333",
+        "video_id": "44444444-4444-4444-8444-444444444444",
+        "source_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "transcript_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "question": "合成协议样例：按画面中的缓存术语查找并看图。",
+        "answer": "【画面观察 b01】\n合成截图中包含缓存术语。",
+        "answer_scope": "VIDEO",
+        "citations": [],
+        "tool_calls": [
+          {
+            "step": 1,
+            "tool_name": "search_screen_text",
+            "arguments": {
+              "query": "redis l1",
+              "top_k": 1
+            },
+            "result_utterance_ids": [],
+            "result_frame_ids": [
+              "f0001"
+            ],
+            "origin": "MODEL"
+          }
+        ],
+        "provenance": {
+          "text_model_id": "synthetic-vl",
+          "prompt_version": "video-agent-evidence-screen-v1",
+          "retrieval_mode": "none"
+        },
+        "suggested_clip_instruction": null,
+        "visual_evidence": [
+          {
+            "frame_id": "f0001",
+            "requested_ms": 20000,
+            "timestamp_ms": 20000,
+            "source_pts": 20000,
+            "source_time_base": "1/1000",
+            "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "bytes": 1234,
+            "width": 1280,
+            "height": 720
+          }
+        ],
+        "visual_citations": [
+          {
+            "frame_id": "f0001",
+            "explanation": "关联分项：b01"
+          }
+        ],
+        "evidence_mode": "structured",
+        "answer_blocks": [
+          {
+            "block_id": "b01",
+            "kind": "FRAME",
+            "text": "合成截图中包含缓存术语。",
+            "utterance_ids": [],
+            "frame_ids": [
+              "f0001"
+            ]
+          }
+        ],
+        "evidence_policy": "screen_search_v1",
+        "screen_source": {
+          "segment_stage_id": "55555555-5555-4555-8555-555555555555",
+          "segment_manifest_hash": "1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a",
+          "frames_hash": "2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
+          "observations_hash": "3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c",
+          "index_version": "screen-text-literal-v1",
+          "index_hash": "5b0f2b36168883f100f980a33eb4c9ada0179667cb4dcea50c7ca732c828e0de",
+          "duration_ms": 120000,
+          "sampling_policy": "uniform",
+          "interval_ms": 45000,
+          "frame_count": 3,
+          "text_frame_count": 3,
+          "coverage_truncated": false
+        },
+        "screen_searches": [
+          {
+            "tool_step": 1,
+            "status": "OBSERVED",
+            "error_code": null,
+            "total_match_count": 1,
+            "hits": [
+              {
+                "ocr_frame_id": "ocr_000001",
+                "requested_ms": 20000,
+                "ocr_timestamp_ms": 20001,
+                "source_pts": 20001,
+                "source_time_base": "1/1000",
+                "observed_text": "Redis L1 缓存",
+                "frame_id": "f0001"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "ocr_ids_are_not_speech",
+      "expected_valid": false,
+      "reason": "ocr_ids_are_not_speech",
+      "duration_ms": 120000,
+      "screen_source": {
+        "segment_stage_id": "55555555-5555-4555-8555-555555555555",
+        "segment_manifest_hash": "1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a",
+        "frames_hash": "2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
+        "observations_hash": "3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c",
+        "index_version": "screen-text-literal-v1",
+        "index_hash": "5b0f2b36168883f100f980a33eb4c9ada0179667cb4dcea50c7ca732c828e0de",
+        "duration_ms": 120000,
+        "sampling_policy": "uniform",
+        "interval_ms": 45000,
+        "frame_count": 3,
+        "text_frame_count": 3,
+        "coverage_truncated": false
+      },
+      "rows": [
+        {
+          "ocr_frame_id": "ocr_000001",
+          "requested_ms": 20000,
+          "ocr_timestamp_ms": 20001,
+          "source_pts": 20000,
+          "source_time_base": "1/1000",
+          "observed_text": "Redis L1 缓存",
+          "ocr_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        },
+        {
+          "ocr_frame_id": "ocr_000002",
+          "requested_ms": 60000,
+          "ocr_timestamp_ms": 60000,
+          "source_pts": 60000,
+          "source_time_base": "1/1000",
+          "observed_text": "Redis L2 缓存",
+          "ocr_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+        },
+        {
+          "ocr_frame_id": "ocr_000003",
+          "requested_ms": 100000,
+          "ocr_timestamp_ms": 100000,
+          "source_pts": 100000,
+          "source_time_base": "1/1000",
+          "observed_text": "缓存失效 CacheMiss Straße ＡＡ \u0000 \u001b \\u001B payload",
+          "ocr_sha256": "0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a"
+        }
+      ],
+      "result": {
+        "schema_version": "1.5",
+        "session_id": "11111111-1111-4111-8111-111111111111",
+        "turn_id": "22222222-2222-4222-8222-222222222222",
+        "job_id": "33333333-3333-4333-8333-333333333333",
+        "video_id": "44444444-4444-4444-8444-444444444444",
+        "source_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "transcript_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "question": "合成协议样例：按画面中的缓存术语查找并看图。",
+        "answer": "【画面观察 b01】\n合成截图中包含缓存术语。",
+        "answer_scope": "VIDEO",
+        "citations": [],
+        "tool_calls": [
+          {
+            "step": 1,
+            "tool_name": "search_screen_text",
+            "arguments": {
+              "query": "redis l1",
+              "top_k": 1
+            },
+            "result_utterance_ids": [
+              "ocr_000001"
+            ],
+            "result_frame_ids": [
+              "f0001"
+            ],
+            "origin": "MODEL"
+          }
+        ],
+        "provenance": {
+          "text_model_id": "synthetic-vl",
+          "prompt_version": "video-agent-evidence-screen-v1",
+          "retrieval_mode": "none"
+        },
+        "suggested_clip_instruction": null,
+        "visual_evidence": [
+          {
+            "frame_id": "f0001",
+            "requested_ms": 20000,
+            "timestamp_ms": 20000,
+            "source_pts": 20000,
+            "source_time_base": "1/1000",
+            "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "bytes": 1234,
+            "width": 1280,
+            "height": 720
+          }
+        ],
+        "visual_citations": [
+          {
+            "frame_id": "f0001",
+            "explanation": "关联分项：b01"
+          }
+        ],
+        "evidence_mode": "structured",
+        "answer_blocks": [
+          {
+            "block_id": "b01",
+            "kind": "FRAME",
+            "text": "合成截图中包含缓存术语。",
+            "utterance_ids": [],
+            "frame_ids": [
+              "f0001"
+            ]
+          }
+        ],
+        "evidence_policy": "screen_search_v1",
+        "screen_source": {
+          "segment_stage_id": "55555555-5555-4555-8555-555555555555",
+          "segment_manifest_hash": "1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a",
+          "frames_hash": "2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
+          "observations_hash": "3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c",
+          "index_version": "screen-text-literal-v1",
+          "index_hash": "5b0f2b36168883f100f980a33eb4c9ada0179667cb4dcea50c7ca732c828e0de",
+          "duration_ms": 120000,
+          "sampling_policy": "uniform",
+          "interval_ms": 45000,
+          "frame_count": 3,
+          "text_frame_count": 3,
+          "coverage_truncated": false
+        },
+        "screen_searches": [
+          {
+            "tool_step": 1,
+            "status": "OBSERVED",
+            "error_code": null,
+            "total_match_count": 1,
+            "hits": [
+              {
+                "ocr_frame_id": "ocr_000001",
+                "requested_ms": 20000,
+                "ocr_timestamp_ms": 20001,
+                "source_pts": 20000,
+                "source_time_base": "1/1000",
+                "observed_text": "Redis L1 缓存",
+                "frame_id": "f0001"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "unknown_receipt_field",
+      "expected_valid": false,
+      "reason": "unknown_receipt_field",
+      "duration_ms": 120000,
+      "screen_source": {
+        "segment_stage_id": "55555555-5555-4555-8555-555555555555",
+        "segment_manifest_hash": "1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a",
+        "frames_hash": "2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
+        "observations_hash": "3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c",
+        "index_version": "screen-text-literal-v1",
+        "index_hash": "5b0f2b36168883f100f980a33eb4c9ada0179667cb4dcea50c7ca732c828e0de",
+        "duration_ms": 120000,
+        "sampling_policy": "uniform",
+        "interval_ms": 45000,
+        "frame_count": 3,
+        "text_frame_count": 3,
+        "coverage_truncated": false
+      },
+      "rows": [
+        {
+          "ocr_frame_id": "ocr_000001",
+          "requested_ms": 20000,
+          "ocr_timestamp_ms": 20001,
+          "source_pts": 20000,
+          "source_time_base": "1/1000",
+          "observed_text": "Redis L1 缓存",
+          "ocr_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        },
+        {
+          "ocr_frame_id": "ocr_000002",
+          "requested_ms": 60000,
+          "ocr_timestamp_ms": 60000,
+          "source_pts": 60000,
+          "source_time_base": "1/1000",
+          "observed_text": "Redis L2 缓存",
+          "ocr_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+        },
+        {
+          "ocr_frame_id": "ocr_000003",
+          "requested_ms": 100000,
+          "ocr_timestamp_ms": 100000,
+          "source_pts": 100000,
+          "source_time_base": "1/1000",
+          "observed_text": "缓存失效 CacheMiss Straße ＡＡ \u0000 \u001b \\u001B payload",
+          "ocr_sha256": "0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a"
+        }
+      ],
+      "result": {
+        "schema_version": "1.5",
+        "session_id": "11111111-1111-4111-8111-111111111111",
+        "turn_id": "22222222-2222-4222-8222-222222222222",
+        "job_id": "33333333-3333-4333-8333-333333333333",
+        "video_id": "44444444-4444-4444-8444-444444444444",
+        "source_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "transcript_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "question": "合成协议样例：按画面中的缓存术语查找并看图。",
+        "answer": "【画面观察 b01】\n合成截图中包含缓存术语。",
+        "answer_scope": "VIDEO",
+        "citations": [],
+        "tool_calls": [
+          {
+            "step": 1,
+            "tool_name": "search_screen_text",
+            "arguments": {
+              "query": "redis l1",
+              "top_k": 1
+            },
+            "result_utterance_ids": [],
+            "result_frame_ids": [
+              "f0001"
+            ],
+            "origin": "MODEL"
+          }
+        ],
+        "provenance": {
+          "text_model_id": "synthetic-vl",
+          "prompt_version": "video-agent-evidence-screen-v1",
+          "retrieval_mode": "none"
+        },
+        "suggested_clip_instruction": null,
+        "visual_evidence": [
+          {
+            "frame_id": "f0001",
+            "requested_ms": 20000,
+            "timestamp_ms": 20000,
+            "source_pts": 20000,
+            "source_time_base": "1/1000",
+            "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "bytes": 1234,
+            "width": 1280,
+            "height": 720
+          }
+        ],
+        "visual_citations": [
+          {
+            "frame_id": "f0001",
+            "explanation": "关联分项：b01"
+          }
+        ],
+        "evidence_mode": "structured",
+        "answer_blocks": [
+          {
+            "block_id": "b01",
+            "kind": "FRAME",
+            "text": "合成截图中包含缓存术语。",
+            "utterance_ids": [],
+            "frame_ids": [
+              "f0001"
+            ]
+          }
+        ],
+        "evidence_policy": "screen_search_v1",
+        "screen_source": {
+          "segment_stage_id": "55555555-5555-4555-8555-555555555555",
+          "segment_manifest_hash": "1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a",
+          "frames_hash": "2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
+          "observations_hash": "3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c",
+          "index_version": "screen-text-literal-v1",
+          "index_hash": "5b0f2b36168883f100f980a33eb4c9ada0179667cb4dcea50c7ca732c828e0de",
+          "duration_ms": 120000,
+          "sampling_policy": "uniform",
+          "interval_ms": 45000,
+          "frame_count": 3,
+          "text_frame_count": 3,
+          "coverage_truncated": false
+        },
+        "screen_searches": [
+          {
+            "tool_step": 1,
+            "status": "OBSERVED",
+            "error_code": null,
+            "total_match_count": 1,
+            "hits": [
+              {
+                "ocr_frame_id": "ocr_000001",
+                "requested_ms": 20000,
+                "ocr_timestamp_ms": 20001,
+                "source_pts": 20000,
+                "source_time_base": "1/1000",
+                "observed_text": "Redis L1 缓存",
+                "frame_id": "f0001"
+              }
+            ],
+            "guaranteed_semantics": true
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "mixed_speech_policy_fields",
+      "expected_valid": false,
+      "reason": "mixed_speech_policy_fields",
+      "duration_ms": 120000,
+      "screen_source": {
+        "segment_stage_id": "55555555-5555-4555-8555-555555555555",
+        "segment_manifest_hash": "1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a",
+        "frames_hash": "2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
+        "observations_hash": "3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c",
+        "index_version": "screen-text-literal-v1",
+        "index_hash": "5b0f2b36168883f100f980a33eb4c9ada0179667cb4dcea50c7ca732c828e0de",
+        "duration_ms": 120000,
+        "sampling_policy": "uniform",
+        "interval_ms": 45000,
+        "frame_count": 3,
+        "text_frame_count": 3,
+        "coverage_truncated": false
+      },
+      "rows": [
+        {
+          "ocr_frame_id": "ocr_000001",
+          "requested_ms": 20000,
+          "ocr_timestamp_ms": 20001,
+          "source_pts": 20000,
+          "source_time_base": "1/1000",
+          "observed_text": "Redis L1 缓存",
+          "ocr_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        },
+        {
+          "ocr_frame_id": "ocr_000002",
+          "requested_ms": 60000,
+          "ocr_timestamp_ms": 60000,
+          "source_pts": 60000,
+          "source_time_base": "1/1000",
+          "observed_text": "Redis L2 缓存",
+          "ocr_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+        },
+        {
+          "ocr_frame_id": "ocr_000003",
+          "requested_ms": 100000,
+          "ocr_timestamp_ms": 100000,
+          "source_pts": 100000,
+          "source_time_base": "1/1000",
+          "observed_text": "缓存失效 CacheMiss Straße ＡＡ \u0000 \u001b \\u001B payload",
+          "ocr_sha256": "0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a"
+        }
+      ],
+      "result": {
+        "schema_version": "1.5",
+        "session_id": "11111111-1111-4111-8111-111111111111",
+        "turn_id": "22222222-2222-4222-8222-222222222222",
+        "job_id": "33333333-3333-4333-8333-333333333333",
+        "video_id": "44444444-4444-4444-8444-444444444444",
+        "source_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "transcript_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "question": "合成协议样例：按画面中的缓存术语查找并看图。",
+        "answer": "【画面观察 b01】\n合成截图中包含缓存术语。",
+        "answer_scope": "VIDEO",
+        "citations": [],
+        "tool_calls": [
+          {
+            "step": 1,
+            "tool_name": "search_screen_text",
+            "arguments": {
+              "query": "redis l1",
+              "top_k": 1
+            },
+            "result_utterance_ids": [],
+            "result_frame_ids": [
+              "f0001"
+            ],
+            "origin": "MODEL"
+          }
+        ],
+        "provenance": {
+          "text_model_id": "synthetic-vl",
+          "prompt_version": "video-agent-evidence-screen-v1",
+          "retrieval_mode": "none"
+        },
+        "suggested_clip_instruction": null,
+        "visual_evidence": [
+          {
+            "frame_id": "f0001",
+            "requested_ms": 20000,
+            "timestamp_ms": 20000,
+            "source_pts": 20000,
+            "source_time_base": "1/1000",
+            "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "bytes": 1234,
+            "width": 1280,
+            "height": 720
+          }
+        ],
+        "visual_citations": [
+          {
+            "frame_id": "f0001",
+            "explanation": "关联分项：b01"
+          }
+        ],
+        "evidence_mode": "structured",
+        "answer_blocks": [
+          {
+            "block_id": "b01",
+            "kind": "FRAME",
+            "text": "合成截图中包含缓存术语。",
+            "utterance_ids": [],
+            "frame_ids": [
+              "f0001"
+            ]
+          }
+        ],
+        "evidence_policy": "screen_search_v1",
+        "screen_source": {
+          "segment_stage_id": "55555555-5555-4555-8555-555555555555",
+          "segment_manifest_hash": "1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a",
+          "frames_hash": "2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
+          "observations_hash": "3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c",
+          "index_version": "screen-text-literal-v1",
+          "index_hash": "5b0f2b36168883f100f980a33eb4c9ada0179667cb4dcea50c7ca732c828e0de",
+          "duration_ms": 120000,
+          "sampling_policy": "uniform",
+          "interval_ms": 45000,
+          "frame_count": 3,
+          "text_frame_count": 3,
+          "coverage_truncated": false
+        },
+        "screen_searches": [
+          {
+            "tool_step": 1,
+            "status": "OBSERVED",
+            "error_code": null,
+            "total_match_count": 1,
+            "hits": [
+              {
+                "ocr_frame_id": "ocr_000001",
+                "requested_ms": 20000,
+                "ocr_timestamp_ms": 20001,
+                "source_pts": 20000,
+                "source_time_base": "1/1000",
+                "observed_text": "Redis L1 缓存",
+                "frame_id": "f0001"
+              }
+            ]
+          }
+        ],
+        "speech_lookup": {}
+      }
+    },
+    {
+      "case_id": "unavailable_prompt",
+      "expected_valid": false,
+      "reason": "unavailable_prompt",
+      "duration_ms": 120000,
+      "screen_source": {
+        "segment_stage_id": "55555555-5555-4555-8555-555555555555",
+        "segment_manifest_hash": "1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a",
+        "frames_hash": "2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
+        "observations_hash": "3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c",
+        "index_version": "screen-text-literal-v1",
+        "index_hash": "5b0f2b36168883f100f980a33eb4c9ada0179667cb4dcea50c7ca732c828e0de",
+        "duration_ms": 120000,
+        "sampling_policy": "uniform",
+        "interval_ms": 45000,
+        "frame_count": 3,
+        "text_frame_count": 3,
+        "coverage_truncated": false
+      },
+      "rows": [
+        {
+          "ocr_frame_id": "ocr_000001",
+          "requested_ms": 20000,
+          "ocr_timestamp_ms": 20001,
+          "source_pts": 20000,
+          "source_time_base": "1/1000",
+          "observed_text": "Redis L1 缓存",
+          "ocr_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        },
+        {
+          "ocr_frame_id": "ocr_000002",
+          "requested_ms": 60000,
+          "ocr_timestamp_ms": 60000,
+          "source_pts": 60000,
+          "source_time_base": "1/1000",
+          "observed_text": "Redis L2 缓存",
+          "ocr_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+        },
+        {
+          "ocr_frame_id": "ocr_000003",
+          "requested_ms": 100000,
+          "ocr_timestamp_ms": 100000,
+          "source_pts": 100000,
+          "source_time_base": "1/1000",
+          "observed_text": "缓存失效 CacheMiss Straße ＡＡ \u0000 \u001b \\u001B payload",
+          "ocr_sha256": "0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a"
+        }
+      ],
+      "result": {
+        "schema_version": "1.5",
+        "session_id": "11111111-1111-4111-8111-111111111111",
+        "turn_id": "22222222-2222-4222-8222-222222222222",
+        "job_id": "33333333-3333-4333-8333-333333333333",
+        "video_id": "44444444-4444-4444-8444-444444444444",
+        "source_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "transcript_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "question": "合成协议样例：按画面中的缓存术语查找并看图。",
+        "answer": "【画面观察 b01】\n合成截图中包含缓存术语。",
+        "answer_scope": "VIDEO",
+        "citations": [],
+        "tool_calls": [
+          {
+            "step": 1,
+            "tool_name": "search_screen_text",
+            "arguments": {
+              "query": "redis l1",
+              "top_k": 1
+            },
+            "result_utterance_ids": [],
+            "result_frame_ids": [
+              "f0001"
+            ],
+            "origin": "MODEL"
+          }
+        ],
+        "provenance": {
+          "text_model_id": "synthetic-vl",
+          "prompt_version": "video-agent-evidence-v1",
+          "retrieval_mode": "none"
+        },
+        "suggested_clip_instruction": null,
+        "visual_evidence": [
+          {
+            "frame_id": "f0001",
+            "requested_ms": 20000,
+            "timestamp_ms": 20000,
+            "source_pts": 20000,
+            "source_time_base": "1/1000",
+            "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "bytes": 1234,
+            "width": 1280,
+            "height": 720
+          }
+        ],
+        "visual_citations": [
+          {
+            "frame_id": "f0001",
+            "explanation": "关联分项：b01"
+          }
+        ],
+        "evidence_mode": "structured",
+        "answer_blocks": [
+          {
+            "block_id": "b01",
+            "kind": "FRAME",
+            "text": "合成截图中包含缓存术语。",
+            "utterance_ids": [],
+            "frame_ids": [
+              "f0001"
+            ]
+          }
+        ],
+        "evidence_policy": "screen_search_v1",
+        "screen_source": {
+          "segment_stage_id": "55555555-5555-4555-8555-555555555555",
+          "segment_manifest_hash": "1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a",
+          "frames_hash": "2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
+          "observations_hash": "3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c",
+          "index_version": "screen-text-literal-v1",
+          "index_hash": "5b0f2b36168883f100f980a33eb4c9ada0179667cb4dcea50c7ca732c828e0de",
+          "duration_ms": 120000,
+          "sampling_policy": "uniform",
+          "interval_ms": 45000,
+          "frame_count": 3,
+          "text_frame_count": 3,
+          "coverage_truncated": false
+        },
+        "screen_searches": [
+          {
+            "tool_step": 1,
+            "status": "OBSERVED",
+            "error_code": null,
+            "total_match_count": 1,
+            "hits": [
+              {
+                "ocr_frame_id": "ocr_000001",
+                "requested_ms": 20000,
+                "ocr_timestamp_ms": 20001,
+                "source_pts": 20000,
+                "source_time_base": "1/1000",
+                "observed_text": "Redis L1 缓存",
+                "frame_id": "f0001"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "error_cannot_publish_hits",
+      "expected_valid": false,
+      "reason": "error_cannot_publish_hits",
+      "duration_ms": 120000,
+      "screen_source": {
+        "segment_stage_id": "55555555-5555-4555-8555-555555555555",
+        "segment_manifest_hash": "1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a",
+        "frames_hash": "2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
+        "observations_hash": "3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c",
+        "index_version": "screen-text-literal-v1",
+        "index_hash": "5b0f2b36168883f100f980a33eb4c9ada0179667cb4dcea50c7ca732c828e0de",
+        "duration_ms": 120000,
+        "sampling_policy": "uniform",
+        "interval_ms": 45000,
+        "frame_count": 3,
+        "text_frame_count": 3,
+        "coverage_truncated": false
+      },
+      "rows": [
+        {
+          "ocr_frame_id": "ocr_000001",
+          "requested_ms": 20000,
+          "ocr_timestamp_ms": 20001,
+          "source_pts": 20000,
+          "source_time_base": "1/1000",
+          "observed_text": "Redis L1 缓存",
+          "ocr_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        },
+        {
+          "ocr_frame_id": "ocr_000002",
+          "requested_ms": 60000,
+          "ocr_timestamp_ms": 60000,
+          "source_pts": 60000,
+          "source_time_base": "1/1000",
+          "observed_text": "Redis L2 缓存",
+          "ocr_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+        },
+        {
+          "ocr_frame_id": "ocr_000003",
+          "requested_ms": 100000,
+          "ocr_timestamp_ms": 100000,
+          "source_pts": 100000,
+          "source_time_base": "1/1000",
+          "observed_text": "缓存失效 CacheMiss Straße ＡＡ \u0000 \u001b \\u001B payload",
+          "ocr_sha256": "0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a"
+        }
+      ],
+      "result": {
+        "schema_version": "1.5",
+        "session_id": "11111111-1111-4111-8111-111111111111",
+        "turn_id": "22222222-2222-4222-8222-222222222222",
+        "job_id": "33333333-3333-4333-8333-333333333333",
+        "video_id": "44444444-4444-4444-8444-444444444444",
+        "source_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "transcript_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "question": "合成协议样例：按画面中的缓存术语查找并看图。",
+        "answer": "【画面观察 b01】\n合成截图中包含缓存术语。",
+        "answer_scope": "VIDEO",
+        "citations": [],
+        "tool_calls": [
+          {
+            "step": 1,
+            "tool_name": "search_screen_text",
+            "arguments": {
+              "query": "redis l1",
+              "top_k": 1
+            },
+            "result_utterance_ids": [],
+            "result_frame_ids": [
+              "f0001"
+            ],
+            "origin": "MODEL"
+          }
+        ],
+        "provenance": {
+          "text_model_id": "synthetic-vl",
+          "prompt_version": "video-agent-evidence-screen-v1",
+          "retrieval_mode": "none"
+        },
+        "suggested_clip_instruction": null,
+        "visual_evidence": [
+          {
+            "frame_id": "f0001",
+            "requested_ms": 20000,
+            "timestamp_ms": 20000,
+            "source_pts": 20000,
+            "source_time_base": "1/1000",
+            "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "bytes": 1234,
+            "width": 1280,
+            "height": 720
+          }
+        ],
+        "visual_citations": [
+          {
+            "frame_id": "f0001",
+            "explanation": "关联分项：b01"
+          }
+        ],
+        "evidence_mode": "structured",
+        "answer_blocks": [
+          {
+            "block_id": "b01",
+            "kind": "FRAME",
+            "text": "合成截图中包含缓存术语。",
+            "utterance_ids": [],
+            "frame_ids": [
+              "f0001"
+            ]
+          }
+        ],
+        "evidence_policy": "screen_search_v1",
+        "screen_source": {
+          "segment_stage_id": "55555555-5555-4555-8555-555555555555",
+          "segment_manifest_hash": "1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a",
+          "frames_hash": "2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
+          "observations_hash": "3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c",
+          "index_version": "screen-text-literal-v1",
+          "index_hash": "5b0f2b36168883f100f980a33eb4c9ada0179667cb4dcea50c7ca732c828e0de",
+          "duration_ms": 120000,
+          "sampling_policy": "uniform",
+          "interval_ms": 45000,
+          "frame_count": 3,
+          "text_frame_count": 3,
+          "coverage_truncated": false
+        },
+        "screen_searches": [
+          {
+            "tool_step": 1,
+            "status": "TOOL_ERROR",
+            "error_code": "FRAME_UNAVAILABLE",
+            "total_match_count": 1,
+            "hits": [
+              {
+                "ocr_frame_id": "ocr_000001",
+                "requested_ms": 20000,
+                "ocr_timestamp_ms": 20001,
+                "source_pts": 20000,
+                "source_time_base": "1/1000",
+                "observed_text": "Redis L1 缓存",
+                "frame_id": "f0001"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "frame_error_without_candidates",
+      "expected_valid": false,
+      "reason": "frame_error_without_candidates",
+      "duration_ms": 120000,
+      "screen_source": {
+        "segment_stage_id": "55555555-5555-4555-8555-555555555555",
+        "segment_manifest_hash": "1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a",
+        "frames_hash": "2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
+        "observations_hash": "3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c",
+        "index_version": "screen-text-literal-v1",
+        "index_hash": "5b0f2b36168883f100f980a33eb4c9ada0179667cb4dcea50c7ca732c828e0de",
+        "duration_ms": 120000,
+        "sampling_policy": "uniform",
+        "interval_ms": 45000,
+        "frame_count": 3,
+        "text_frame_count": 3,
+        "coverage_truncated": false
+      },
+      "rows": [
+        {
+          "ocr_frame_id": "ocr_000001",
+          "requested_ms": 20000,
+          "ocr_timestamp_ms": 20001,
+          "source_pts": 20000,
+          "source_time_base": "1/1000",
+          "observed_text": "Redis L1 缓存",
+          "ocr_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        },
+        {
+          "ocr_frame_id": "ocr_000002",
+          "requested_ms": 60000,
+          "ocr_timestamp_ms": 60000,
+          "source_pts": 60000,
+          "source_time_base": "1/1000",
+          "observed_text": "Redis L2 缓存",
+          "ocr_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+        },
+        {
+          "ocr_frame_id": "ocr_000003",
+          "requested_ms": 100000,
+          "ocr_timestamp_ms": 100000,
+          "source_pts": 100000,
+          "source_time_base": "1/1000",
+          "observed_text": "缓存失效 CacheMiss Straße ＡＡ \u0000 \u001b \\u001B payload",
+          "ocr_sha256": "0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a"
+        }
+      ],
+      "result": {
+        "schema_version": "1.5",
+        "session_id": "11111111-1111-4111-8111-111111111111",
+        "turn_id": "22222222-2222-4222-8222-222222222222",
+        "job_id": "33333333-3333-4333-8333-333333333333",
+        "video_id": "44444444-4444-4444-8444-444444444444",
+        "source_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "transcript_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "question": "合成协议样例：按画面中的缓存术语查找并看图。",
+        "answer": "【画面观察 b01】\n合成截图中包含缓存术语。",
+        "answer_scope": "VIDEO",
+        "citations": [],
+        "tool_calls": [
+          {
+            "step": 1,
+            "tool_name": "search_screen_text",
+            "arguments": {
+              "query": "redis l1",
+              "top_k": 1
+            },
+            "result_utterance_ids": [],
+            "result_frame_ids": [
+              "f0001"
+            ],
+            "origin": "MODEL"
+          }
+        ],
+        "provenance": {
+          "text_model_id": "synthetic-vl",
+          "prompt_version": "video-agent-evidence-screen-v1",
+          "retrieval_mode": "none"
+        },
+        "suggested_clip_instruction": null,
+        "visual_evidence": [
+          {
+            "frame_id": "f0001",
+            "requested_ms": 20000,
+            "timestamp_ms": 20000,
+            "source_pts": 20000,
+            "source_time_base": "1/1000",
+            "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "bytes": 1234,
+            "width": 1280,
+            "height": 720
+          }
+        ],
+        "visual_citations": [
+          {
+            "frame_id": "f0001",
+            "explanation": "关联分项：b01"
+          }
+        ],
+        "evidence_mode": "structured",
+        "answer_blocks": [
+          {
+            "block_id": "b01",
+            "kind": "FRAME",
+            "text": "合成截图中包含缓存术语。",
+            "utterance_ids": [],
+            "frame_ids": [
+              "f0001"
+            ]
+          }
+        ],
+        "evidence_policy": "screen_search_v1",
+        "screen_source": {
+          "segment_stage_id": "55555555-5555-4555-8555-555555555555",
+          "segment_manifest_hash": "1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a",
+          "frames_hash": "2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
+          "observations_hash": "3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c",
+          "index_version": "screen-text-literal-v1",
+          "index_hash": "5b0f2b36168883f100f980a33eb4c9ada0179667cb4dcea50c7ca732c828e0de",
+          "duration_ms": 120000,
+          "sampling_policy": "uniform",
+          "interval_ms": 45000,
+          "frame_count": 3,
+          "text_frame_count": 3,
+          "coverage_truncated": false
+        },
+        "screen_searches": [
+          {
+            "tool_step": 1,
+            "status": "TOOL_ERROR",
+            "error_code": "FRAME_UNAVAILABLE",
+            "total_match_count": 0,
+            "hits": []
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "wrong_time_to_frame_mapping",
+      "expected_valid": false,
+      "reason": "result ids must follow requested time, not fID order",
+      "duration_ms": 120000,
+      "screen_source": {
+        "segment_stage_id": "55555555-5555-4555-8555-555555555555",
+        "segment_manifest_hash": "1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a",
+        "frames_hash": "2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
+        "observations_hash": "3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c",
+        "index_version": "screen-text-literal-v1",
+        "index_hash": "5b0f2b36168883f100f980a33eb4c9ada0179667cb4dcea50c7ca732c828e0de",
+        "duration_ms": 120000,
+        "sampling_policy": "uniform",
+        "interval_ms": 45000,
+        "frame_count": 3,
+        "text_frame_count": 3,
+        "coverage_truncated": false
+      },
+      "rows": [
+        {
+          "ocr_frame_id": "ocr_000001",
+          "requested_ms": 20000,
+          "ocr_timestamp_ms": 20001,
+          "source_pts": 20000,
+          "source_time_base": "1/1000",
+          "observed_text": "Redis L1 缓存",
+          "ocr_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        },
+        {
+          "ocr_frame_id": "ocr_000002",
+          "requested_ms": 60000,
+          "ocr_timestamp_ms": 60000,
+          "source_pts": 60000,
+          "source_time_base": "1/1000",
+          "observed_text": "Redis L2 缓存",
+          "ocr_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+        },
+        {
+          "ocr_frame_id": "ocr_000003",
+          "requested_ms": 100000,
+          "ocr_timestamp_ms": 100000,
+          "source_pts": 100000,
+          "source_time_base": "1/1000",
+          "observed_text": "缓存失效 CacheMiss Straße ＡＡ \u0000 \u001b \\u001B payload",
+          "ocr_sha256": "0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a"
+        }
+      ],
+      "result": {
+        "schema_version": "1.5",
+        "session_id": "11111111-1111-4111-8111-111111111111",
+        "turn_id": "22222222-2222-4222-8222-222222222222",
+        "job_id": "33333333-3333-4333-8333-333333333333",
+        "video_id": "44444444-4444-4444-8444-444444444444",
+        "source_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "transcript_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "question": "合成协议样例：按画面中的缓存术语查找并看图。",
+        "answer": "【画面观察 b01】\n合成截图中包含缓存术语。",
+        "answer_scope": "VIDEO",
+        "citations": [],
+        "tool_calls": [
+          {
+            "step": 1,
+            "tool_name": "inspect_frames",
+            "arguments": {
+              "timestamps_ms": [
+                60000
+              ]
+            },
+            "result_utterance_ids": [],
+            "result_frame_ids": [
+              "f0001"
+            ],
+            "origin": "USER_FOCUS"
+          },
+          {
+            "step": 2,
+            "tool_name": "search_screen_text",
+            "arguments": {
+              "query": "Redis",
+              "top_k": 3
+            },
+            "result_utterance_ids": [],
+            "result_frame_ids": [
+              "f0001",
+              "f0002"
+            ],
+            "origin": "MODEL"
+          }
+        ],
+        "provenance": {
+          "text_model_id": "synthetic-vl",
+          "prompt_version": "video-agent-evidence-screen-v1",
+          "retrieval_mode": "none"
+        },
+        "suggested_clip_instruction": null,
+        "visual_evidence": [
+          {
+            "frame_id": "f0001",
+            "requested_ms": 60000,
+            "timestamp_ms": 60000,
+            "source_pts": 60000,
+            "source_time_base": "1/1000",
+            "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "bytes": 1234,
+            "width": 1280,
+            "height": 720
+          },
+          {
+            "frame_id": "f0002",
+            "requested_ms": 20000,
+            "timestamp_ms": 20000,
+            "source_pts": 20000,
+            "source_time_base": "1/1000",
+            "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "bytes": 1234,
+            "width": 1280,
+            "height": 720
+          }
+        ],
+        "visual_citations": [
+          {
+            "frame_id": "f0001",
+            "explanation": "关联分项：b01"
+          },
+          {
+            "frame_id": "f0002",
+            "explanation": "关联分项：b01"
+          }
+        ],
+        "evidence_mode": "structured",
+        "answer_blocks": [
+          {
+            "block_id": "b01",
+            "kind": "FRAME",
+            "text": "合成截图中包含缓存术语。",
+            "utterance_ids": [],
+            "frame_ids": [
+              "f0001",
+              "f0002"
+            ]
+          }
+        ],
+        "evidence_policy": "screen_search_v1",
+        "screen_source": {
+          "segment_stage_id": "55555555-5555-4555-8555-555555555555",
+          "segment_manifest_hash": "1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a",
+          "frames_hash": "2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
+          "observations_hash": "3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c",
+          "index_version": "screen-text-literal-v1",
+          "index_hash": "5b0f2b36168883f100f980a33eb4c9ada0179667cb4dcea50c7ca732c828e0de",
+          "duration_ms": 120000,
+          "sampling_policy": "uniform",
+          "interval_ms": 45000,
+          "frame_count": 3,
+          "text_frame_count": 3,
+          "coverage_truncated": false
+        },
+        "screen_searches": [
+          {
+            "tool_step": 2,
+            "status": "OBSERVED",
+            "error_code": null,
+            "total_match_count": 2,
+            "hits": [
+              {
+                "ocr_frame_id": "ocr_000001",
+                "requested_ms": 20000,
+                "ocr_timestamp_ms": 20001,
+                "source_pts": 20000,
+                "source_time_base": "1/1000",
+                "observed_text": "Redis L1 缓存",
+                "frame_id": "f0002"
+              },
+              {
+                "ocr_frame_id": "ocr_000002",
+                "requested_ms": 60000,
+                "ocr_timestamp_ms": 60000,
+                "source_pts": 60000,
+                "source_time_base": "1/1000",
+                "observed_text": "Redis L2 缓存",
+                "frame_id": "f0001"
+              }
+            ]
+          }
+        ],
+        "focus_timestamp_ms": 60000
+      }
+    },
+    {
+      "case_id": "screen_is_not_a_clip_sample",
+      "expected_valid": false,
+      "reason": "no actual inspect_clip source",
+      "duration_ms": 120000,
+      "screen_source": {
+        "segment_stage_id": "55555555-5555-4555-8555-555555555555",
+        "segment_manifest_hash": "1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a",
+        "frames_hash": "2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
+        "observations_hash": "3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c",
+        "index_version": "screen-text-literal-v1",
+        "index_hash": "5b0f2b36168883f100f980a33eb4c9ada0179667cb4dcea50c7ca732c828e0de",
+        "duration_ms": 120000,
+        "sampling_policy": "uniform",
+        "interval_ms": 45000,
+        "frame_count": 3,
+        "text_frame_count": 3,
+        "coverage_truncated": false
+      },
+      "rows": [
+        {
+          "ocr_frame_id": "ocr_000001",
+          "requested_ms": 20000,
+          "ocr_timestamp_ms": 20001,
+          "source_pts": 20000,
+          "source_time_base": "1/1000",
+          "observed_text": "Redis L1 缓存",
+          "ocr_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        },
+        {
+          "ocr_frame_id": "ocr_000002",
+          "requested_ms": 60000,
+          "ocr_timestamp_ms": 60000,
+          "source_pts": 60000,
+          "source_time_base": "1/1000",
+          "observed_text": "Redis L2 缓存",
+          "ocr_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+        },
+        {
+          "ocr_frame_id": "ocr_000003",
+          "requested_ms": 100000,
+          "ocr_timestamp_ms": 100000,
+          "source_pts": 100000,
+          "source_time_base": "1/1000",
+          "observed_text": "缓存失效 CacheMiss Straße ＡＡ \u0000 \u001b \\u001B payload",
+          "ocr_sha256": "0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a"
+        }
+      ],
+      "result": {
+        "schema_version": "1.5",
+        "session_id": "11111111-1111-4111-8111-111111111111",
+        "turn_id": "22222222-2222-4222-8222-222222222222",
+        "job_id": "33333333-3333-4333-8333-333333333333",
+        "video_id": "44444444-4444-4444-8444-444444444444",
+        "source_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "transcript_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "question": "合成协议样例：按画面中的缓存术语查找并看图。",
+        "answer": "【画面观察 b01】\n合成截图中包含缓存术语。",
+        "answer_scope": "VIDEO",
+        "citations": [],
+        "tool_calls": [
+          {
+            "step": 1,
+            "tool_name": "search_screen_text",
+            "arguments": {
+              "query": "Redis 缓存",
+              "top_k": 3
+            },
+            "result_utterance_ids": [],
+            "result_frame_ids": [
+              "f0001",
+              "f0002"
+            ],
+            "origin": "MODEL"
+          }
+        ],
+        "provenance": {
+          "text_model_id": "synthetic-vl",
+          "prompt_version": "video-agent-evidence-screen-v1",
+          "retrieval_mode": "none"
+        },
+        "suggested_clip_instruction": null,
+        "visual_evidence": [
+          {
+            "frame_id": "f0001",
+            "requested_ms": 20000,
+            "timestamp_ms": 20000,
+            "source_pts": 20000,
+            "source_time_base": "1/1000",
+            "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "bytes": 1234,
+            "width": 1280,
+            "height": 720
+          },
+          {
+            "frame_id": "f0002",
+            "requested_ms": 60000,
+            "timestamp_ms": 60000,
+            "source_pts": 60000,
+            "source_time_base": "1/1000",
+            "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "bytes": 1234,
+            "width": 1280,
+            "height": 720
+          }
+        ],
+        "visual_citations": [
+          {
+            "frame_id": "f0001",
+            "explanation": "关联分项：b01"
+          },
+          {
+            "frame_id": "f0002",
+            "explanation": "关联分项：b01"
+          }
+        ],
+        "evidence_mode": "structured",
+        "answer_blocks": [
+          {
+            "block_id": "b01",
+            "kind": "SAMPLED_CHANGE",
+            "text": "合成截图中包含缓存术语。",
+            "utterance_ids": [],
+            "frame_ids": [
+              "f0001",
+              "f0002"
+            ]
+          }
+        ],
+        "evidence_policy": "screen_search_v1",
+        "screen_source": {
+          "segment_stage_id": "55555555-5555-4555-8555-555555555555",
+          "segment_manifest_hash": "1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a",
+          "frames_hash": "2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
+          "observations_hash": "3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c",
+          "index_version": "screen-text-literal-v1",
+          "index_hash": "5b0f2b36168883f100f980a33eb4c9ada0179667cb4dcea50c7ca732c828e0de",
+          "duration_ms": 120000,
+          "sampling_policy": "uniform",
+          "interval_ms": 45000,
+          "frame_count": 3,
+          "text_frame_count": 3,
+          "coverage_truncated": false
+        },
+        "screen_searches": [
+          {
+            "tool_step": 1,
+            "status": "OBSERVED",
+            "error_code": null,
+            "total_match_count": 2,
+            "hits": [
+              {
+                "ocr_frame_id": "ocr_000001",
+                "requested_ms": 20000,
+                "ocr_timestamp_ms": 20001,
+                "source_pts": 20000,
+                "source_time_base": "1/1000",
+                "observed_text": "Redis L1 缓存",
+                "frame_id": "f0001"
+              },
+              {
+                "ocr_frame_id": "ocr_000002",
+                "requested_ms": 60000,
+                "ocr_timestamp_ms": 60000,
+                "source_pts": 60000,
+                "source_time_base": "1/1000",
+                "observed_text": "Redis L2 缓存",
+                "frame_id": "f0002"
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

@@ -78,7 +78,7 @@ class WorkerProtocolIntegrationTests {
     @Test void registrationPreservesMissingVersionOneAndRejectsMalformedExplicitLists()throws Exception{
         var old=identity();var body=JSON.createObjectNode().put("worker_id",old.id()).put("session_id",old.session()).put("slots",1);body.putArray("stage_types").add("MEDIA");
         assertEquals(200,send("POST","/internal/workers/register",JSON.writeValueAsString(body)).statusCode());assertEquals(JSON.readTree("[1]"),JSON.readTree(jdbc.queryForObject("SELECT supported_protocol_versions FROM worker_instance WHERE worker_id=?",String.class,old.id())));
-        for(String invalid:List.of("null","true","1","\"1\"","[]","[null]","[true]","[1.0]","[\"1\"]","[1,1]","[4]","[0]","[-1]","[1,2,4]")){
+        for(String invalid:List.of("null","true","1","\"1\"","[]","[null]","[true]","[1.0]","[\"1\"]","[1,1]","[5]","[0]","[-1]","[1,2,5]")){
             var worker=identity();body.put("worker_id",worker.id()).put("session_id",worker.session());body.set("supported_protocol_versions",JSON.readTree(invalid));
             assertEquals(400,send("POST","/internal/workers/register",JSON.writeValueAsString(body)).statusCode(),invalid);assertEquals(0,jdbc.queryForObject("SELECT COUNT(*) FROM worker_instance WHERE worker_id=?",Integer.class,worker.id()),invalid);
         }
@@ -118,7 +118,7 @@ class WorkerProtocolIntegrationTests {
         Fixture occupied=fixture("MEDIA",1),target=fixture("MEDIA",2);Worker old=worker(List.of("MEDIA"),List.of(1),null),latest=worker(List.of("MEDIA"),List.of(1,2),target.job());assertEquals("CLAIMED",claim(occupied,old,UUID.randomUUID().toString()).outcome());
         var filtered=workers.snapshot(target.job(),2);assertEquals(1,filtered.onlineWorkers());assertEquals(latest.id(),filtered.workers().getFirst().workerId());assertEquals(1,filtered.resources().stream().filter(resource->resource.name().equals("FFMPEG")).findFirst().orElseThrow().inUse());assertEquals("RESOURCE_BUSY",filtered.stages().stream().filter(stage->stage.stageType().equals("MEDIA")).findFirst().orElseThrow().reason());
         JsonNode before=JSON.readTree(send("GET","/api/executors",null).body()),after=JSON.readTree(send("GET","/api/executors?required_worker_protocol=2&job_id="+target.job(),null).body());assertEquals(before.propertyNames(),after.propertyNames());assertEquals(before.path("workers").get(0).propertyNames(),after.path("workers").get(0).propertyNames());assertFalse(after.toString().contains("session_id"));
-        assertEquals(400,send("GET","/api/executors?required_worker_protocol=4",null).statusCode());
+        assertEquals(400,send("GET","/api/executors?required_worker_protocol=5",null).statusCode());
     }
 
     @Test void capabilityAndLegacyWireShapesAreExact()throws Exception{

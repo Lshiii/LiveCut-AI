@@ -27,7 +27,7 @@ public final class AnswerClipSource {
     public static Frozen resolve(JdbcTemplate jdbc,ArtifactVerifier artifacts,Map<String,Object> job,
             String sourceHash,String transcriptHash,long duration,JsonNode utterances,JsonNode selection){
         String parent=String.valueOf(job.get("id"));
-        var rows=jdbc.queryForList("SELECT t.*,s.kind,s.video_id,s.source_hash,s.transcript_hash,s.source_json,s.duration_ms FROM agent_turn t JOIN agent_session s ON s.id=t.session_id AND s.job_id=t.job_id WHERE t.id=? AND t.job_id=? FOR UPDATE",selection.path("turn_id").asText(),parent);
+        var rows=jdbc.queryForList("SELECT t.*,s.kind,s.video_id,s.source_hash,s.transcript_hash,s.analysis_key,s.analysis_hash,s.source_json,s.duration_ms FROM agent_turn t JOIN agent_session s ON s.id=t.session_id AND s.job_id=t.job_id WHERE t.id=? AND t.job_id=? FOR UPDATE",selection.path("turn_id").asText(),parent);
         if(rows.size()!=1)throw unavailable();var owner=rows.getFirst();
         if(!"VIDEO".equals(owner.get("kind"))||!"SUCCEEDED".equals(owner.get("status"))
             ||!Objects.equals(owner.get("video_id"),job.get("video_id"))||!sourceHash.equals(owner.get("source_hash"))
@@ -75,13 +75,13 @@ public final class AnswerClipSource {
             for(String key:List.of("job_id","video_id","source_hash","transcript_hash"))if(!source.path(key).asText().equals(String.valueOf(owner.get(key))))throw invalid();
             long duration=((Number)owner.get("duration_ms")).longValue();if(number(source,"duration_ms")!=duration)throw invalid();
             Map<String,Object> frame=new HashMap<>(owner);frame.put("id",source.path("turn_id").asText());frame.put("session_id",source.path("session_id").asText());frame.put("question",source.path("question").asText());frame.put("text_model_id",answer.path("provenance").path("text_model_id").asText());
-            frame.put("visual_mode",Set.of("1.1","1.2","1.3","1.4").contains(answer.path("schema_version").asText())?"frames":"none");
-            if(Set.of("1.3","1.4").contains(answer.path("schema_version").asText()))frame.put("evidence_mode","structured");else frame.remove("evidence_mode");
+            frame.put("visual_mode",Set.of("1.1","1.2","1.3","1.4","1.5").contains(answer.path("schema_version").asText())?"frames":"none");
+            if(Set.of("1.3","1.4","1.5").contains(answer.path("schema_version").asText()))frame.put("evidence_mode","structured");else frame.remove("evidence_mode");
             if(answer.path("schema_version").asText().equals("1.4"))frame.put("evidence_policy",AgentSpeechLookup.POLICY);else frame.remove("evidence_policy");
-            if(answer.path("schema_version").asText().equals("1.2")||Set.of("1.3","1.4").contains(answer.path("schema_version").asText())&&answer.has("focus_timestamp_ms")){
+            if(answer.path("schema_version").asText().equals("1.2")||Set.of("1.3","1.4","1.5").contains(answer.path("schema_version").asText())&&answer.has("focus_timestamp_ms")){
                 JsonNode focus=answer.path("focus_timestamp_ms");if(!focus.isIntegralNumber()||!focus.canConvertToLong())throw invalid();frame.put("focus_timestamp_ms",focus.longValue());
             }else frame.remove("focus_timestamp_ms");
-            AgentAnswerValidator.validate(answer,frame);if(!answer.path("answer_scope").asText().equals("VIDEO")||!ClipRequestService.canonicalJson(project(answer,frozen.path("utterances"),duration,source.path("utterance_ids"))).equals(ClipRequestService.canonicalJson(source)))throw invalid();
+            if(answer.path("schema_version").asText().equals("1.5"))io.livecut.agent.AgentScreenSearchAnswerValidator.validateFrozenAnswer(answer,frame);else AgentAnswerValidator.validate(answer,frame);if(!answer.path("answer_scope").asText().equals("VIDEO")||!ClipRequestService.canonicalJson(project(answer,frozen.path("utterances"),duration,source.path("utterance_ids"))).equals(ClipRequestService.canonicalJson(source)))throw invalid();
             return new Frozen(source,answer);
         }catch(RuntimeException error){throw invalid();}
     }

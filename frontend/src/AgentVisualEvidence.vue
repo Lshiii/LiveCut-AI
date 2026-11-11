@@ -8,7 +8,7 @@ const emit = defineEmits<{ locate: [timestamp: number]; preview: [range: { start
 const failed = ref<Record<string, boolean>>({}); let alive = true
 const frames = computed(() => props.turn.result?.schema_version !== '1.0' ? props.turn.result?.visual_evidence ?? [] : [])
 const citations = computed(() => props.turn.result?.visual_citations ?? [])
-const observations = computed(() => props.turn.result?.tool_calls.filter(call => call.tool_name === 'inspect_frames' || call.tool_name === 'inspect_clip') ?? [])
+const observations = computed(() => props.turn.result?.tool_calls.filter(call => call.tool_name === 'inspect_frames' || call.tool_name === 'inspect_clip' || call.tool_name === 'search_screen_text') ?? [])
 function frame(id: string) { return frames.value.find(value => value.frame_id === id)! }
 function imageKey(value: AgentVisualFrame) { return `${props.turn.id}:${value.frame_id}:${value.sha256}` }
 function imageFailed(value: AgentVisualFrame) {
@@ -19,7 +19,7 @@ onBeforeUnmount(() => { alive = false })
 </script>
 
 <template>
-  <section v-if="turn.result?.schema_version === '1.1' || turn.result?.schema_version === '1.2' || turn.result?.schema_version === '1.3' || turn.result?.schema_version === '1.4'" class="agent-visual-evidence" aria-label="本轮画面依据">
+  <section v-if="turn.result?.schema_version === '1.1' || turn.result?.schema_version === '1.2' || turn.result?.schema_version === '1.3' || turn.result?.schema_version === '1.4' || turn.result?.schema_version === '1.5'" class="agent-visual-evidence" aria-label="本轮画面依据">
     <h4>画面依据 · 引用 {{ citations.length }} 帧 / 本轮观察 {{ frames.length }} 帧</h4>
     <p class="visual-boundary">仅表示实际抽查的画面；不包含原始音轨，不等于连续观看或完整动作证明。原句依据单独列出。</p>
     <p v-if="turn.focus_timestamp_ms !== undefined" class="visual-boundary">用户附加位置 {{ topicTime(turn.focus_timestamp_ms) }} 是定位提示；下方截图有独立实际 PTS，像素不保证与浏览器暂停画面完全相同。</p>
@@ -31,6 +31,7 @@ onBeforeUnmount(() => { alive = false })
     </article></div>
     <details v-if="observations.length" class="visual-observations"><summary>画面观察范围 · {{ observations.length }} 步</summary><article v-for="call in observations" :key="call.step">
       <p v-if="call.tool_name === 'inspect_clip'"><strong>第 {{ call.step }} 步 · 短片抽样</strong> 请求 {{ topicTime(Number(call.arguments.start_ms)) }} → {{ topicTime(Number(call.arguments.end_ms)) }}，按 2fps 采样画面。</p>
+      <p v-else-if="call.tool_name === 'search_screen_text'"><strong>第 {{ call.step }} 步 · 搜索画面文字并看图</strong> 文字定位：{{ call.arguments.query }} · 最多 {{ call.arguments.top_k }} 帧；OCR 文字只是定位线索。</p>
       <p v-else><strong>第 {{ call.step }} 步 · {{ call.origin === 'USER_FOCUS' ? '用户附加位置触发取帧' : '指定时间看图' }}</strong> 请求 {{ (call.arguments.timestamps_ms as number[]).map(topicTime).join('、') }}。</p>
       <p v-if="call.origin">{{ call.origin === 'USER_FOCUS' ? '程序按用户定位提示执行；不是模型自主选择。' : '模型选择的后续工具。' }}</p>
       <p v-if="call.result_frame_ids?.length">实际观察 {{ call.result_frame_ids.length }} 帧：{{ observedTimes(call.result_frame_ids) }}。采样间隙的内容未由这些帧证明。</p><p v-else>该步没有返回可用帧，不能据此声称已观察整个区间。</p>

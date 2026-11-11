@@ -36,9 +36,9 @@ public final class AgentNoteRenderer {
         identity(result,"source_hash",snapshot.sourceHash());identity(result,"transcript_hash",snapshot.transcriptHash());
         if(!ClipRequestService.sha(ClipRequestService.canonicalJson(result)).equals(snapshot.resultHash()))throw invalid();
         String version=text(result,"schema_version"),scope=text(result,"answer_scope"),question=text(result,"question"),answer=text(result,"answer"),filename=checked(snapshot.sourceFilename());
-        if(!Set.of("1.0","1.1","1.2","1.3","1.4").contains(version)||!Set.of("VIDEO","GENERAL","INSUFFICIENT").contains(scope)||filename.isBlank())throw invalid();
-        if(Set.of("1.3","1.4").contains(version)){try{JsonNode projection=version.equals("1.4")?AgentSpeechLookupAnswerValidator.noteProjection(result):result;AgentEvidenceAnswerValidator.verifyAssembly(projection,projection.path("citations"));AgentVisualEvidence.validate(projection,snapshot.durationMs());}catch(RuntimeException failure){throw invalid();}}
-        Long focus=null;if(version.equals("1.2")||Set.of("1.3","1.4").contains(version)&&result.has("focus_timestamp_ms")){focus=number(result,"focus_timestamp_ms");if(focus>=snapshot.durationMs())throw invalid();}
+        if(!Set.of("1.0","1.1","1.2","1.3","1.4","1.5").contains(version)||!Set.of("VIDEO","GENERAL","INSUFFICIENT").contains(scope)||filename.isBlank())throw invalid();
+        if(Set.of("1.3","1.4","1.5").contains(version)){try{JsonNode projection=version.equals("1.5")?AgentScreenSearchAnswerValidator.noteProjection(result):version.equals("1.4")?AgentSpeechLookupAnswerValidator.noteProjection(result):result;AgentEvidenceAnswerValidator.verifyAssembly(projection,projection.path("citations"));AgentVisualEvidence.validate(projection,snapshot.durationMs());}catch(RuntimeException failure){throw invalid();}}
+        Long focus=null;if(version.equals("1.2")||Set.of("1.3","1.4","1.5").contains(version)&&result.has("focus_timestamp_ms")){focus=number(result,"focus_timestamp_ms");if(focus>=snapshot.durationMs())throw invalid();}
         else if(result.has("focus_timestamp_ms"))throw invalid();
         JsonNode citations=array(result,"citations",24),provenance=result.path("provenance");
         var publicProvenance=AgentAnswerValidator.JSON.createObjectNode();for(String key:List.of("text_model_id","prompt_version","retrieval_mode"))publicProvenance.put(key,text(provenance,key));
@@ -73,8 +73,9 @@ public final class AgentNoteRenderer {
             .put("source_hash",snapshot.sourceHash()).put("transcript_hash",snapshot.transcriptHash()).put("result_hash",snapshot.resultHash())
             .put("source_filename",filename).put("duration_ms",snapshot.durationMs()).put("question",question).put("answer_scope",scope);
         source.set("provenance",publicProvenance);source.set("citations",publicCitations);source.set("visual_citations",publicVisualCitations);
-        if(Set.of("1.3","1.4").contains(version)){source.put("evidence_mode","structured");source.set("answer_blocks",result.path("answer_blocks").deepCopy());}
+        if(Set.of("1.3","1.4","1.5").contains(version)){source.put("evidence_mode","structured");source.set("answer_blocks",result.path("answer_blocks").deepCopy());}
         if(version.equals("1.4")){source.put("evidence_policy",AgentSpeechLookup.POLICY);source.set("speech_lookup",result.path("speech_lookup").deepCopy());}
+        if(version.equals("1.5")){source.put("evidence_policy",AgentScreenSearch.POLICY);source.set("screen_source",result.path("screen_source").deepCopy());source.set("screen_searches",result.path("screen_searches").deepCopy());}
         var publicFrames=source.putArray("visual_evidence");selectedFrames.forEach(frame->publicFrames.add(frame.deepCopy()));
         if(focus!=null)source.put("focus_timestamp_ms",focus);
         if(snapshot.replaySourceTurnId()!=null){source.put("replay_source_turn_id",snapshot.replaySourceTurnId()).put("replay_snapshot_hash",snapshot.replaySnapshotHash()).put("additional_model_requests",0);}
@@ -87,11 +88,12 @@ public final class AgentNoteRenderer {
         if(focus!=null)out.append("用户定位提示：").append(time(focus)).append("（").append(Long.toString(focus)).append(" ms）。这是查找提示，不是已观察画面的证明；实际画面时间见下方。\n\n");
         out.append("## 问题\n\n").append(plainBlock(question)).append("\n\n## 回答\n\n").append(answerMarkdown(answer)).append("\n\n");
         if(version.equals("1.4"))appendSpeechLookup(out,result);
-        if(Set.of("1.3","1.4").contains(version)){
+        if(version.equals("1.5"))appendScreenSearch(out,result);
+        if(Set.of("1.3","1.4","1.5").contains(version)){
             AgentEvidenceReview.Review review;try{review=AgentEvidenceReview.fromVerifiedResult(result);}catch(RuntimeException failure){throw invalid();}
             out.append("## 证据核查摘要\n\n").append(review.statusText()).append("\n\n");
             for(String line:review.detailLines())out.append("- ").append(line).append("\n");
-            out.append("\n").append(version.equals("1.4")?AgentEvidenceReview.LIMITATION_WITH_POLICY:AgentEvidenceReview.LIMITATION).append("\n\n");
+            out.append("\n").append(version.equals("1.5")?AgentEvidenceReview.LIMITATION_SCREEN:version.equals("1.4")?AgentEvidenceReview.LIMITATION_WITH_POLICY:AgentEvidenceReview.LIMITATION).append("\n\n");
         }
         out.append("## 原句依据\n\n");
         if(publicCitations.isEmpty())out.append("本轮没有原句引用，不能把截图中的文字当作已读取的语音原句。\n\n");
@@ -124,6 +126,16 @@ public final class AgentNoteRenderer {
         return new Document(markdown,packaged.toString(),sourceBytes);
     }
 
+    private static void appendScreenSearch(LimitedText out,JsonNode result){
+        JsonNode source=result.path("screen_source");out.append("## 画面文字定位\n\n已发布 OCR 采样 ").append(source.path("frame_count").asText()).append(" 帧，有文字 ").append(source.path("text_frame_count").asText()).append(" 帧；稀疏采样不表示连续覆盖。\n\n");
+        for(JsonNode receipt:result.path("screen_searches")){
+            JsonNode call=result.path("tool_calls").get(receipt.path("tool_step").intValue()-1);
+            out.append("- 第 ").append(receipt.path("tool_step").asText()).append(" 步，query：").append(plainBlock(call.path("arguments").path("query").asText())).append("；状态 ").append(receipt.path("status").asText()).append("，本次索引匹配 ").append(receipt.path("total_match_count").asText()).append("，实际提供图片 ").append(Integer.toString(receipt.path("hits").size())).append(" 张。\n");
+            if(!receipt.path("error_code").isNull())out.append("  原因：").append(plain(receipt.path("error_code").asText())).append("。\n");
+            for(JsonNode hit:receipt.path("hits"))out.append("  OCR 定位文字：").append(plainBlock(hit.path("observed_text").asText())).append("；本轮截图 ").append(code(hit.path("frame_id").asText())).append("。\n");
+        }
+        out.append("\nOCR 文字仅用于定位，不能当作讲者原句；未命中只描述本次已采样索引查询。\n\n");
+    }
     private static void appendSpeechLookup(LimitedText out,JsonNode result){
         JsonNode receipt=result.path("speech_lookup"),call=result.path("tool_calls").get(receipt.path("tool_step").intValue()-1),args=call.path("arguments");
         long candidate=receipt.path("candidate_utterance_count").longValue();int returned=receipt.path("returned_utterance_ids").size();
