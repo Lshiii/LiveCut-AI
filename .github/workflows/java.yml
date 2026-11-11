@@ -4,12 +4,14 @@ on:
   push:
     paths:
       - 'backend-java/**'
+      - 'fixtures/ocr-segment-artifact-capacity.synthetic.json'
       - '.github/workflows/java.yml'
       - 'scripts/install-caption-font.py'
       - 'contracts/caption-render-spec.schema.json'
   pull_request:
     paths:
       - 'backend-java/**'
+      - 'fixtures/ocr-segment-artifact-capacity.synthetic.json'
       - '.github/workflows/java.yml'
       - 'scripts/install-caption-font.py'
       - 'contracts/caption-render-spec.schema.json'

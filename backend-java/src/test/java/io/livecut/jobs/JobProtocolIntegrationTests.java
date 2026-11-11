@@ -310,6 +310,43 @@ class JobProtocolIntegrationTests {
         return get(id);
     }
 
+    @Test
+    void publishes120OcrFramesThroughTheNormalFencedCompleteProtocolWithoutModelReservations() throws Exception {
+        JsonNode created = create("ocr-publication-" + UUID.randomUUID(), Map.of("visual_provider", "ocr", "ocr_sampling", "uniform", "ocr_max_frames", 120, "max_text_calls", 0, "max_asr_submissions", 0));
+        String jobId = created.path("id").asText();
+        for (String type : List.of("MEDIA", "ASR")) {
+            JsonNode lease = claim(stage(get(jobId), type).path("id").asText(), "ocr-publication-fixture", UUID.randomUUID().toString());
+            var completed = worker("POST", stagePath(lease, "complete"), completion(lease)); assertEquals(200, completed.statusCode(), text(completed));
+        }
+        JsonNode lease = claim(stage(get(jobId), "SEGMENT").path("id").asText(), "ocr-publication-fixture", UUID.randomUUID().toString());
+        Map<String,Object> completion = largeOcrCompletion(lease);
+        String lastKey = attemptPrefix(lease) + "ocr/frames/ocr_000120.jpg"; byte[] lastFrame = Files.readAllBytes(storageRoot.resolve(lastKey));
+        Files.writeString(storageRoot.resolve(lastKey), "tampered synthetic last frame");
+        error(worker("POST", stagePath(lease, "complete"), completion), 409, "ARTIFACT_HASH_MISMATCH");
+        assertEquals("RUNNING", stage(get(jobId), "SEGMENT").path("status").asText()); assertEquals("BLOCKED", stage(get(jobId), "TIMELINE").path("status").asText());
+        Files.write(storageRoot.resolve(lastKey), lastFrame);
+        var completed = worker("POST", stagePath(lease, "complete"), completion); assertEquals(200, completed.statusCode(), text(completed));
+        var replay = worker("POST", stagePath(lease, "complete"), completion); assertEquals(200, replay.statusCode(), text(replay));
+        JsonNode after = get(jobId); assertEquals("SUCCEEDED", stage(after, "SEGMENT").path("status").asText()); assertEquals("READY", stage(after, "TIMELINE").path("status").asText());
+        assertEquals(0, after.path("budget").path("text_calls_reserved").intValue()); assertEquals(0, after.path("budget").path("asr_calls_reserved").intValue());
+        assertEquals(0, jdbc().queryForObject("SELECT COUNT(*) FROM model_call WHERE job_id=?", Integer.class, jobId));
+    }
+
+    /** Same published paths as the real Worker; marker bytes deliberately do not claim OCR or image quality. */
+    private static Map<String,Object> largeOcrCompletion(JsonNode lease) throws Exception {
+        completion(lease); String prefix = attemptPrefix(lease); Path manifestPath = storageRoot.resolve(prefix + "manifest.json");
+        var manifest = (tools.jackson.databind.node.ObjectNode) JSON.readTree(Files.readAllBytes(manifestPath)); var artifacts = manifest.putArray("artifacts");
+        var files = new java.util.LinkedHashMap<String,String>();
+        files.put("analysis_result", "analysis-result.json"); files.put("ocr_cache_provenance", "ocr/cache-provenance.json"); files.put("ocr_observations", "ocr/observations.json"); files.put("ocr_frames", "ocr/frames.json"); files.put("ocr_state", "ocr/ocr-state.json");
+        for (int number = 1; number <= 120; number++) { String digits = String.format(java.util.Locale.ROOT, "%06d", number); files.put("ocr_frame_" + digits, "ocr/frames/ocr_" + digits + ".jpg"); }
+        files.put("text_execution_trace", "text-execution-trace.json");
+        for (var item : files.entrySet()) {
+            String key = prefix + item.getValue(); Path path = storageRoot.resolve(key); Files.createDirectories(path.getParent()); Files.writeString(path, "synthetic-artifact:" + item.getKey());
+            artifacts.addObject().put("kind", item.getKey()).put("key", key).put("sha256", fileHash(path));
+        }
+        assertEquals(126, artifacts.size()); Files.write(manifestPath, JSON.writeValueAsBytes(manifest)); return completion(lease, fileHash(manifestPath));
+    }
+
     private static Map<String, Object> reservation(JsonNode claim, String kind, String model) {
         return Map.of("stage_id", claim.path("stage_id").asText(), "attempt", claim.path("attempt").asInt(), "run_token", claim.path("run_token").asText(),
                 "request_id", UUID.randomUUID().toString(), "input_hash", HASH, "operation_key", "recovery-fixture-" + UUID.randomUUID(), "model_id", model, "kind", kind);
