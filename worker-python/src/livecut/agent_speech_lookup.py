@@ -25,6 +25,14 @@ QUESTION_SEARCH的实际query可能是完整问题的有界前缀，不能声称
 FIELDS = {"tool_step", "strategy", "status", "query_truncated", "anchor_distance_ms", "candidate_utterance_count", "returned_utterance_ids"}
 
 
+def normalize_speech_answer_decision(value):
+    """Default only an omitted, non-actionable clip hint in the opt-in profile."""
+    if (isinstance(value, dict) and value.get("type") == "answer"
+            and set(value) == {"type", "answer_scope", "answer_blocks"}):
+        return {**value, "suggested_clip_instruction": None}
+    return value
+
+
 def trim_js(value: str) -> str:
     return value.strip("".join(JS_TRIM_WHITESPACE))
 

@@ -102,6 +102,10 @@ def _decision(raw, by_id, visible, frames, tools_left, duration, *, evidence_mod
     if evidence_mode == "structured":
         from .agent_evidence import answer_decision
 
+        if speech_policy:
+            from .agent_speech_lookup import normalize_speech_answer_decision
+
+            value = normalize_speech_answer_decision(value)
         return answer_decision(value, by_id, visible, frames, tool_calls or [])
     if (set(value) != {"type", "answer_scope", "answer", "citation_ids", "visual_citations", "suggested_clip_instruction"}
             or value.get("type") != "answer" or value.get("answer_scope") not in {"VIDEO", "GENERAL", "INSUFFICIENT"}
