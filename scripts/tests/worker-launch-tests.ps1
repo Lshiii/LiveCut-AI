@@ -62,7 +62,7 @@ try {
             throw 'Launcher did not restore the fixture environment.'
         }
     }
-    $stageCases = @('MEDIA', 'ASR', 'SEGMENT', 'TIMELINE', 'EXPORT_CLIP', 'CAPTION_PROOFREAD', 'ANCHOR_CLIP', 'AGENT_VISUAL', 'AGENT_VISUAL_FOCUS')
+    $stageCases = @('MEDIA', 'ASR', 'SEGMENT', 'TIMELINE', 'EXPORT_CLIP', 'CAPTION_PROOFREAD', 'ANCHOR_CLIP', 'AGENT_VISUAL', 'AGENT_VISUAL_FOCUS', 'AGENT_EVIDENCE')
     $stageJob = '11111111-1111-4111-8111-111111111111'
     foreach ($stage in $stageCases) {
         & $launcher -EnvFile $configPath -JavaUrl 'http://127.0.0.1:18083' -WorkerId 'stage-launch-test' -JobId $stageJob -StageType $stage -Once

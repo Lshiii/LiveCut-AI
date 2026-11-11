@@ -35,8 +35,8 @@ from .topic_contracts import validate_topic_result
 from .topics import discover_topics
 from .worker_client import WorkerClient, WorkerClientError
 
-STAGES = ("MEDIA", "ASR", "SEGMENT", "CAPTION_PROOFREAD", "ANCHOR_CLIP", "AGENT_VISUAL", "AGENT_VISUAL_FOCUS", "TIMELINE", "EXPORT_CLIP")
-VISUAL_STAGES = {"AGENT_VISUAL", "AGENT_VISUAL_FOCUS"}
+STAGES = ("MEDIA", "ASR", "SEGMENT", "CAPTION_PROOFREAD", "ANCHOR_CLIP", "AGENT_VISUAL", "AGENT_VISUAL_FOCUS", "AGENT_EVIDENCE", "TIMELINE", "EXPORT_CLIP")
+VISUAL_STAGES = {"AGENT_VISUAL", "AGENT_VISUAL_FOCUS", "AGENT_EVIDENCE"}
 
 
 class WorkerError(Exception):
@@ -1148,6 +1148,7 @@ class AnalysisStageExecutor:
         config = lease.config.get("agent_turn")
         caption = lease.stage_type == "CAPTION_PROOFREAD"
         visual = lease.stage_type in VISUAL_STAGES
+        evidence = lease.stage_type == "AGENT_EVIDENCE"
         focus = lease.stage_type == "AGENT_VISUAL_FOCUS"
         required = {"turn_id", "session_id", "question", "source_job_id", "source_transcript_key",
                     "source_transcript_hash", "source_analysis_key", "source_analysis_hash",
@@ -1161,6 +1162,10 @@ class AnalysisStageExecutor:
                 or type(lease.config.get("max_asr_submissions")) is not int
                 or lease.config["max_asr_submissions"] != 0):
             raise WorkerError("INVALID_AGENT_INPUT")
+        if (evidence and config.get("evidence_mode") != "structured"
+                or not evidence and "evidence_mode" in config):
+            raise WorkerError("INVALID_AGENT_EVIDENCE_INPUT")
+        focus |= evidence and "focus_timestamp_ms" in config
         if caption:
             if config.get("kind") != "CAPTION" or not isinstance(config.get("caption_context"), dict) or config["history"] != []:
                 raise WorkerError("INVALID_CAPTION_PROOFREAD_INPUT")
@@ -1240,6 +1245,8 @@ class AnalysisStageExecutor:
                 options["media_info"] = _read(context.predecessor("MEDIA", "media_info"))
                 if focus:
                     options["focus_timestamp_ms"] = config["focus_timestamp_ms"]
+                if evidence:
+                    options["evidence_mode"] = "structured"
                 options["budget_remaining"] = getattr(text_transport, "visual_text_budget", lambda: None)
                 options["max_request_attempts"] = text_transport.policy.max_attempts if isinstance(text_transport, ResilientTextTransport) else 1
                 build_visual_answer(transcript, analysis["segments"], config["duration_ms"], config["question"],

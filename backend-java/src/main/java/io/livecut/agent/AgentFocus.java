@@ -16,7 +16,7 @@ public final class AgentFocus {
         if(value<0||value>AgentVisualEvidence.SAFE_INTEGER||duration instanceof Number&&value>=((Number)duration).longValue())throw invalid();
         return value;
     }
-    public static boolean visualStage(String stage){return Set.of("AGENT_VISUAL",STAGE).contains(stage);}
-    public static String stage(Map<String,Object> owner){Long focus=value(owner);return focus!=null?STAGE:"frames".equals(owner.get("visual_mode"))?"AGENT_VISUAL":"SEGMENT";}
+    public static boolean visualStage(String stage){return Set.of("AGENT_VISUAL",STAGE,AgentEvidence.STAGE).contains(stage);}
+    public static String stage(Map<String,Object> owner){Long focus=value(owner);return AgentEvidence.structured(owner)?AgentEvidence.STAGE:focus!=null?STAGE:"frames".equals(owner.get("visual_mode"))?"AGENT_VISUAL":"SEGMENT";}
     private static JobException invalid(){return new JobException(HttpStatus.CONFLICT,"AGENT_SUBMISSION_INVALID","Stored focus no longer matches its immutable visual input");}
 }

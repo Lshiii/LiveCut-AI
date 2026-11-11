@@ -305,8 +305,8 @@ class ResilientTextTransport(httpx.BaseTransport):
         self.inner, self.context = inner, context
         self.policy = policy or TextRetryPolicy.from_env()
         self.progress, self.sleep, self.monotonic = progress, sleep, monotonic
-        self.fallbacks = [] if getattr(context.lease, "stage_type", None) in {"AGENT_VISUAL", "AGENT_VISUAL_FOCUS"} else _fallbacks(context)
-        if getattr(context.lease, "stage_type", None) in {"AGENT_VISUAL", "AGENT_VISUAL_FOCUS"} and context.lease.config.get("text_fallback_models", []) != []:
+        self.fallbacks = [] if getattr(context.lease, "stage_type", None) in {"AGENT_VISUAL", "AGENT_VISUAL_FOCUS", "AGENT_EVIDENCE"} else _fallbacks(context)
+        if getattr(context.lease, "stage_type", None) in {"AGENT_VISUAL", "AGENT_VISUAL_FOCUS", "AGENT_EVIDENCE"} and context.lease.config.get("text_fallback_models", []) != []:
             raise TextRecoveryError("INVALID_VISUAL_FALLBACK_CONFIGURATION")
         self.circuit = TextCircuit(context, circuit_policy)
         self.trace = {"schema_version": 1, "job_id": context.lease.job_id,
@@ -520,11 +520,12 @@ class ResilientTextTransport(httpx.BaseTransport):
                 extensions[ROUTED_IDENTITY] = True
             if expired:
                 extensions["livecut_text_replay_only"] = True
-            if getattr(self.context.lease, "stage_type", None) == "AGENT_VISUAL_FOCUS":
+            if getattr(self.context.lease, "stage_type", None) in {"AGENT_VISUAL_FOCUS", "AGENT_EVIDENCE"}:
                 remaining_budget = self.visual_text_budget()
                 if type(remaining_budget) is not int or remaining_budget <= 0:
                     extensions["livecut_text_replay_only"] = True
-                    restricted_code = "FOCUS_MODEL_BUDGET_UNAVAILABLE" if remaining_budget is None else "MODEL_BUDGET_EXHAUSTED"
+                    unavailable = "EVIDENCE_MODEL_BUDGET_UNAVAILABLE" if self.context.lease.stage_type == "AGENT_EVIDENCE" else "FOCUS_MODEL_BUDGET_UNAVAILABLE"
+                    restricted_code = unavailable if remaining_budget is None else "MODEL_BUDGET_EXHAUSTED"
                 else:
                     restricted_code = None
             extensions["timeout"] = {name: min(value, timeout) if isinstance(value, (int, float)) else timeout

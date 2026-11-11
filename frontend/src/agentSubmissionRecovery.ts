@@ -26,16 +26,18 @@ const hash = (raw: unknown): raw is string => typeof raw === 'string' && HASH.te
 const sameSource = (a: AgentSession['source'], b: AgentSession['source']) => a.video_sha256 === b.video_sha256 && a.transcript_hash === b.transcript_hash && a.duration_ms === b.duration_ms
 function fail(code?: string): never { throw new AgentSubmissionError(code) }
 function sameOwner(entry: AgentSubmissionOwner, owner: AgentSubmissionOwner) { return entry.job_id === owner.job_id && entry.video_id === owner.video_id && entry.video_sha256 === owner.video_sha256 }
-export interface AgentTurnSubmissionInput { question: string; max_text_calls: number; visual_mode?: 'none' | 'frames'; focus_timestamp_ms?: number }
+export interface AgentTurnSubmissionInput { question: string; max_text_calls: number; visual_mode?: 'none' | 'frames'; focus_timestamp_ms?: number; evidence_mode?: 'none' | 'structured' }
 export function agentSubmissionInput(kind: AgentSubmissionEntry['kind'], raw: unknown): {} | AgentTurnSubmissionInput | null {
   if (kind === 'SESSION') return exact(raw, []) ? {} : null
   if (!row(raw) || !Object.hasOwn(raw, 'question') || !Object.hasOwn(raw, 'max_text_calls')
-    || !Object.keys(raw).every(key => ['question', 'max_text_calls', 'visual_mode', 'focus_timestamp_ms'].includes(key))
+    || !Object.keys(raw).every(key => ['question', 'max_text_calls', 'visual_mode', 'focus_timestamp_ms', 'evidence_mode'].includes(key))
     || !(raw.visual_mode === undefined || raw.visual_mode === 'none' || raw.visual_mode === 'frames') || typeof raw.question !== 'string' || !raw.question.trim() || raw.question !== raw.question.trim()
     || raw.question.length > 2000 || !integer(raw.max_text_calls, 1, 24)
-    || Object.hasOwn(raw, 'focus_timestamp_ms') && (raw.visual_mode !== 'frames' || !integer(raw.focus_timestamp_ms))) return null
+    || Object.hasOwn(raw, 'focus_timestamp_ms') && (raw.visual_mode !== 'frames' || !integer(raw.focus_timestamp_ms))
+    || Object.hasOwn(raw, 'evidence_mode') && (raw.evidence_mode !== 'none' && raw.evidence_mode !== 'structured' || raw.evidence_mode === 'structured' && raw.visual_mode !== 'frames')) return null
   return { question: raw.question, max_text_calls: raw.max_text_calls, ...(Object.hasOwn(raw, 'visual_mode') ? { visual_mode: raw.visual_mode as 'none' | 'frames' } : {}),
-    ...(Object.hasOwn(raw, 'focus_timestamp_ms') ? { focus_timestamp_ms: raw.focus_timestamp_ms as number } : {}) }
+    ...(Object.hasOwn(raw, 'focus_timestamp_ms') ? { focus_timestamp_ms: raw.focus_timestamp_ms as number } : {}),
+    ...(Object.hasOwn(raw, 'evidence_mode') ? { evidence_mode: raw.evidence_mode as 'none' | 'structured' } : {}) }
 }
 export function parseAgentSubmissionEntry(raw: unknown): AgentSubmissionEntry | null {
   if (!exact(raw, ['schema_version', 'kind', 'key', 'job_id', 'video_id', 'video_sha256', 'session_id', 'source', 'input'])
@@ -233,7 +235,7 @@ export function parseAgentSubmissionResponse(raw: unknown, entry: AgentSubmissio
   const verified = parseAgentSession(session, entry.job_id, entry.video_id, entry.video_sha256, entry.session_id!)
   const turn = parseAgentTurn(raw, verified), input = agentSubmissionInput('TURN', JSON.parse(entry.input)) as AgentTurnSubmissionInput
   if (turn.question !== input.question || turn.budget.max_text_calls !== input.max_text_calls || (turn.visual_mode ?? 'none') !== (input.visual_mode ?? 'none')
-    || turn.focus_timestamp_ms !== input.focus_timestamp_ms) fail()
+    || turn.focus_timestamp_ms !== input.focus_timestamp_ms || (turn.evidence_mode ?? 'none') !== (input.evidence_mode ?? 'none')) fail()
   return { kind: 'TURN', session: verified, turn }
 }
 export function agentSubmissionBusinessNotFound(error: unknown, kind: AgentSubmissionEntry['kind']): boolean {
@@ -264,11 +266,11 @@ export async function resolveAgentSubmission(entry: AgentSubmissionEntry, io: {
   return io.current() ? result : null
 }
 /** Only completed acknowledgement in the original session may clear the still-identical submitted draft. */
-export interface AgentSubmissionDraft { session_id: string; question: string; budget: number; visual_mode?: 'none' | 'frames'; focus_timestamp_ms?: number }
+export interface AgentSubmissionDraft { session_id: string; question: string; budget: number; visual_mode?: 'none' | 'frames'; focus_timestamp_ms?: number; evidence_mode?: 'none' | 'structured' }
 export function agentDraftMatchesSubmission(entry: AgentSubmissionEntry, draft: AgentSubmissionDraft): boolean {
   if (entry.kind !== 'TURN' || draft.session_id !== entry.session_id) return false
   const input = agentSubmissionInput('TURN', JSON.parse(entry.input)) as AgentTurnSubmissionInput
-  return draft.question.trim() === input.question && draft.budget === input.max_text_calls && (draft.visual_mode ?? 'none') === (input.visual_mode ?? 'none') && draft.focus_timestamp_ms === input.focus_timestamp_ms
+  return draft.question.trim() === input.question && draft.budget === input.max_text_calls && (draft.visual_mode ?? 'none') === (input.visual_mode ?? 'none') && draft.focus_timestamp_ms === input.focus_timestamp_ms && (draft.evidence_mode ?? 'none') === (input.evidence_mode ?? 'none')
 }
 export function agentDraftAfterSubmission(entry: AgentSubmissionEntry, draft: AgentSubmissionDraft): string {
   return agentDraftMatchesSubmission(entry, draft) ? '' : draft.question
