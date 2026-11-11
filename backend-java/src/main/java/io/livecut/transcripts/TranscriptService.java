@@ -37,6 +37,15 @@ public class TranscriptService {
     private record Verified(Source source,List<Utterance> utterances) {}
     private record PageQuery(String q,List<String> terms,long offset,int limit,String expected) {}
 
+    /** Internal admission evidence. Only this verifier can construct it; never serialize it as an API response. */
+    public static final class SourceTicket {
+        private final Metadata metadata;
+        private final Verified verified;
+        private SourceTicket(Metadata metadata,Verified verified){this.metadata=metadata;this.verified=verified;}
+        public Source source(){return verified.source();}
+        public List<Utterance> utterances(){return verified.utterances();}
+    }
+
     public TranscriptService(JdbcTemplate jdbc,ArtifactVerifier artifacts,PlatformTransactionManager manager){
         this.jdbc=jdbc;this.artifacts=artifacts;
         metadataRead=new TransactionTemplate(manager);metadataRead.setReadOnly(true);
@@ -76,6 +85,56 @@ public class TranscriptService {
         });
     }
 
+    public RangeResult range(String value,MultiValueMap<String,String> parameters){
+        fields(parameters,Set.of("source_fingerprint","start_utterance_id","end_utterance_id"));
+        if(!parameters.keySet().equals(Set.of("source_fingerprint","start_utterance_id","end_utterance_id")))throw queryInvalid();
+        String expected=fingerprintParameter(parameters,true),first=parameter(parameters,"start_utterance_id",null),last=parameter(parameters,"end_utterance_id",null);
+        rangeIds(first,last);String jobId=uuid(value);
+        return read(jobId,expected,verified->new RangeResult("1.0","transcript_range",verified.source(),first,last,
+                resolveRange(verified.utterances(),first,last)));
+    }
+
+    public static Range resolveRange(SourceTicket ticket,String first,String last){
+        if(ticket==null)throw sourceInvalid();
+        return resolveRange(ticket.utterances(),first,last);
+    }
+    private static Range resolveRange(List<Utterance> rows,String first,String last){
+        rangeIds(first,last);int start=-1,end=-1;
+        for(int index=0;index<rows.size();index++){
+            if(rows.get(index).utteranceId().equals(first))start=index;
+            if(rows.get(index).utteranceId().equals(last))end=index;
+        }
+        if(start<0||end<start)throw rangeInvalid();
+        return new Range(rows.get(start).startMs(),rows.get(end).endMs(),end-start+1,rows.get(start).text(),rows.get(end).text());
+    }
+    private static void rangeIds(String first,String last){
+        if(first==null||last==null||!first.matches("[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}")||!last.matches("[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}"))throw rangeInvalid();
+    }
+    private static JobException rangeInvalid(){return new JobException(HttpStatus.BAD_REQUEST,"MANUAL_CLIP_INVALID_RANGE","Select source-ordered original start and end utterances");}
+
+    /** Complete source IO before a caller starts its write transaction; no post-commit callback is involved. */
+    public SourceTicket verifySource(String value,String expected){
+        String jobId=uuid(value);
+        if(expected!=null&&!expected.matches("[a-f0-9]{64}"))throw queryInvalid();
+        return outsideTransaction.execute(ignored->{
+            Metadata before=metadata(jobId);Verified verified;
+            try{verified=verify(before);}catch(RuntimeException invalid){throw sourceInvalid();}
+            if(expected!=null&&!expected.equals(verified.source().sourceFingerprint()))throw sourceChanged();
+            Metadata after;
+            try{after=metadata(jobId);}catch(JobException changed){throw sourceChanged();}
+            if(!before.equals(after))throw sourceChanged();
+            return new SourceTicket(before,verified);
+        });
+    }
+
+    /** Metadata only, using the caller's connection/transaction after its normal analysis-owner lock. */
+    public void requireCurrent(SourceTicket ticket){
+        if(ticket==null)throw sourceInvalid();
+        Metadata current;
+        try{current=metadataNow(ticket.source().jobId());}catch(JobException changed){throw sourceChanged();}
+        if(!ticket.metadata.equals(current))throw sourceChanged();
+    }
+
     private <T> T read(String jobId,String expected,Function<Verified,T> projection){
         return outsideTransaction.execute(ignored->{
             Metadata before=metadata(jobId);
@@ -92,7 +151,9 @@ public class TranscriptService {
     }
 
     private Metadata metadata(String jobId){
-        return metadataRead.execute(ignored->{
+        return metadataRead.execute(ignored->metadataNow(jobId));
+    }
+    private Metadata metadataNow(String jobId){
             var jobs=jdbc.queryForList("SELECT id,video_id,generation,status,config_hash,config_json,resumed_from_job_id,preparation_source_json FROM analysis_job WHERE id=?",jobId);
             if(jobs.isEmpty())throw new JobException(HttpStatus.NOT_FOUND,"JOB_NOT_FOUND","Analysis job was not found");
             Map<String,Object> job=jobs.getFirst();JsonNode config;
@@ -105,7 +166,6 @@ public class TranscriptService {
             if(videos.size()!=1||stages.size()!=2||stages.stream().anyMatch(stage->!"SUCCEEDED".equals(stage.get("status")))
                     ||stages.stream().map(stage->stage.get("stage_type")).distinct().count()!=2)throw sourceInvalid();
             return new Metadata(freeze(job),freeze(videos.getFirst()),stages.stream().map(TranscriptService::freeze).toList());
-        });
     }
 
     private Verified verify(Metadata metadata){

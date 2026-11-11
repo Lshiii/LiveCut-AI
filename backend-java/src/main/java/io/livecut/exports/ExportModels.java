@@ -50,10 +50,13 @@ public final class ExportModels {
                            String status, @JsonProperty("state_version") long stateVersion,
                            @JsonProperty("created_at") Instant createdAt,
                            @JsonProperty("updated_at") Instant updatedAt, List<Clip> clips,
-                           @JsonProperty("clip_request_id") @JsonInclude(JsonInclude.Include.NON_NULL) String clipRequestId) {
-        public Snapshot(String id,String jobId,String videoId,long approvedRevision,String snapshotHash,String profile,String status,long stateVersion,Instant createdAt,Instant updatedAt,List<Clip> clips){this(id,jobId,videoId,approvedRevision,snapshotHash,profile,status,stateVersion,createdAt,updatedAt,clips,null);}
+                           @JsonProperty("clip_request_id") @JsonInclude(JsonInclude.Include.NON_NULL) String clipRequestId,
+                           @JsonProperty("manual_clip_plan_id") @JsonInclude(JsonInclude.Include.NON_NULL) String manualClipPlanId) {
+        public Snapshot(String id,String jobId,String videoId,long approvedRevision,String snapshotHash,String profile,String status,long stateVersion,Instant createdAt,Instant updatedAt,List<Clip> clips,String clipRequestId){this(id,jobId,videoId,approvedRevision,snapshotHash,profile,status,stateVersion,createdAt,updatedAt,clips,clipRequestId,null);}
+        public Snapshot(String id,String jobId,String videoId,long approvedRevision,String snapshotHash,String profile,String status,long stateVersion,Instant createdAt,Instant updatedAt,List<Clip> clips){this(id,jobId,videoId,approvedRevision,snapshotHash,profile,status,stateVersion,createdAt,updatedAt,clips,null,null);}
     }
     public record Page(List<Snapshot> items, int limit, int offset) {}
+    public record ManualPage(List<Snapshot> items,int limit,long offset) {}
     public record ManifestFile(String filename, @JsonProperty("size_bytes") long sizeBytes,
                                String sha256, @JsonProperty("download_url") String downloadUrl) {}
     public record ManifestClip(@JsonProperty("clip_id") String clipId,
@@ -83,8 +86,10 @@ public final class ExportModels {
                            @JsonProperty("state_version") long stateVersion,
                            @JsonProperty("created_at") Instant createdAt,
                            @JsonProperty("updated_at") Instant updatedAt, List<ManifestClip> clips,
-                           @JsonProperty("clip_request_id") @JsonInclude(JsonInclude.Include.NON_NULL) String clipRequestId) {
-        public Manifest(String schemaVersion,String dataKind,String exportId,String jobId,String videoId,int generation,long approvedRevision,String sourceVideoSha256,String snapshotHash,String profile,String status,long stateVersion,Instant createdAt,Instant updatedAt,List<ManifestClip> clips){this(schemaVersion,dataKind,exportId,jobId,videoId,generation,approvedRevision,sourceVideoSha256,snapshotHash,profile,status,stateVersion,createdAt,updatedAt,clips,null);}
+                           @JsonProperty("clip_request_id") @JsonInclude(JsonInclude.Include.NON_NULL) String clipRequestId,
+                           @JsonProperty("manual_clip_plan_id") @JsonInclude(JsonInclude.Include.NON_NULL) String manualClipPlanId) {
+        public Manifest(String schemaVersion,String dataKind,String exportId,String jobId,String videoId,int generation,long approvedRevision,String sourceVideoSha256,String snapshotHash,String profile,String status,long stateVersion,Instant createdAt,Instant updatedAt,List<ManifestClip> clips,String clipRequestId){this(schemaVersion,dataKind,exportId,jobId,videoId,generation,approvedRevision,sourceVideoSha256,snapshotHash,profile,status,stateVersion,createdAt,updatedAt,clips,clipRequestId,null);}
+        public Manifest(String schemaVersion,String dataKind,String exportId,String jobId,String videoId,int generation,long approvedRevision,String sourceVideoSha256,String snapshotHash,String profile,String status,long stateVersion,Instant createdAt,Instant updatedAt,List<ManifestClip> clips){this(schemaVersion,dataKind,exportId,jobId,videoId,generation,approvedRevision,sourceVideoSha256,snapshotHash,profile,status,stateVersion,createdAt,updatedAt,clips,null,null);}
     }
     /** Internal streaming reference; never expose local paths as JSON. */
     public record Content(Path path, long sizeBytes, String hash, String filename) {}

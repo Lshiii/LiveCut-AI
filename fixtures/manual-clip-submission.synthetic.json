@@ -1,0 +1,17 @@
+{
+  "schema_version": "1.0",
+  "data_kind": "manual_clip_submission",
+  "operation": "CREATE",
+  "job_id": "11111111-1111-4111-8111-111111111111",
+  "plan_id": "33333333-3333-4333-8333-333333333333",
+  "idempotency_key": "44444444-4444-4444-8444-444444444444",
+  "input": {
+    "source_fingerprint": "3a757347a00f53b776d7693823edf0d6fd974e40cdfdb4f7cf3429808a6ca412",
+    "title": "合成示例：两条原句之间的全部内容",
+    "start_utterance_id": "synthetic-u1",
+    "end_utterance_id": "synthetic-u2"
+  },
+  "request_hash": "6f207201e7962f38c21f912f7270fcce845563365b6f47cd119e3c2b70e14715",
+  "revision": 1,
+  "plan_hash": "57e82a8c681dbece543b49906bba34950b752143646a9a48a2336e66402dd5c2"
+}

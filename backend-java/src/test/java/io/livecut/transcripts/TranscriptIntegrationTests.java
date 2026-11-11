@@ -84,6 +84,24 @@ class TranscriptIntegrationTests {
         }
     }
 
+    @Test void rangeUsesAllOriginalSentencesBetweenEndpointsAndHasNoWriteOrSearchCountDependency()throws Exception{
+        var f=fixture(example());JsonNode source=page(f,"").path("source");String fingerprint=source.path("source_fingerprint").asText();var before=databaseState();
+        JsonNode range=JSON.readTree(get(path(f)+"/range?source_fingerprint="+fingerprint+"&start_utterance_id=u1&end_utterance_id=u5").body());
+        assertEquals(Set.of("schema_version","data_kind","source","start_utterance_id","end_utterance_id","range"),range.propertyNames());
+        assertEquals("transcript_range",range.path("data_kind").asText());assertEquals(source,range.path("source"));assertEquals("u1",range.path("start_utterance_id").asText());assertEquals("u5",range.path("end_utterance_id").asText());
+        JsonNode resolved=range.path("range");assertEquals(Set.of("start_ms","end_ms","utterance_count","start_text","end_text"),resolved.propertyNames());
+        assertEquals(0,resolved.path("start_ms").asLong());assertEquals(3600900,resolved.path("end_ms").asLong());assertEquals(5,resolved.path("utterance_count").asInt());
+        assertEquals(f.sentences().getFirst().text(),resolved.path("start_text").asText());assertEquals(f.sentences().getLast().text(),resolved.path("end_text").asText());
+        for(String suffix:List.of("&start_utterance_id=u5&end_utterance_id=u1","&start_utterance_id=absent&end_utterance_id=u5","&start_utterance_id=..&end_utterance_id=u5"))
+            error(get(path(f)+"/range?source_fingerprint="+fingerprint+suffix),400,"MANUAL_CLIP_INVALID_RANGE");
+        error(get(path(f)+"/range?source_fingerprint="+fingerprint+"&start_utterance_id=u1&start_utterance_id=u2&end_utterance_id=u5"),400,"INVALID_TRANSCRIPT_QUERY");
+        error(get(path(f)+"/range?start_utterance_id=u1&end_utterance_id=u5"),400,"INVALID_TRANSCRIPT_QUERY");
+        for(String suffix:List.of("","&start_utterance_id=u1","&end_utterance_id=u5"))
+            error(get(path(f)+"/range?source_fingerprint="+fingerprint+suffix),400,"INVALID_TRANSCRIPT_QUERY");
+        error(get(path(f)+"/range?source_fingerprint="+"0".repeat(64)+"&start_utterance_id=u1&end_utterance_id=u5"),409,"TRANSCRIPT_SOURCE_CHANGED");
+        assertEquals(before,databaseState());
+    }
+
     @Test void originalSourceReadsDoNotWaitForBusinessRowLocks()throws Exception{
         var f=fixture(example());page(f,"");
         try(Connection lock=app.getBean(DataSource.class).getConnection()){

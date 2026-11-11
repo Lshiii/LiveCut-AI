@@ -218,6 +218,7 @@ public class DeliveryBundleWriter implements AutoCloseable {
                 Map<String,Object> manifest=new TreeMap<>();manifest.put("schema_version","1.0");manifest.put("data_kind","export_video_package");
                 manifest.put("export_id",plan.exportId());manifest.put("job_id",plan.jobId());manifest.put("video_id",plan.videoId());manifest.put("source_video_sha256",plan.sourceVideoHash());
                 manifest.put("approved_revision",plan.approvedRevision());manifest.put("snapshot_hash",plan.snapshotHash());manifest.put("profile",plan.profile());manifest.put("render_mode","CLEAN");manifest.put("clip_request_id",plan.clipRequestId());
+                if(plan.manualClipPlanId()!=null)manifest.put("manual_clip_plan_id",plan.manualClipPlanId());
                 manifest.put("clips",clips);manifest.put("files",files);addBytes(archive,"manifest.json",JSON.writeValueAsBytes(manifest),deadline);
             });
         }catch(JobException failed){throw videoFailure(failed);}

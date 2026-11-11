@@ -1,0 +1,33 @@
+{
+  "schema_version": "1.0",
+  "data_kind": "manual_clip_plan",
+  "source_kind": "MANUAL_ASR",
+  "id": "33333333-3333-4333-8333-333333333333",
+  "source": {
+    "job_id": "11111111-1111-4111-8111-111111111111",
+    "video_id": "22222222-2222-4222-8222-222222222222",
+    "generation": 1,
+    "source_video_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "transcript_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "analysis_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "duration_ms": 15000,
+    "source_fingerprint": "3a757347a00f53b776d7693823edf0d6fd974e40cdfdb4f7cf3429808a6ca412"
+  },
+  "revision": 1,
+  "title": "合成示例：两条原句之间的全部内容",
+  "start_utterance_id": "synthetic-u1",
+  "end_utterance_id": "synthetic-u2",
+  "range": {
+    "start_ms": 1000,
+    "end_ms": 4500,
+    "utterance_count": 2,
+    "start_text": "合成示例：缓存可以设置过期时间。",
+    "end_text": "合成示例：这些文字和哈希不代表真实视频。"
+  },
+  "latest_revision": 1,
+  "plan_hash": "57e82a8c681dbece543b49906bba34950b752143646a9a48a2336e66402dd5c2",
+  "status": "DRAFT",
+  "confirmed_revisions": [],
+  "created_at": "2026-11-11T00:00:00Z",
+  "updated_at": "2026-11-11T00:00:00Z"
+}

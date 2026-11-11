@@ -20,4 +20,10 @@ public final class TranscriptModels {
     }
     public record Context(@JsonProperty("schema_version") String schemaVersion, @JsonProperty("data_kind") String dataKind,
             Source source, Utterance center, Utterance previous, Utterance next) {}
+    public record Range(@JsonProperty("start_ms") long startMs,@JsonProperty("end_ms") long endMs,
+            @JsonProperty("utterance_count") int utteranceCount,@JsonProperty("start_text") String startText,
+            @JsonProperty("end_text") String endText) {}
+    public record RangeResult(@JsonProperty("schema_version") String schemaVersion,@JsonProperty("data_kind") String dataKind,
+            Source source,@JsonProperty("start_utterance_id") String startUtteranceId,
+            @JsonProperty("end_utterance_id") String endUtteranceId,Range range) {}
 }

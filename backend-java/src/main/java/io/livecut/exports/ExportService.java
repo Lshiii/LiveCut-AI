@@ -29,8 +29,11 @@ import io.livecut.review.ReviewService;
 import io.livecut.topics.TopicReviewService;
 import io.livecut.clips.ClipRequestService;
 import io.livecut.clips.ClipPlanValidator;
+import io.livecut.manualclips.ManualClipPlanService;
+import io.livecut.transcripts.TranscriptService;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
+import org.springframework.dao.DuplicateKeyException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.PlatformTransactionManager;
@@ -49,13 +52,20 @@ public class ExportService {
     private final TopicReviewService topics;
     private final ArtifactVerifier verifier;
     private final ClipRequestService clipRequests;
+    private final ManualClipPlanService manualPlans;
+    private final TranscriptService transcripts;
     private final TransactionTemplate transaction;
     private final int maxAttempts;
+    private record ManualAdmission(String planId,long revision,String planHash,TranscriptService.SourceTicket source) {}
+    private static final class ManualExportReplayed extends RuntimeException {
+        private final Map<String,Object> receipt;
+        private ManualExportReplayed(Map<String,Object> receipt){this.receipt=Map.copyOf(receipt);}
+    }
 
-    public ExportService(JdbcTemplate jdbc, ReviewService reviews, TopicReviewService topics, ArtifactVerifier verifier, ClipRequestService clipRequests,
+    public ExportService(JdbcTemplate jdbc, ReviewService reviews, TopicReviewService topics, ArtifactVerifier verifier, ClipRequestService clipRequests, ManualClipPlanService manualPlans, TranscriptService transcripts,
                          PlatformTransactionManager manager,
                          @Value("${livecut.jobs.max-attempts:3}") int maxAttempts) {
-        this.jdbc = jdbc; this.reviews = reviews; this.topics = topics; this.verifier = verifier; this.clipRequests=clipRequests; this.maxAttempts = maxAttempts;
+        this.jdbc = jdbc; this.reviews = reviews; this.topics = topics; this.verifier = verifier; this.clipRequests=clipRequests; this.manualPlans=manualPlans;this.transcripts=transcripts;this.maxAttempts = maxAttempts;
         this.transaction = new TransactionTemplate(manager);
         this.transaction.setIsolationLevel(TransactionDefinition.ISOLATION_READ_COMMITTED);
     }
@@ -129,7 +139,7 @@ public class ExportService {
         if (limit < 1 || limit > 100 || offset < 0) { throw bad("INVALID_PAGINATION", "limit must be 1..100 and offset nonnegative"); }
         return transaction.execute(status -> {
             lockAnalysis(jobId);
-            List<String> ids = jdbc.queryForList("SELECT id FROM export_job WHERE job_id=? AND clip_request_id IS NULL AND render_mode='CLEAN' ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?", String.class, jobId, limit, offset);
+            List<String> ids = jdbc.queryForList("SELECT id FROM export_job WHERE job_id=? AND clip_request_id IS NULL AND manual_clip_plan_id IS NULL AND render_mode='CLEAN' ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?", String.class, jobId, limit, offset);
             return new Page(ids.stream().map(id -> snapshot(lockOwner(id, jobId))).toList(), limit, offset);
         });
     }
@@ -163,6 +173,155 @@ public class ExportService {
 
     public Page listClipRequest(String requestId){String id=ClipRequestService.uuid(requestId);return transaction.execute(status->{var request=clipRequests.lockPublicOwner(id);String job=String.valueOf(request.get("job_id"));return new Page(jdbc.queryForList("SELECT id FROM export_job WHERE clip_request_id=? AND render_mode='CLEAN' ORDER BY created_at DESC,id DESC LIMIT 100",String.class,id).stream().map(value->snapshot(lockOwner(value,job))).toList(),100,0);});}
 
+    /** No planning stage is created. Actual encoding still uses the ordinary fenced EXPORT_CLIP stage. */
+    public Snapshot createManualClip(String value,JsonNode input,String key){
+        String id=manualUuid(value);manualExportInput(input);manualExportKey(key);
+        String requestHash=manualExportHash(id,input);
+        var replay=manualExportReceipt(key);
+        if(replay!=null)return replayManualExport(replay,id,input,requestHash);
+        // All original-ASR IO completes before the write owns the analysis/plan/export rows.
+        TranscriptService.SourceTicket ticket;
+        try{ticket=manualSourceTicket(id);}catch(JobException sourceFailure){
+            var completed=manualExportReceipt(key);if(completed!=null)return replayManualExport(completed,id,input,requestHash);
+            throw sourceFailure;
+        }
+        var admission=new ManualAdmission(id,input.path("revision").longValue(),input.path("plan_hash").asText(),ticket);
+        try{return transaction.execute(status->{
+            lockAnalysis(ticket.source().jobId());
+            var existing=manualExportReceipt(key);
+            if(existing!=null){validateManualExportReceipt(existing,id,input,requestHash);throw new ManualExportReplayed(existing);}
+            JsonNode plan=manualPlans.confirmedLocked(id,input.path("revision").longValue(),input.path("plan_hash").asText(),ticket);
+            JsonNode frozen=manualFrozen(plan);String serialized=ClipRequestService.canonicalJson(frozen),hash=sha256(serialized);
+            var found=jdbc.queryForList("SELECT id FROM export_job WHERE fingerprint=?",String.class,hash);
+            String exportId;
+            if(found.isEmpty()){
+                exportId=UUID.randomUUID().toString();JsonNode source=plan.path("source");
+                jdbc.update("INSERT INTO export_job (id,job_id,video_id,approved_revision,source_hash,snapshot_hash,fingerprint,encoding_profile,frozen_json,manual_clip_plan_id) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                        exportId,source.path("job_id").asText(),source.path("video_id").asText(),plan.path("revision").longValue(),source.path("source_video_sha256").asText(),hash,hash,PROFILE,serialized,id);
+                String clipId=UUID.randomUUID().toString(),stageId=UUID.randomUUID().toString();JsonNode clip=frozen.path("clips").get(0);
+                String inputHash=sha256(hash+"\n"+ClipRequestService.canonicalJson(clip)+"\n"+clipId);
+                jdbc.update("INSERT INTO job_stage (id,job_id,owner_type,owner_id,stage_type,shard_key,status,input_hash) VALUES (?,?,'EXPORT',?,'EXPORT_CLIP',?,'READY',?)",stageId,source.path("job_id").asText(),exportId,clipId,inputHash);
+                jdbc.update("INSERT INTO export_clip (id,export_id,stage_id,segment_id,product_id,product_name,topic_title,start_ms,end_ms) VALUES (?,?,?,?,NULL,NULL,?,?,?)",
+                        clipId,exportId,stageId,clip.path("segment_id").asText(),clip.path("title").asText(),clip.path("start_ms").longValue(),clip.path("end_ms").longValue());
+            }else exportId=found.getFirst();
+            var owner=lockOwner(exportId,ticket.source().jobId());Snapshot result=admittedManualSnapshot(owner,admission);
+            jdbc.update("INSERT INTO manual_clip_export_submission (idempotency_key,plan_id,request_hash,input_json,export_id) VALUES (?,?,?,?,?)",key,id,requestHash,ClipRequestService.canonicalJson(input),exportId);
+            return result;
+        });}catch(ManualExportReplayed completed){return replayManualExport(completed.receipt,id,input,requestHash);}
+        catch(DuplicateKeyException collision){
+            var existing=manualExportReceipt(key);if(existing==null)throw conflict("IDEMPOTENCY_CONFLICT","Manual export submission collided with another immutable operation");
+            return replayManualExport(existing,id,input,requestHash);
+        }
+    }
+
+    public ManualPage listManualClip(String value,int limit,long offset){
+        String id=manualUuid(value);if(limit<1||limit>50||offset<0||offset>9007199254740991L)throw manualInvalid();
+        var plan=manualOwner(id);String job=String.valueOf(plan.get("job_id"));
+        return transaction.execute(status->{lockAnalysis(job);
+            var ids=jdbc.queryForList("SELECT id FROM export_job WHERE manual_clip_plan_id=? AND render_mode='CLEAN' ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?",String.class,id,limit,offset);
+            return new ManualPage(ids.stream().map(export->snapshot(lockOwner(export,job))).toList(),limit,offset);
+        });
+    }
+
+    public Snapshot manualClipExportSubmission(String value,String key){
+        String id=manualUuid(value);manualExportKey(key);manualOwner(id);
+        var receipt=manualExportReceipt(key);
+        if(receipt==null||!id.equals(receipt.get("plan_id")))throw missing("MANUAL_CLIP_EXPORT_SUBMISSION_NOT_FOUND","The exact manual export submission was not found");
+        JsonNode input;
+        try{input=JSON.readTree(String.valueOf(receipt.get("input_json")));manualExportInput(input);}catch(RuntimeException invalid){throw manualSubmissionInvalid();}
+        return replayManualExport(receipt,id,input,manualExportHash(id,input));
+    }
+    private Map<String,Object> manualOwner(String id){
+        var rows=jdbc.queryForList("SELECT id,job_id,source_fingerprint FROM manual_clip_plan WHERE id=?",id);
+        if(rows.size()!=1)throw missing("MANUAL_CLIP_NOT_FOUND","Manual clipping plan was not found");return rows.getFirst();
+    }
+    private TranscriptService.SourceTicket manualSourceTicket(String id){
+        var plan=manualOwner(id);
+        try{return transcripts.verifySource(String.valueOf(plan.get("job_id")),String.valueOf(plan.get("source_fingerprint")));}
+        catch(JobException invalid){throw conflict(invalid.getCode().equals("TRANSCRIPT_SOURCE_CHANGED")?"MANUAL_CLIP_SOURCE_CHANGED":"MANUAL_CLIP_SOURCE_INVALID","The immutable manual source could not be verified");}
+    }
+    private Map<String,Object> manualExportReceipt(String key){var rows=jdbc.queryForList("SELECT * FROM manual_clip_export_submission WHERE idempotency_key=?",key);return rows.isEmpty()?null:rows.getFirst();}
+    private Snapshot replayManualExport(Map<String,Object> receipt,String id,JsonNode input,String hash){
+        validateManualExportReceipt(receipt,id,input,hash);return get(String.valueOf(receipt.get("export_id")));
+    }
+    private void validateManualExportReceipt(Map<String,Object> receipt,String id,JsonNode input,String expected){
+        JsonNode stored;
+        try{stored=JSON.readTree(String.valueOf(receipt.get("input_json")));manualExportInput(stored);
+            if(!manualExportHash(String.valueOf(receipt.get("plan_id")),stored).equals(receipt.get("request_hash")))throw manualSubmissionInvalid();
+        }catch(RuntimeException invalid){throw manualSubmissionInvalid();}
+        if(!id.equals(receipt.get("plan_id"))||!expected.equals(receipt.get("request_hash"))||!ClipRequestService.canonicalJson(stored).equals(ClipRequestService.canonicalJson(input)))
+            throw conflict("IDEMPOTENCY_CONFLICT","Key belongs to a different manual export submission");
+        var owners=jdbc.queryForList("SELECT manual_clip_plan_id,approved_revision,frozen_json FROM export_job WHERE id=?",receipt.get("export_id"));
+        if(owners.size()!=1)throw manualSubmissionInvalid();var owner=owners.getFirst();
+        try{if(!id.equals(owner.get("manual_clip_plan_id"))||((Number)owner.get("approved_revision")).longValue()!=stored.path("revision").longValue()
+                ||!stored.path("plan_hash").asText().equals(JSON.readTree(String.valueOf(owner.get("frozen_json"))).path("plan_hash").asText()))throw manualSubmissionInvalid();
+        }catch(RuntimeException invalid){throw manualSubmissionInvalid();}
+    }
+    private static void manualExportInput(JsonNode input){
+        if(input==null||!input.isObject()||!input.propertyNames().equals(Set.of("revision","plan_hash","profile"))
+                ||!input.path("revision").isIntegralNumber()||!input.path("revision").canConvertToLong()||input.path("revision").longValue()<1||input.path("revision").longValue()>9007199254740991L
+                ||!input.path("plan_hash").isString()||!input.path("plan_hash").asText().matches("[a-f0-9]{64}")||!PROFILE.equals(input.path("profile").asText()))throw manualInvalid();
+    }
+    private static String manualExportHash(String id,JsonNode input){return sha256("manual-clip-export-v1\n"+id+"\n"+ClipRequestService.canonicalJson(input)+"\n");}
+    private static void manualExportKey(String key){if(key==null||!key.matches("[A-Za-z0-9_-]{1,100}"))throw manualInvalid();}
+    private static String manualUuid(String value){try{String id=UUID.fromString(value).toString();if(!id.equals(value))throw manualInvalid();return id;}catch(IllegalArgumentException|NullPointerException invalid){throw manualInvalid();}}
+    private static JobException manualInvalid(){return bad("MANUAL_CLIP_INVALID","Provide exact manual plan revision/hash, h264-aac-v1 and an independent submission key");}
+    private static JobException manualSubmissionInvalid(){return conflict("MANUAL_CLIP_SUBMISSION_INVALID","Stored manual export submission failed immutable binding validation");}
+    private Snapshot admittedManualSnapshot(Map<String,Object> owner,ManualAdmission admission){
+        if(!admission.planId().equals(owner.get("manual_clip_plan_id"))||admission.revision()!=((Number)owner.get("approved_revision")).longValue()
+                ||!admission.planHash().equals(JSON.readTree(String.valueOf(owner.get("frozen_json"))).path("plan_hash").asText()))
+            throw conflict("EXPORT_SNAPSHOT_INVALID","Admitted manual proof belongs to another export revision");
+        verifyManualFrozen(owner,admission.source());return snapshotRows(owner);
+    }
+
+    private static JsonNode manualPlanPayload(JsonNode plan){
+        var payload=JSON.createObjectNode().put("schema_version","1.0").put("data_kind","manual_clip_plan_revision").put("source_kind","MANUAL_ASR")
+                .put("id",plan.path("id").asText()).put("revision",plan.path("revision").longValue()).put("title",plan.path("title").asText())
+                .put("start_utterance_id",plan.path("start_utterance_id").asText()).put("end_utterance_id",plan.path("end_utterance_id").asText());
+        payload.set("source",plan.path("source"));payload.set("range",plan.path("range"));return payload;
+    }
+    private static JsonNode manualFrozen(JsonNode plan){
+        var source=plan.path("source");var range=plan.path("range");
+        var clip=new TreeMap<String,Object>();clip.put("segment_id","manual:"+plan.path("id").asText());clip.put("title",plan.path("title").asText());clip.put("start_ms",range.path("start_ms").longValue());clip.put("end_ms",range.path("end_ms").longValue());
+        Map<String,Object> frozen=new TreeMap<>();frozen.put("job_id",source.path("job_id").asText());frozen.put("video_id",source.path("video_id").asText());frozen.put("generation",source.path("generation").intValue());
+        frozen.put("source_hash",source.path("source_video_sha256").asText());frozen.put("approved_revision",plan.path("revision").longValue());frozen.put("encoding_profile",PROFILE);frozen.put("clips",List.of(clip));
+        frozen.put("analysis_mode","manual_asr");frozen.put("manual_clip_plan_id",plan.path("id").asText());frozen.put("plan_hash",plan.path("plan_hash").asText());frozen.put("manual_plan",manualPlanPayload(plan));
+        return JSON.valueToTree(frozen);
+    }
+    /** Existing consumption transactions retain their established lock protocol; source proof is never skipped. */
+    public JsonNode verifyManualFrozen(Map<String,Object> owner){return verifyManualFrozen(owner,null);}
+    /** A removed association cannot downgrade a frozen manual export into the legacy topic authority. */
+    private boolean isManualOwner(Map<String,Object> owner){
+        try{
+            JsonNode frozen=JSON.readTree(String.valueOf(owner.get("frozen_json")));
+            boolean declared=frozen.has("manual_clip_plan_id")||"manual_asr".equals(frozen.path("analysis_mode").asText());
+            if(declared||owner.get("manual_clip_plan_id")!=null){
+                if(owner.get("manual_clip_plan_id")==null||!Objects.equals(owner.get("manual_clip_plan_id"),frozen.path("manual_clip_plan_id").asText())
+                        ||owner.get("clip_request_id")!=null||!"manual_asr".equals(frozen.path("analysis_mode").asText()))throw new IllegalArgumentException();
+                return true;
+            }
+            return false;
+        }catch(JobException invalid){throw invalid;}catch(RuntimeException invalid){throw conflict("EXPORT_SNAPSHOT_INVALID","Manual export authority association is invalid");}
+    }
+    private JsonNode verifyManualFrozen(Map<String,Object> owner,TranscriptService.SourceTicket admitted){
+        try{
+            String id=(String)owner.get("manual_clip_plan_id");if(id==null||owner.get("clip_request_id")!=null||!"CLEAN".equals(owner.get("render_mode"))||!PROFILE.equals(owner.get("encoding_profile")))throw new IllegalArgumentException();
+            JsonNode frozen=JSON.readTree(String.valueOf(owner.get("frozen_json")));String hash=sha256(ClipRequestService.canonicalJson(frozen));
+            if(!hash.equals(owner.get("snapshot_hash"))||!hash.equals(owner.get("fingerprint")))throw new IllegalArgumentException();
+            var ticket=admitted==null?manualSourceTicket(id):admitted;
+            JsonNode plan=manualPlans.confirmedLocked(id,((Number)owner.get("approved_revision")).longValue(),frozen.path("plan_hash").asText(),ticket);
+            if(!plan.path("id").asText().equals(id)||!plan.path("source").path("job_id").asText().equals(owner.get("job_id"))||!plan.path("source").path("video_id").asText().equals(owner.get("video_id"))
+                    ||!plan.path("source").path("source_video_sha256").asText().equals(owner.get("source_hash"))||!ClipRequestService.canonicalJson(manualFrozen(plan)).equals(ClipRequestService.canonicalJson(frozen)))throw new IllegalArgumentException();
+            var rows=jdbc.queryForList("SELECT c.*,s.job_id AS stage_job,s.owner_type,s.owner_id,s.stage_type,s.shard_key,s.input_hash FROM export_clip c LEFT JOIN job_stage s ON s.id=c.stage_id WHERE c.export_id=?",owner.get("id"));
+            if(rows.size()!=1)throw new IllegalArgumentException();var row=rows.getFirst();JsonNode clip=frozen.path("clips").get(0);
+            if(row.get("source_parts_json")!=null||row.get("product_id")!=null||row.get("product_name")!=null||!Objects.equals(row.get("segment_id"),clip.path("segment_id").asText())||!Objects.equals(row.get("topic_title"),clip.path("title").asText())
+                    ||((Number)row.get("start_ms")).longValue()!=clip.path("start_ms").longValue()||((Number)row.get("end_ms")).longValue()!=clip.path("end_ms").longValue()
+                    ||!Objects.equals(row.get("stage_job"),owner.get("job_id"))||!"EXPORT".equals(row.get("owner_type"))||!Objects.equals(row.get("owner_id"),owner.get("id"))||!"EXPORT_CLIP".equals(row.get("stage_type"))||!Objects.equals(row.get("shard_key"),row.get("id"))
+                    ||!sha256(hash+"\n"+ClipRequestService.canonicalJson(clip)+"\n"+row.get("id")).equals(row.get("input_hash")))throw new IllegalArgumentException();
+            return frozen;
+        }catch(JobException invalid){throw invalid;}catch(RuntimeException invalid){throw conflict("EXPORT_SNAPSHOT_INVALID","Frozen manual export failed confirmed source validation");}
+    }
+
     /** Caption orchestration already owns analysis/source locks; no caption dependency enters this service. */
     public record CreatedRender(String exportId,String clipId) {}
     public CreatedRender createCaptionRender(String jobId,String videoId,long approvedRevision,String sourceHash,String title,JsonNode render,String keyHash){
@@ -175,7 +334,8 @@ public class ExportService {
         frozen.put("approved_revision",approvedRevision);frozen.put("encoding_profile",CaptionRenderSpec.PROFILE);frozen.put("clips",List.of(clip));frozen.put("render_mode","CAPTIONED");
         frozen.put("caption_render",render);String renderHash=sha256(ClipRequestService.canonicalJson(render));frozen.put("caption_render_hash",renderHash);
         String frozenJson=ClipRequestService.canonicalJson(JSON.valueToTree(frozen)),snapshotHash=sha256(frozenJson),fingerprint=sha256(snapshotHash+"\n"+keyHash);
-        jdbc.update("INSERT INTO export_job (id,job_id,video_id,approved_revision,source_hash,snapshot_hash,fingerprint,encoding_profile,frozen_json,render_mode) VALUES (?,?,?,?,?,?,?,?,?,'CAPTIONED')",exportId,jobId,videoId,approvedRevision,sourceHash,snapshotHash,fingerprint,CaptionRenderSpec.PROFILE,frozenJson);
+        String manualSource=jdbc.queryForObject("SELECT manual_clip_plan_id FROM export_job WHERE id=?",String.class,render.path("source_export_id").asText());
+        jdbc.update("INSERT INTO export_job (id,job_id,video_id,approved_revision,source_hash,snapshot_hash,fingerprint,encoding_profile,frozen_json,render_mode,manual_clip_plan_id) VALUES (?,?,?,?,?,?,?,?,?,'CAPTIONED',?)",exportId,jobId,videoId,approvedRevision,sourceHash,snapshotHash,fingerprint,CaptionRenderSpec.PROFILE,frozenJson,manualSource);
         String inputHash=sha256(snapshotHash+"\n"+ClipRequestService.canonicalJson(JSON.valueToTree(clip))+"\n"+clipId);
         jdbc.update("INSERT INTO job_stage (id,job_id,owner_type,owner_id,stage_type,shard_key,status,input_hash) VALUES (?,?,'EXPORT',?,'EXPORT_CLIP',?,'READY',?)",stageId,jobId,exportId,clipId,inputHash);
         jdbc.update("INSERT INTO export_clip (id,export_id,stage_id,segment_id,product_id,product_name,topic_title,start_ms,end_ms) VALUES (?,?,?,?,NULL,NULL,?,0,?)",clipId,exportId,stageId,render.path("source_clip_id").asText(),title,duration);
@@ -216,7 +376,7 @@ public class ExportService {
             }
             return new Manifest("1.0", "export_manifest", id, batch.jobId(), batch.videoId(), generation,
                     batch.approvedRevision(), String.valueOf(owner.get("source_hash")), batch.snapshotHash(),
-                    batch.profile(), batch.status(), batch.stateVersion(), batch.createdAt(), batch.updatedAt(), List.copyOf(clips),batch.clipRequestId());
+                    batch.profile(), batch.status(), batch.stateVersion(), batch.createdAt(), batch.updatedAt(), List.copyOf(clips),batch.clipRequestId(),batch.manualClipPlanId());
         });
     }
 
@@ -256,7 +416,7 @@ public class ExportService {
             verifyVideoPackageFrozen(owner,Set.copyOf(selection));
             var clips=rows.stream().map(this::videoPackageClip).toList();
             return new ExportVideoModels.Plan(id,String.valueOf(owner.get("job_id")),String.valueOf(owner.get("video_id")),String.valueOf(owner.get("source_hash")),String.valueOf(owner.get("snapshot_hash")),
-                ((Number)owner.get("approved_revision")).longValue(),String.valueOf(owner.get("encoding_profile")),(String)owner.get("clip_request_id"),clips);
+                ((Number)owner.get("approved_revision")).longValue(),String.valueOf(owner.get("encoding_profile")),(String)owner.get("clip_request_id"),clips,(String)owner.get("manual_clip_plan_id"));
         });
     }
 
@@ -267,7 +427,7 @@ public class ExportService {
             if(!Objects.equals(plan.jobId(),owner.get("job_id"))||!Objects.equals(plan.videoId(),owner.get("video_id"))
                 ||!Objects.equals(plan.sourceVideoHash(),owner.get("source_hash"))||!Objects.equals(plan.snapshotHash(),owner.get("snapshot_hash"))
                 ||plan.approvedRevision()!=((Number)owner.get("approved_revision")).longValue()||!Objects.equals(plan.profile(),owner.get("encoding_profile"))
-                ||!Objects.equals(plan.clipRequestId(),owner.get("clip_request_id")))throw conflict("EXPORT_SNAPSHOT_INVALID","The admitted export source changed");
+                ||!Objects.equals(plan.clipRequestId(),owner.get("clip_request_id"))||!Objects.equals(plan.manualClipPlanId(),owner.get("manual_clip_plan_id")))throw conflict("EXPORT_SNAPSHOT_INVALID","The admitted export source changed");
             if(!admitted.equals(videoPackageClip(clip(plan.exportId(),admitted.clipId(),true))))throw conflict("EXPORT_SNAPSHOT_INVALID","A selected clip changed after package admission");
             Content content=contentLocked(owner,admitted.clipId(),true);
             if(content.sizeBytes()!=admitted.sizeBytes()||!content.hash().equals(admitted.contentHash()))throw conflict("EXPORT_CONTENT_INTEGRITY_ERROR","Selected video bytes changed after package admission");
@@ -314,6 +474,7 @@ public class ExportService {
                 ||frozen.path("approved_revision").longValue()!=((Number)owner.get("approved_revision")).longValue()
                 ||!PROFILE.equals(owner.get("encoding_profile"))||!PROFILE.equals(frozen.path("encoding_profile").asText())
                 ||frozen.has("render_mode")&&!"CLEAN".equals(frozen.path("render_mode").asText()))throw new IllegalArgumentException();
+            if(isManualOwner(owner)){verifyManualFrozen(owner);return;}
             if(owner.get("clip_request_id")!=null){verifyClipRequestFrozen(owner,selected);return;}
             JsonNode frozenClips=frozen.path("clips");if(!frozenClips.isArray()||frozenClips.isEmpty()||frozenClips.size()>100)throw new IllegalArgumentException();
             for(String id:selected){
@@ -381,6 +542,7 @@ public class ExportService {
     }
     private Map<String,Object> claimConfig(StageRow stage,boolean selectedOnly) {
         Map<String, Object> owner = jdbc.queryForMap("SELECT * FROM export_job WHERE id=?", stage.ownerId());
+        if("CLEAN".equals(owner.get("render_mode"))&&isManualOwner(owner))verifyManualFrozen(owner);
         if(owner.get("clip_request_id")!=null)verifyClipRequestFrozen(owner,selectedOnly?Set.of(stage.shardKey()):null);
         Map<String, Object> row = clip(stage.ownerId(), stage.shardKey(), false);
         Map<String, Object> export = new TreeMap<>();
@@ -436,8 +598,10 @@ public class ExportService {
                 ||!frozen.path("caption_render_hash").asText().equals(sha256(ClipRequestService.canonicalJson(render))))throw new IllegalArgumentException();
             var sources=jdbc.queryForList("SELECT * FROM export_job WHERE id=?",render.path("source_export_id").asText());
             if(sources.size()!=1)throw new IllegalArgumentException();var source=sources.getFirst();
-            if(source.get("clip_request_id")!=null){
-                verifyClipRequestFrozen(source);
+            boolean manualSource=isManualOwner(source);
+            if(!Objects.equals(owner.get("manual_clip_plan_id"),source.get("manual_clip_plan_id")))throw new IllegalArgumentException();
+            if(source.get("clip_request_id")!=null||manualSource){
+                if(manualSource)verifyManualFrozen(source);else verifyClipRequestFrozen(source);
                 var clips=jdbc.queryForList("SELECT * FROM export_clip WHERE export_id=? AND id=?",source.get("id"),render.path("source_clip_id").asText());
                 if(clips.size()!=1||!Objects.equals(owner.get("job_id"),source.get("job_id"))||!Objects.equals(owner.get("video_id"),source.get("video_id"))
                     ||!Objects.equals(owner.get("source_hash"),source.get("source_hash"))||!render.path("source_snapshot_hash").asText().equals(source.get("snapshot_hash"))
@@ -518,8 +682,12 @@ public class ExportService {
     }
 
     private Snapshot snapshot(Map<String, Object> owner) {
-        if(owner.get("clip_request_id")!=null)verifyClipRequestFrozen(owner);
-        else if("CAPTIONED".equals(owner.get("render_mode")))captionRenderFrozen(owner);
+        if("CAPTIONED".equals(owner.get("render_mode")))captionRenderFrozen(owner);
+        else if(isManualOwner(owner))verifyManualFrozen(owner);
+        else if(owner.get("clip_request_id")!=null)verifyClipRequestFrozen(owner);
+        return snapshotRows(owner);
+    }
+    private Snapshot snapshotRows(Map<String,Object> owner){
         String id = String.valueOf(owner.get("id"));
         List<Clip> clips = jdbc.query("SELECT c.*,s.status,s.attempt,s.error_code,s.diagnostic_json FROM export_clip c JOIN job_stage s ON s.id=c.stage_id WHERE c.export_id=? ORDER BY c.start_ms,c.id",
                 (row, index) -> {
@@ -534,7 +702,7 @@ public class ExportService {
                 }, id);
         return new Snapshot(id, String.valueOf(owner.get("job_id")), String.valueOf(owner.get("video_id")), ((Number) owner.get("approved_revision")).longValue(),
                 String.valueOf(owner.get("snapshot_hash")), String.valueOf(owner.get("encoding_profile")), String.valueOf(owner.get("status")),
-                ((Number) owner.get("state_version")).longValue(), instant(owner.get("created_at")), instant(owner.get("updated_at")), clips,(String)owner.get("clip_request_id"));
+                ((Number) owner.get("state_version")).longValue(), instant(owner.get("created_at")), instant(owner.get("updated_at")), clips,(String)owner.get("clip_request_id"),(String)owner.get("manual_clip_plan_id"));
     }
 
     private Map<String, Object> clip(String exportId, String clipId, boolean lock) {

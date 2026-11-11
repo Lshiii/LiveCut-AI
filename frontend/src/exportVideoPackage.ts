@@ -17,7 +17,9 @@ export function videoPackageClipSelectable(batchId: string, clip: ExportClip): b
 function batchIdentity(batch: ExportJob) {
   const request = (batch as ExportJob & { clip_request_id?: unknown }).clip_request_id ?? null
   if (request !== null && (typeof request !== 'string' || !UUID.test(request))) throw new VideoPackageError()
-  return [batch.id, batch.job_id, batch.video_id, batch.profile, batch.approved_revision, batch.snapshot_hash, request]
+  const manual = batch.manual_clip_plan_id ?? null
+  if (manual !== null && (typeof manual !== 'string' || !UUID.test(manual) || request !== null || !Number.isSafeInteger(batch.approved_revision) || batch.approved_revision < 1 || batch.clips.length !== 1)) throw new VideoPackageError()
+  return [batch.id, batch.job_id, batch.video_id, batch.profile, batch.approved_revision, batch.snapshot_hash, request, manual]
 }
 function clipIdentity(clip: ExportClip) {
   const extra = clip as ExportClip & { parts?: unknown; duration_ms?: unknown }

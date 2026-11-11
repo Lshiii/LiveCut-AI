@@ -25,6 +25,15 @@ test('topic export snapshots require a title with both product fields null and p
   assert.throws(() => parseExportSnapshot({ ...batch(), clips: [{ ...batch().clips[0], title: '混合类型' }] }, id(10)), SnapshotError)
   assert.throws(() => parseExportSnapshot({ ...topic, clips: [...topic.clips, { ...batch().clips[0], id: id(21), segment_id: 's:002' }] }, id(10)), SnapshotError)
 })
+
+test('manual export snapshots retain independent provenance and require real r1+, exactly one noncommerce clip, and no AI request', () => {
+  const manual = { ...batch(), approved_revision: 1, manual_clip_plan_id: id(50), clips: [{ ...batch().clips[0]!, product_id: null, product_name: null, title: '人工 ASR 区间' }] }
+  assert.equal(parseExportSnapshot(manual, manual.id).manual_clip_plan_id, id(50))
+  for (const value of [{ ...manual, approved_revision: 0 }, { ...manual, manual_clip_plan_id: null }, { ...manual, manual_clip_plan_id: 'fake' }, { ...manual, clip_request_id: id(51) },
+    { ...manual, clips: batch().clips }, { ...manual, clips: [...manual.clips, { ...manual.clips[0], id: id(21), segment_id: 's2' }] }]) assert.throws(() => parseExportSnapshot(value, manual.id), SnapshotError)
+  assert.equal(parseExportSnapshot({ ...manual, clip_request_id: null }, manual.id).clip_request_id, null)
+  assert.ok(!Object.hasOwn(parseExportSnapshot(batch(), id(10)), 'manual_clip_plan_id'))
+})
 class Clock implements StreamClock {
   now = 0; next = 0; timers = new Map<number, { at: number; callback: () => void }>()
   setTimeout(callback: () => void, delay: number) { const key = ++this.next; this.timers.set(key, { at: this.now + delay, callback }); return key }

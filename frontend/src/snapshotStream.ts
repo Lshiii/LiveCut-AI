@@ -57,12 +57,15 @@ export function parseExportSnapshot(raw: unknown, id: string, jobId?: string): E
   if (!uuid(raw.job_id) || (jobId !== undefined && raw.job_id !== jobId) || !uuid(raw.video_id)
       || !integer(raw.approved_revision) || typeof raw.snapshot_hash !== 'string' || !/^[a-f0-9]{64}$/.test(raw.snapshot_hash)
       || raw.profile !== 'h264-aac-v1' || !date(raw.updated_at) || !Array.isArray(raw.clips) || !raw.clips.length) invalid()
+  if (raw.clip_request_id != null && !uuid(raw.clip_request_id)) invalid()
+  if (raw.manual_clip_plan_id !== undefined && (!uuid(raw.manual_clip_plan_id) || raw.clip_request_id != null || !integer(raw.approved_revision, 1) || raw.clips.length !== 1)) invalid()
   const ids = new Set<string>(), segments = new Set<string>()
   let topicBatch: boolean | undefined
   for (const clip of raw.clips) {
     if (!object(clip)) invalid()
     const commerce = identifier(clip.product_id) && typeof clip.product_name === 'string' && !!clip.product_name.trim() && clip.title === undefined
     const topic = clip.product_id === null && clip.product_name === null && typeof clip.title === 'string' && !!clip.title.trim() && [...clip.title].length <= 120
+    if (raw.manual_clip_plan_id !== undefined && !topic) invalid()
     if ((!commerce && !topic) || !uuid(clip.id) || ids.has(clip.id) || !identifier(clip.segment_id) || segments.has(clip.segment_id)
         || !uuid(clip.stage_id) || !integer(clip.start_ms) || !integer(clip.end_ms, clip.start_ms + 1)
         || typeof clip.status !== 'string' || !STAGE_STATUS.has(clip.status) || !integer(clip.attempt) || !code(clip.error_code)

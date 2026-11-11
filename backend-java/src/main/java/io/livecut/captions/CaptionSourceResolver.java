@@ -37,7 +37,7 @@ public class CaptionSourceResolver {
         var owner=jdbc.queryForMap("SELECT * FROM export_job WHERE id=?",exportId);
         if(!"CLEAN".equals(owner.get("render_mode")))throw invalid();
         var job=jdbc.queryForMap("SELECT * FROM analysis_job WHERE id=?",batch.jobId());
-        JsonNode frozen=owner.get("clip_request_id")==null?JSON.readTree(String.valueOf(owner.get("frozen_json"))):exports.verifyClipRequestFrozen(owner);
+        JsonNode frozen=owner.get("manual_clip_plan_id")!=null?exports.verifyManualFrozen(owner):owner.get("clip_request_id")==null?JSON.readTree(String.valueOf(owner.get("frozen_json"))):exports.verifyClipRequestFrozen(owner);
         if(!ClipRequestService.sha(ClipRequestService.canonicalJson(frozen)).equals(batch.snapshotHash())
             ||!batch.jobId().equals(frozen.path("job_id").asText())||!batch.videoId().equals(frozen.path("video_id").asText())
             ||!frozen.path("generation").isIntegralNumber()||frozen.path("generation").longValue()!=((Number)job.get("generation")).longValue()
@@ -55,7 +55,12 @@ public class CaptionSourceResolver {
         var transcript=asrManifest.artifacts().stream().filter(a->a.kind().equals("transcript")).findFirst().orElseThrow(CaptionSourceResolver::invalid);
         JsonNode utterances=artifacts.readJsonArtifact(transcript,asrIdentity);long sourceDuration;
         String reviewedHash;
-        if(batch.clipRequestId()!=null){
+        if(batch.manualClipPlanId()!=null){
+            JsonNode manual=frozen.path("manual_plan"),source=manual.path("source");
+            if(!batch.manualClipPlanId().equals(manual.path("id").asText())||!batch.jobId().equals(source.path("job_id").asText())||!batch.videoId().equals(source.path("video_id").asText())
+                    ||!owner.get("source_hash").equals(source.path("source_video_sha256").asText())||!transcript.sha256().equals(source.path("transcript_sha256").asText()))throw invalid();
+            sourceDuration=source.path("duration_ms").longValue();reviewedHash=frozen.path("plan_hash").asText();
+        }else if(batch.clipRequestId()!=null){
             var request=jdbc.queryForMap("SELECT * FROM clip_request WHERE id=? AND job_id=?",batch.clipRequestId(),batch.jobId());
             if(!batch.videoId().equals(request.get("video_id"))||!owner.get("source_hash").equals(request.get("source_hash"))
                 ||!transcript.sha256().equals(request.get("transcript_hash"))||!transcript.key().equals(request.get("transcript_key"))
@@ -82,6 +87,7 @@ public class CaptionSourceResolver {
         Map<String,Object> basis=new TreeMap<>();basis.put("schema_version","1.0");basis.put("caption_version","sentence-captions-v1");basis.put("export_id",exportId);basis.put("clip_id",clipId);
         basis.put("job_id",batch.jobId());basis.put("video_id",batch.videoId());basis.put("source_video_hash",owner.get("source_hash"));basis.put("source_duration_ms",sourceDuration);
         basis.put("source",source);basis.put("transcript_key",transcript.key());basis.put("reviewed_source_hash",reviewedHash);
+        if(batch.manualClipPlanId()!=null)basis.put("manual_clip_plan_id",batch.manualClipPlanId());
         basis.put("original_content_hash",ClipRequestService.sha(ClipRequestService.canonicalJson(JSON.valueToTree(new CaptionModels.Content(originals)))));
         JsonNode basisNode=JSON.valueToTree(basis);String canonical=ClipRequestService.canonicalJson(basisNode);
         String title=clip.title()!=null?clip.title():clip.productName()!=null?clip.productName():"视频片段";

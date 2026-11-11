@@ -42,6 +42,17 @@ test('MP4 package selection is explicit, ordered by the batch, native, subtitle 
   assert.throws(() => videoPackageSelection({ ...value, profile: 'CLEAN' }, [id(20)], true), VideoPackageError)
 })
 
+test('manual MP4 package pins manual plan provenance independently of AI request identity', async () => {
+  const value = batch(); value.approved_revision = 1; value.manual_clip_plan_id = id(50); value.clips = [value.clips[0]!]
+  const expected = videoPackageSelection(value, [id(20)], true)
+  const prepared = await prepareVideoPackage(value, [id(20)], { signal: new AbortController().signal, current: () => true, get: async () => clone(value) })
+  assert.equal(prepared.signature, expected.signature)
+  for (const update of [{ manual_clip_plan_id: id(51) }, { manual_clip_plan_id: undefined }, { clip_request_id: id(51) }]) {
+    await assert.rejects(prepareVideoPackage(value, [id(20)], { signal: new AbortController().signal, current: () => true, get: async () => ({ ...clone(value), ...update }) }), VideoPackageError)
+  }
+  for (const update of [{ approved_revision: 0 }, { clips: batch().clips }, { clip_request_id: id(51) }]) assert.throws(() => videoPackageSelection({ ...value, ...update }, [id(20)], true), VideoPackageError)
+})
+
 test('MP4 package rejects empty, duplicate, unknown, cross-batch, failed and over-limit selected clips without truncation', () => {
   for (const ids of [[], [id(20), id(20)], [id(99)], [id(22)], [id(23)], ['../clip'], Array.from({ length: 101 }, (_, i) => id(i + 200))]) {
     assert.throws(() => videoPackageSelection(batch(), ids, true), VideoPackageError)
