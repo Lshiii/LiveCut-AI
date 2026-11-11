@@ -7,6 +7,7 @@ import io.livecut.jobs.JobException;
 import org.springframework.dao.DataAccessException;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.transaction.TransactionException;
@@ -70,7 +71,7 @@ public class ApiErrorHandler {
 
     @ExceptionHandler(NoResourceFoundException.class)
     ResponseEntity<ApiError> notFound() {
-        return error(ResponseEntity.status(HttpStatus.NOT_FOUND), "RESOURCE_NOT_FOUND", "Resource was not found", false);
+        return error(ResponseEntity.status(HttpStatus.NOT_FOUND).contentType(MediaType.APPLICATION_JSON), "RESOURCE_NOT_FOUND", "Resource was not found", false);
     }
 
     @ExceptionHandler(Exception.class)

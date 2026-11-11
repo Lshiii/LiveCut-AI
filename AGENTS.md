@@ -41,6 +41,7 @@
 - 回答前原句预查按 docs/74-回答前原句预查.md：显式speech_lookup_v1/1.4与执行协议2隔离，程序先本地预查并记录EVIDENCE_POLICY，不能伪模型自主工具；预查计原4步和同轮请求预算，不增加ASR/embedding/隐藏审核。协议版本为登记session的不可变集合，ready在LIMIT前筛选，claim/重放事务内复核，匿名旧兼容不得领v2。旧1.3指纹/SYSTEM/缓存和未决body保持；只把实际入模完整原句作为证据，查询前缀、范围和裁剪显式保留，有返回不强迫SPEECH或宣称语义已证。
 - 新1.4模型答复仅精确省略非执行建议字段suggested_clip_instruction时，可在独立解码副本补null；不补证据/正文/来源或丢弃未知字段，不修正显式非法值。最终wire仍完整严格，旧协议、原SYSTEM/payload/配置/缓存不改；离线接受已收响应不等于把原FAILED业务轮次发布成功。
 - 已收首答零调用恢复按 docs/75-已收回答零调用恢复.md：显式核对快照与幂等动作，新建协议3/额度0的派生轮次，原FAILED/账本/缓存只读保留。原SUCCEEDED响应wrapper与首答缓存/输入必须强绑定；仅在原身份验证后重绑定turn_id，新manifest走正常租约与来源验收。UNKNOWN、缺缓存、tool首答或仍需模型均拒绝；Java reserve硬拒与Python无密钥离线分支共同保证不新增请求，旧v1/v2不能领取。恢复回执与普通新问题草稿/未决提交分开，未知先查精确原key，不认领另一个key的既有child。
+- 单JAR工作台按 docs/76-单JAR工作台交付.md：仅opt-in workbench profile与全新独立输出，完整冻结UI及上传hash Worker，保持API/internal真实404和鉴权，不加SPA兜底。profile clean必须固定跳过防validate之前误删；源码/dist/包字节一致且不加载私有配置、不启动服务/Worker/模型。普通target不得污染，失败产物保留而不冒充成功。外置配置及repo/portable相对路径基准分开，切origin不自动迁移或清除草稿/未决回执；运行Java仍可能迁移DB与扫描维护，不称只读。此前自动UI启动被审批拒绝，不可换服务或端口绕过；无监听MockMvc、包检与有限静态浏览器验收需标明实际范围。
 - 按 docs/03-AI开发任务书.md 的关口推进，先真实算法验证，再扩建前端与 MQ。
 - contracts 是跨 Java/Python/前端的共同契约；字段变更同步文档与各调用方。
 

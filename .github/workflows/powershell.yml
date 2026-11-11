@@ -42,3 +42,9 @@ jobs:
       - name: Test Worker launcher with mocked uv in Windows PowerShell
         shell: powershell
         run: ./scripts/tests/worker-launch-tests.ps1
+      - name: Test workbench helpers without starting services in PowerShell 7
+        shell: pwsh
+        run: ./scripts/tests/workbench-package-tests.ps1
+      - name: Test workbench helpers without starting services in Windows PowerShell
+        shell: powershell
+        run: ./scripts/tests/workbench-package-tests.ps1

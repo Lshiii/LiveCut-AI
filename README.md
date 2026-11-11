@@ -100,6 +100,21 @@ docker compose --env-file .env.compose -f infra/compose.yml up -d
 docker compose --env-file .env.compose -f infra/compose.yml ps
 ```
 
+### 用单个 JAR 运行网页与 API
+
+在仓库根目录构建一个包含网页与 Java API 的工作台包，不加载私有模型配置或启动服务：
+
+```powershell
+$package = .\scripts\package-workbench.ps1
+.\scripts\run-workbench.ps1 -PackageDirectory $package.PackageDirectory -EnvFile '.env.java'
+```
+
+数据库健康后打开 **http://127.0.0.1:8080/**，无需单独启动前端；需要新分析时再另开终端运行 Python Worker。已打好的 `package/` 目录可单独携带，运行网页/API不需要 Node 或 Maven。完整构建、外置配置和限制见[单 JAR 工作台指南](docs/76-单JAR工作台交付.md)。
+
+原来 `5173` 入口的本机草稿和未决回执不会自动迁到 `8080`。切换前先核对或导出；也可关闭 Vite 后明确以 `-Port 5173` 使用同一 origin，并核对仍指向原业务来源。
+
+### 保留三终端开发模式
+
 等待数据库健康后，分别打开三个 PowerShell 终端，均从仓库根目录执行：
 
 ```powershell
