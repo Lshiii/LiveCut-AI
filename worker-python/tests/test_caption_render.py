@@ -14,7 +14,8 @@ from collections import Counter
 from pathlib import Path
 
 import pytest
-from livecut.media import export_composed_clip, probe_media
+from livecut import media as media_module
+from livecut.media import burn_caption_clip, export_clip, export_composed_clip, probe_media
 from livecut.worker import Lease, LeaseGuard, StageContext, WorkerError, _native_path, sha256
 from livecut.worker_caption_render import (
     FONT_FAMILY,
@@ -341,6 +342,113 @@ def test_real_burn_all_frames_styles_literal_cjk_timing_optional_audio_and_no_re
     assert events[0]["phase"] == "PREPARING" and events[-1]["phase"] == "PUBLISHING"
     assert all(a["sequence"] < b["sequence"] for a, b in zip(events, events[1:]))
     assert all(0 <= event["processed_ms"] <= event["total_ms"] for event in events)
+
+
+@pytest.mark.parametrize("audio", [True, False])
+def test_non_frame_aligned_single_cut_remains_usable_for_caption_burning(
+    tmp_path, media, font, audio
+):
+    ffmpeg, ffprobe, sources = media
+    clean = tmp_path / "single-cut.mp4"
+    # 259ms is between the synthetic source's 25fps frames, not a keyframe or
+    # whole-frame boundary. Previously a successful cut failed when burned.
+    info = export_clip(sources[audio], clean, 259, 1759,
+                       ffmpeg_path=ffmpeg, ffprobe_path=ffprobe)
+    assert info.format_start_time_seconds == info.video_start_time_seconds == 0.0
+    assert info.audio_start_time_seconds == (0.0 if audio else None)
+    before = sha256(clean)
+    working = tmp_path / "burn"
+    (working / "fonts").mkdir(parents=True)
+    shutil.copyfile(font[0], working / "fonts" / "fixed.otf")
+    render = spec(audio=audio)
+    (working / "captions.ass").write_bytes(
+        build_ass([Cue("c1", 259, 1259, "中文 subtitle")], render, font[1])
+    )
+    output = tmp_path / "captioned.mp4"
+    result = burn_caption_clip(
+        clean, output, working, width=320, height=180,
+        expected_duration_ms=info.duration_ms, has_audio=audio, source_frame=True,
+        ffmpeg_path=ffmpeg, ffprobe_path=ffprobe, guard=lambda: None,
+        on_encoding=lambda value: None, on_phase=lambda phase: None,
+    )
+    assert sha256(clean) == before
+    assert abs(result.duration_ms - 1500) <= 100
+    assert result.audio_codec == ("aac" if audio else None)
+    for at, visible in ((0.12, False), (0.6, True), (1.4, False)):
+        rgb = pixels(ffmpeg, output, at, 320, 180)
+        white = sum(r > 140 and g > 140 and b > 140
+                    for r, g, b in zip(rgb[::3], rgb[1::3], rgb[2::3]))
+        assert (white > 20) == visible
+
+
+def test_long_caption_workdir_uses_private_short_copy_and_cleans_after_success(
+    tmp_path, media, font, monkeypatch
+):
+    ctx, events, _ = context(tmp_path, media, font)
+    before = sha256(ctx.storage_root / "clean/clip.mp4")
+    monkeypatch.setattr(media_module, "_caption_cwd_too_long",
+                        lambda path: path.name == "caption-render")
+    result = ExportStageExecutor(ffmpeg_path=media[0], ffprobe_path=media[1])(ctx)
+    assert result["data_kind"] == "captioned_export"
+    assert sha256(ctx.storage_root / "clean/clip.mp4") == before
+    assert (ctx.directory / "caption-render/captions.ass").is_file()
+    assert sha256(ctx.directory / "caption-render/fonts/font.otf") == FONT_HASH
+    assert not list(ctx.storage_root.glob("caption-*"))
+    assert events[-1]["phase"] == "PUBLISHING"
+
+
+@pytest.mark.parametrize("code", ["WORKER_STOPPED", "CAPTION_RENDER_ENCODE_FAILED"])
+def test_short_caption_copy_cleans_after_cancellation_or_encode_failure(
+    tmp_path, media, font, monkeypatch, code
+):
+    ctx, _, _ = context(tmp_path, media, font)
+    monkeypatch.setattr(media_module, "_caption_cwd_too_long",
+                        lambda path: path.name == "caption-render")
+    sentinel = WorkerError(code)
+    original_run = media_module._run_process
+
+    def fail(command, **options):
+        if "cwd" not in options:
+            return original_run(command, **options)
+        execution = options["cwd"]
+        assert execution.parent == _native_path(ctx.storage_root)
+        assert execution.name.startswith("caption-")
+        original = _native_path(ctx.directory / "caption-render")
+        for relative in ("captions.ass", "fonts/font.otf"):
+            assert (execution / relative).read_bytes() == (original / relative).read_bytes()
+        options["guard"]()
+        raise sentinel
+
+    monkeypatch.setattr(media_module, "_run_process", fail)
+    with pytest.raises(WorkerError) as raised:
+        ExportStageExecutor(ffmpeg_path=media[0], ffprobe_path=media[1])(ctx)
+    assert raised.value is sentinel
+    assert not list(ctx.storage_root.glob("caption-*"))
+    assert not _native_path(ctx.directory / "clip.mp4").exists()
+
+
+def test_caption_short_copy_rejects_unusable_or_external_roots_and_cleans_partial_copy(
+    tmp_path, monkeypatch
+):
+    root = tmp_path / "storage"
+    working = root / "attempt/caption-render"
+    working.mkdir(parents=True)
+    (working / "captions.ass").write_bytes(b"program-generated ASS")
+    monkeypatch.setattr(media_module, "_caption_cwd_too_long", lambda path: True)
+    for execution_root in (None, tmp_path / "other", root):
+        with pytest.raises(media_module.MediaError) as raised:
+            with media_module._caption_execution_directory(working, execution_root, lambda: None):
+                pytest.fail("Unsafe cwd must not launch an encoder")
+        assert raised.value.code == "CAPTION_RENDER_WORKDIR_UNSUPPORTED"
+    monkeypatch.setattr(media_module, "_caption_cwd_too_long", lambda path: path == working)
+    # ASS was copied before the absent font is discovered. The partial private
+    # workspace must still be removed, without modifying the original ASS.
+    with pytest.raises(media_module.MediaError) as raised:
+        with media_module._caption_execution_directory(working, root, lambda: None):
+            pytest.fail("Missing fixed font must not launch an encoder")
+    assert raised.value.code == "CAPTION_RENDER_ARTIFACT_CHANGED"
+    assert not list(root.glob("caption-*"))
+    assert (working / "captions.ass").read_bytes() == b"program-generated ASS"
 
 
 def test_same_attempt_recovery_hash_binding_and_no_unverified_reuse(

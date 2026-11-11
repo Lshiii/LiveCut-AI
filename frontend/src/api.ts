@@ -34,6 +34,7 @@ export interface ExportClip {
 export interface ExportJob {
   id: string; job_id: string; video_id: string; approved_revision: number; snapshot_hash: string
   profile: string; status: string; state_version: number; created_at: string; updated_at: string; clips: ExportClip[]
+  clip_request_id?: string | null; manual_clip_plan_id?: string
 }
 export interface Page<T> { items: T[]; limit: number; offset: number }
 export class ApiError extends Error {

@@ -31,6 +31,7 @@ async function mount(active = false) {
   const component = compileHostComponent(new URL('../TranscriptSearchPanel.vue', import.meta.url), {
     './api': { api: (path: string, init: { signal: AbortSignal }) => { calls.push({ path, init }); return read(path) } },
     './sequencePreview': preview, './transcriptSearch': transcript,
+    './ManualClipPanel.vue': { setup(_props: unknown, { expose }: { expose(value: unknown): void }) { expose({ dirty: false, pending: false, unresolved: false, summary: { hasRange: false, start: null, end: null }, setBoundary: () => true }); return () => null } },
   })
   const root = hostNode('root'), props = { jobId: owner.job_id, videoId: owner.video_id, generation: owner.generation, videoHash: owner.source_video_sha256,
     videoUrl: '/video.mp4', videoName: '原视频.mp4', active }

@@ -220,6 +220,7 @@ class ExportStageExecutor:
                     source_frame=spec.caption_render["frame_preset"] == "SOURCE",
                     blur_background=spec.caption_render["frame_preset"] == "PORTRAIT_BLUR_720",
                     ffmpeg_path=self.ffmpeg_path, ffprobe_path=self.ffprobe_path,
+                    execution_root=_native_path(context.storage_root),
                     timeout_seconds=min(300, context.guard.remaining_seconds()), guard=context.guard.check,
                     on_encoding=progress.encoding, on_phase=progress.phase)
             elif spec.parts:

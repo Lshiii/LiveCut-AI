@@ -31,6 +31,7 @@ const uploadPanel = ref<{ chooseFile: () => void } | null>(null)
 const reviewEditor = ref<{ dirty: boolean; pending: boolean } | null>(null)
 const intentEditor = ref<{ dirty: boolean; pending: boolean; prefillInstruction(value: string): boolean; prefillAnswerClip(value: AnswerClipSelection): boolean } | null>(null)
 const agentEditor = ref<{ dirty: boolean; pending: boolean } | null>(null)
+const transcriptEditor = ref<{ dirty: boolean; pending: boolean } | null>(null)
 type WorkbenchTab = 'agent' | 'transcript' | 'topics' | 'clips' | 'task'
 const activeTab = ref<WorkbenchTab>('task'), mobileTasksOpen = ref(false)
 const compactLayout = ref(window.matchMedia('(max-width: 1100px)').matches)
@@ -62,8 +63,8 @@ function taskDrawerKey(event: KeyboardEvent) {
   else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus() }
 }
 const taskPreview = ref<HTMLVideoElement | null>(null)
-const editorsDirty = computed(() => !!reviewEditor.value?.dirty || !!intentEditor.value?.dirty || !!agentEditor.value?.dirty)
-const editorsPending = computed(() => !!reviewEditor.value?.pending || !!intentEditor.value?.pending || !!agentEditor.value?.pending)
+const editorsDirty = computed(() => !!reviewEditor.value?.dirty || !!intentEditor.value?.dirty || !!agentEditor.value?.dirty || !!transcriptEditor.value?.dirty)
+const editorsPending = computed(() => !!reviewEditor.value?.pending || !!intentEditor.value?.pending || !!agentEditor.value?.pending || !!transcriptEditor.value?.pending)
 const canResumeFromAsr = computed(() => analysisCanResume(selectedJob.value, editorsDirty.value, !!pending.value || editorsPending.value))
 const streamMode = ref<StreamMode>('idle')
 let timer: number | undefined, refreshing = false, stopped = false, selectionVersion = 0
@@ -440,7 +441,7 @@ onUnmounted(() => { stopped = true; compactQuery.removeEventListener('change', u
           <VideoAgentPanel v-if="selectedJob?.status === 'REVIEW_READY' && currentVideo && topicMode" :key="`agent-${selectedJob.id}`" ref="agentEditor" :active="activeTab === 'agent'" :job-id="selectedJob.id" :video-id="currentVideo.id" :video-hash="currentVideo.content_hash" :video-url="currentVideo.content_url" :clip-target-busy="!!intentEditor?.dirty || !!intentEditor?.pending" @clip-instruction="useAgentClipInstruction" @clip-anchor="useAgentClipAnchor" />
         </div>
         <div id="workbench-pane-transcript" v-show="activeTab === 'transcript'" class="workbench-pane" role="tabpanel" aria-labelledby="workbench-tab-transcript">
-          <TranscriptSearchPanel v-if="selectedJob?.status === 'REVIEW_READY' && currentVideo && topicMode" :key="`transcript-${selectedJob.id}`" :active="activeTab === 'transcript'" :job-id="selectedJob.id" :video-id="currentVideo.id" :generation="selectedJob.generation" :video-hash="currentVideo.content_hash" :video-url="currentVideo.content_url" :video-name="currentVideo.original_filename" />
+          <TranscriptSearchPanel v-if="selectedJob?.status === 'REVIEW_READY' && currentVideo && topicMode" :key="`transcript-${selectedJob.id}`" ref="transcriptEditor" :active="activeTab === 'transcript'" :job-id="selectedJob.id" :video-id="currentVideo.id" :generation="selectedJob.generation" :video-hash="currentVideo.content_hash" :video-url="currentVideo.content_url" :video-name="currentVideo.original_filename" />
         </div>
         <div id="workbench-pane-topics" v-show="activeTab === 'topics'" class="workbench-pane" :class="{ 'topic-workspace-pane': topicMode }" role="tabpanel" aria-labelledby="workbench-tab-topics">
           <TopicReviewPanel v-if="selectedJob?.status === 'REVIEW_READY' && currentVideo && topicMode" :key="selectedJob.id" ref="reviewEditor" :active="activeTab === 'topics'" :job-id="selectedJob.id" :video-url="currentVideo.content_url" />
