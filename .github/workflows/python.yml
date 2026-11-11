@@ -30,7 +30,7 @@ jobs:
           version: '0.13.5'
           enable-cache: true
       - name: Install FFmpeg
-        timeout-minutes: 4
+        timeout-minutes: 5
         run: bash .github/scripts/install-ffmpeg.sh
       - name: Install locked dependencies
         run: uv sync --locked --dev --python 3.11

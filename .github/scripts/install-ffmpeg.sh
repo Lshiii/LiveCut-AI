@@ -33,9 +33,27 @@ Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
 SOURCES
 
 sources=("$ubuntu_sources" "$fallback_sources")
+mirror_names=(runner-source official-https)
+update_limits=(30s 60s)
 download_limits=(45s 75s)
+
+run_phase() {
+  local mirror="$1" phase="$2" limit="$3" status
+  shift 3
+  echo "FFmpeg package mirror=$mirror phase=$phase limit=$limit: starting."
+  if timeout --kill-after=5s "$limit" "$@"; then
+    echo "FFmpeg package mirror=$mirror phase=$phase exit=0."
+    return 0
+  else
+    status=$?
+    echo "FFmpeg package mirror=$mirror phase=$phase exit=$status."
+    return "$status"
+  fi
+}
+
 prepared=false
 for attempt in 0 1; do
+  mirror="$((attempt + 1))/2:${mirror_names[$attempt]}"
   apt_options=(
     -o "Dir::Etc::sourcelist=${sources[$attempt]}"
     -o Dir::Etc::sourceparts=-
@@ -49,21 +67,23 @@ for attempt in 0 1; do
   # Bound actual elapsed download time, not only idle socket time. Downloading
   # separately leaves dpkg untouched if a mirror stalls. Cached .deb files can
   # be reused by the second, official mirror after normal hash verification.
-  if timeout --kill-after=5s 20s sudo apt-get "${apt_options[@]}" update \
-    && timeout --kill-after=5s "${download_limits[$attempt]}" sudo apt-get "${apt_options[@]}" \
+  if run_phase "$mirror" update "${update_limits[$attempt]}" sudo apt-get "${apt_options[@]}" update \
+    && run_phase "$mirror" download "${download_limits[$attempt]}" sudo apt-get "${apt_options[@]}" \
       install --yes --download-only --no-install-recommends ffmpeg; then
     prepared=true
     break
   fi
-  echo "Package mirror attempt $((attempt + 1)) did not finish; trying the next bounded source."
+  if [ "$attempt" -eq 0 ]; then
+    echo "Switching to the bounded official HTTPS package source."
+  fi
 done
 if [ "$prepared" != true ]; then
   echo "::error::Unable to download signed Ubuntu FFmpeg packages within the mirror budgets."
   exit 1
 fi
 # With downloads complete this step cannot stall on a mirror. The combined
-# maximum, including kill grace periods, stays below the workflow's four minutes.
-timeout --kill-after=5s 45s sudo env DEBIAN_FRONTEND=noninteractive \
+# maximum, including five kill grace periods, is 280s: below the five-minute step.
+run_phase "$mirror" install 45s sudo env DEBIAN_FRONTEND=noninteractive \
   apt-get "${apt_options[@]}" install --yes --no-download --no-install-recommends ffmpeg
 "$LIVECUT_FFMPEG_PATH" -version
 "$LIVECUT_FFPROBE_PATH" -version
