@@ -186,6 +186,7 @@ function message(value: unknown) {
     AGENT_SCREEN_SOURCE_INVALID: '已发布画面文字来源未通过校验；本次未提交，草稿保留。',
     AGENT_SCREEN_SOURCE_CHANGED: '画面文字来源已变化；原提交与草稿保留，请核对原回执。',
     AGENT_SCREEN_SOURCE_UPGRADE_REQUIRED: '当前服务未提供画面文字来源核对接口，请升级后重试；本次未创建提交标识。',
+    AGENT_SCREEN_SOURCE_CHECK_UNAVAILABLE: '画面文字来源核对暂时失败；本次未提交，草稿保留，请稍后重试发送。',
     AGENT_FOCUS_UNAVAILABLE: '当前服务尚未确认支持附加位置。定位提示与问题保留；未删除位置或改为无位置请求。',
     AGENT_FOCUS_NOT_READY: '请先展开并加载当前原视频，等定位完成后再附加位置。当前草稿与原提交保持不变。',
     AGENT_FOCUS_MODE_REQUIRED: '草稿包含定位提示。请移除提示或切回“结合画面”后再提交。',
@@ -614,7 +615,13 @@ async function send() {
       screenSource.value = null
       let raw: unknown
       try { raw = await api<unknown>(`/api/jobs/${owner.job_id}/agent-screen-source`) }
-      catch (failure) { if (failure instanceof ApiError && failure.status === 404) throw new ApiError('AGENT_SCREEN_SOURCE_UPGRADE_REQUIRED'); throw failure }
+      catch (failure) {
+        if (failure instanceof ApiError) {
+          if (failure.status === 404) throw new ApiError('AGENT_SCREEN_SOURCE_UPGRADE_REQUIRED')
+          if (['REQUEST_TIMEOUT', 'NETWORK_UNAVAILABLE'].includes(failure.code) || (failure.status ?? 0) >= 500) throw new ApiError('AGENT_SCREEN_SOURCE_CHECK_UNAVAILABLE')
+        }
+        throw failure
+      }
       if (!submissionCurrent(version, operation, owner)) return
       screenSource.value = parseAgentScreenSourceResponse(raw, selected.value?.source.duration_ms)
     }
