@@ -182,11 +182,15 @@ class Lease:
             if not isinstance(value["input_hash"], str) or not re.fullmatch(r"[a-f0-9]{64}", value["input_hash"]):
                 raise WorkerError("INVALID_CLAIM")
         protocol = value.get("required_worker_protocol", 1)
-        policy = value["config"].get("agent_turn", {}).get("evidence_policy") if isinstance(value["config"].get("agent_turn", {}), dict) else None
-        if (type(protocol) is not int or protocol not in {1, 2}
-                or "required_worker_protocol" in value and protocol != 2
+        turn = value["config"].get("agent_turn", {})
+        policy = turn.get("evidence_policy") if isinstance(turn, dict) else None
+        replay = isinstance(turn, dict) and "cache_replay" in turn
+        if (type(protocol) is not int or protocol not in {1, 2, 3}
+                or "required_worker_protocol" in value and protocol not in {2, 3}
                 or protocol == 2 and (value["stage_type"] != "AGENT_EVIDENCE" or policy != "speech_lookup_v1")
-                or policy is not None and protocol != 2):
+                or protocol == 3 and (value["stage_type"] != "AGENT_EVIDENCE" or policy != "speech_lookup_v1" or not replay
+                                     or type(value["config"].get("max_text_calls")) is not int or value["config"]["max_text_calls"] != 0)
+                or replay and protocol != 3 or policy is not None and protocol not in {2, 3}):
             raise WorkerError("INVALID_WORKER_PROTOCOL")
         lease = cls(**{field: value[field] for field in cls.__dataclass_fields__ if field in value})
         if validate_export and lease.stage_type == "EXPORT_CLIP":
@@ -340,6 +344,7 @@ class StageWorker:
         registration_wait_seconds: float = 45,
         reconnect_wait_seconds: float = 180,
         lifecycle_observer: Callable[[dict], None] | None = None,
+        cached_answer_replay_only: bool = False,
     ) -> None:
         self.client, self.storage_root = client, storage_root.resolve()
         self.journal_dir, self.worker_id, self.executor = journal_dir.resolve(), _identifier(worker_id), executor
@@ -349,6 +354,9 @@ class StageWorker:
         if worker_heartbeat_seconds <= 0 or worker_heartbeat_seconds > 15:
             raise WorkerError("INVALID_WORKER_HEARTBEAT_INTERVAL")
         self.registry_enabled = registry_enabled
+        if type(cached_answer_replay_only) is not bool or cached_answer_replay_only and not registry_enabled:
+            raise WorkerError("INVALID_CACHED_REPLAY_CONFIGURATION")
+        self.cached_answer_replay_only = cached_answer_replay_only
         self.worker_heartbeat_seconds = worker_heartbeat_seconds
         if (type(registration_wait_seconds) not in (int, float)
                 or not 0 <= registration_wait_seconds <= 3600
@@ -589,8 +597,8 @@ class StageWorker:
             if conflict is not None and remaining <= 0:
                 raise conflict
             options = dict(target)
-            if self._protocol_versions == (1, 2):
-                options["supported_protocol_versions"] = [1, 2]
+            if self._protocol_versions and self._protocol_versions != (1,):
+                options["supported_protocol_versions"] = list(self._protocol_versions)
             options["request_guard"] = self._registration_guard
             if self.registration_wait_seconds > 0:
                 # Each attempt has its own timeout and presence start time. A
@@ -622,6 +630,10 @@ class StageWorker:
         return None
 
     def _available_stages(self, stage_type: str | None) -> list[str]:
+        if self.cached_answer_replay_only:
+            if stage_type not in {None, "AGENT_EVIDENCE"}:
+                raise WorkerError("INVALID_CACHED_REPLAY_CONFIGURATION")
+            return ["AGENT_EVIDENCE"]
         if stage_type is not None and stage_type not in STAGES:
             raise WorkerError("INVALID_STAGE_TYPE")
         from .agent_visual import endpoint
@@ -651,16 +663,22 @@ class StageWorker:
             raise WorkerError("WORKER_HEARTBEAT_NOT_STOPPED")
         if "AGENT_EVIDENCE" in capabilities:
             if self._evidence_protocol_versions is None:
-                bootstrap = getattr(self.client, "worker_protocol_versions", None)
+                bootstrap = getattr(self.client, "cached_answer_replay_supported" if self.cached_answer_replay_only
+                                    else "worker_protocol_versions", None)
                 try:
                     with self._client_scope(deadline=lambda: self._runtime_deadline, guard=self._registration_guard):
-                        protocols = bootstrap() if callable(bootstrap) else (1,)
+                        if self.cached_answer_replay_only:
+                            if not callable(bootstrap) or bootstrap() is not True:
+                                raise WorkerClientError("CACHED_REPLAY_NOT_SUPPORTED")
+                            protocols = (3,)
+                        else:
+                            protocols = bootstrap() if callable(bootstrap) else (1,)
                 except WorkerClientError as error:
                     if error.code == "WORKER_STOPPED" and self.stop.is_set():
                         yield False
                         return
                     raise
-                if not isinstance(protocols, tuple) or protocols not in {(1,), (1, 2)} or any(type(v) is not int for v in protocols):
+                if not isinstance(protocols, tuple) or protocols not in {(1,), (1, 2), (1, 2, 3), (3,)} or any(type(v) is not int for v in protocols):
                     raise WorkerClientError("INVALID_WORKER_PROTOCOL_CAPABILITY")
                 self._evidence_protocol_versions = tuple(protocols)
             self._protocol_versions = self._evidence_protocol_versions
@@ -860,7 +878,7 @@ class StageWorker:
                     query_stage = query_stages[query_index]
                     query_index += 1
                     ready_options = dict(target)
-                    if self.registry_enabled and self._protocol_versions == (1, 2):
+                    if self.registry_enabled and self._protocol_versions != (1,):
                         ready_options.update(worker_id=self.worker_id, session_id=self.session_id)
                     ready = self.client.ready(stage_type=query_stage, limit=page_size, **ready_options)
                     candidates = ready.get("items")
@@ -872,7 +890,7 @@ class StageWorker:
                         _identifier(row.get("id"))
                         protocol = row.get("required_worker_protocol", 1)
                         if (type(protocol) is not int or protocol not in (self._protocol_versions or (1,))
-                                or "required_worker_protocol" in row and protocol != 2):
+                                or "required_worker_protocol" in row and protocol not in {2, 3}):
                             raise WorkerError("INVALID_WORKER_PROTOCOL")
                         if self.target_job_id is not None and row.get("job_id") != self.target_job_id:
                             raise WorkerError("CLAIM_TARGET_CHANGED")
@@ -891,8 +909,8 @@ class StageWorker:
                     raise WorkerError("CLAIM_STAGE_TYPE_CHANGED")
                 pending = {"stage_id": _identifier(item.get("id")),
                            "worker_id": self.worker_id, "claim_request_id": str(uuid4()), **target}
-                if item.get("required_worker_protocol") == 2:
-                    pending["required_worker_protocol"] = 2
+                if item.get("required_worker_protocol") in {2, 3}:
+                    pending["required_worker_protocol"] = item["required_worker_protocol"]
                 _write(claim_path, pending)
             if pending.get("worker_id") != self.worker_id:
                 raise WorkerError("WORKER_ID_MISMATCH")
@@ -1183,6 +1201,10 @@ class AnalysisStageExecutor:
         self.asr_reuse_source = deepcopy(asr_reuse_source)
 
     def _execute_agent(self, context: StageContext) -> dict:
+        if context.lease.required_worker_protocol == 3:
+            from .agent_cached_replay import execute_cached_replay
+
+            return execute_cached_replay(context, ffmpeg_path=self.ffmpeg_path, ffprobe_path=self.ffprobe_path)
         from .agent_visual import build_visual_answer
         from .caption_proofread import build_caption_proofread, validate_caption_context
         from .video_agent import build_video_answer
@@ -1208,6 +1230,8 @@ class AnalysisStageExecutor:
         if (evidence and config.get("evidence_mode") != "structured"
                 or not evidence and "evidence_mode" in config):
             raise WorkerError("INVALID_AGENT_EVIDENCE_INPUT")
+        if "cache_replay" in config or "replay_source_turn_id" in config or "replay_snapshot_hash" in config:
+            raise WorkerError("INVALID_CACHED_REPLAY_SOURCE")
         speech = "evidence_policy" in config
         if (speech and (not evidence or config["evidence_policy"] != "speech_lookup_v1" or lease.required_worker_protocol != 2)
                 or lease.required_worker_protocol == 2 and not speech):

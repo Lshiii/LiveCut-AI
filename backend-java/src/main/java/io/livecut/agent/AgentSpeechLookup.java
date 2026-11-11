@@ -14,7 +14,7 @@ public final class AgentSpeechLookup {
         return true;
     }
     public static String publicPolicy(Map<String,Object> owner){return enabled(owner)?POLICY:null;}
-    public static int requiredProtocol(Map<String,Object> owner){return enabled(owner)?2:1;}
+    public static int requiredProtocol(Map<String,Object> owner){return AgentResponseReplayData.isReplay(owner)?3:enabled(owner)?2:1;}
     public record Query(String text,boolean truncated) {}
     public static Query query(String question){
         int start=0,end=question.length();while(start<end&&trimSpace(question.charAt(start)))start++;while(end>start&&trimSpace(question.charAt(end-1)))end--;

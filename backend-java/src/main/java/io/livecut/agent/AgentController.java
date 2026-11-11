@@ -34,6 +34,14 @@ public class AgentController {
     public AgentModels.EvidenceCapability evidenceCapability(){return new AgentModels.EvidenceCapability(true);}
     @GetMapping("/api/agent-capabilities/speech-lookup")
     public AgentModels.SpeechLookupCapability speechLookupCapability(){return new AgentModels.SpeechLookupCapability(true,2);}
+    @GetMapping("/api/agent-capabilities/cached-answer-replay")
+    public AgentModels.CachedAnswerReplayCapability cachedAnswerReplayCapability(){return new AgentModels.CachedAnswerReplayCapability(true,3);}
+    @GetMapping("/api/agent-turns/{id}/response-replay")
+    public ResponseEntity<AgentResponseReplayModels.Preview> responseReplay(@PathVariable String id){return ResponseEntity.ok().cacheControl(CacheControl.noStore()).body(agents.responseReplayPreview(id));}
+    @PostMapping("/api/agent-turns/{id}/response-replay")
+    public AgentModels.Turn responseReplay(@PathVariable String id,@RequestBody JsonNode input,@RequestHeader(value="Idempotency-Key",required=false) String key){return agents.createResponseReplay(id,input,key);}
+    @GetMapping("/api/agent-turns/{id}/response-replay-submissions/{key}")
+    public ResponseEntity<AgentModels.Turn> responseReplaySubmission(@PathVariable String id,@PathVariable String key){return ResponseEntity.ok().cacheControl(CacheControl.noStore()).body(agents.findResponseReplaySubmission(id,key));}
     @GetMapping("/api/agent-turns/{id}/visual-evidence/{frameId}/content")
     public ResponseEntity<byte[]> visualFrame(@PathVariable String id,@PathVariable String frameId){
         return ResponseEntity.ok().contentType(MediaType.IMAGE_JPEG).cacheControl(CacheControl.noStore())

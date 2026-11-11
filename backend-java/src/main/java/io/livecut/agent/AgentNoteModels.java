@@ -12,7 +12,9 @@ public final class AgentNoteModels {
 
     public record Snapshot(String turnId,String sessionId,String jobId,String videoId,
                            String sourceHash,String transcriptHash,String resultHash,
-                           String sourceFilename,long durationMs,JsonNode result,Map<String,byte[]> images) {
+                           String sourceFilename,long durationMs,JsonNode result,Map<String,byte[]> images,
+                           String replaySourceTurnId,String replaySnapshotHash) {
+        public Snapshot(String turnId,String sessionId,String jobId,String videoId,String sourceHash,String transcriptHash,String resultHash,String sourceFilename,long durationMs,JsonNode result,Map<String,byte[]> images){this(turnId,sessionId,jobId,videoId,sourceHash,transcriptHash,resultHash,sourceFilename,durationMs,result,images,null,null);}
         public Snapshot { result=result==null?null:result.deepCopy();images=copy(images); }
         @Override public JsonNode result(){return result==null?null:result.deepCopy();}
         @Override public Map<String,byte[]> images(){return copy(images);}

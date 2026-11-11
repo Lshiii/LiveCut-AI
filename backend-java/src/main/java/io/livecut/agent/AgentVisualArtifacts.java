@@ -31,8 +31,11 @@ public final class AgentVisualArtifacts {
         JsonNode angle=media.path("rotation_degrees");if(!angle.isIntegralNumber()||!angle.canConvertToInt())throw invalid();int rotation=Math.floorMod(angle.intValue(),360);if(rotation%90!=0)throw invalid();
         if(rotation==90||rotation==270){long swap=width;width=height;height=swap;}
         Map<String,ArtifactVerifier.VerifiedArtifact> refs=new HashMap<>();
+        boolean replay=AgentResponseReplayData.isReplay(owner);
+        Set<String> allowed=replay?Set.of("agent_answer","agent_visual_frame","agent_cached_answer_replay"):Set.of("agent_answer","agent_visual_frame","text_execution_trace");
+        if(replay&&manifest.artifacts().stream().filter(file->file.kind().equals("agent_cached_answer_replay")).count()!=1)throw invalid();
         for(var artifact:manifest.artifacts()){
-            if(!Set.of("agent_answer","agent_visual_frame","text_execution_trace").contains(artifact.kind()))throw invalid();
+            if(!allowed.contains(artifact.kind()))throw invalid();
             if(artifact.kind().equals("agent_visual_frame")){
                 if(refs.put(artifact.key(),artifact)!=null)throw invalid();
             }else if(artifact.key().startsWith(identity.attemptPrefix()+"visual-frames/"))throw invalid();

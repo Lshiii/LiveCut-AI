@@ -281,7 +281,7 @@ class BudgetTransport(httpx.BaseTransport):
         request.extensions[WIRE_RESPONSE_READ] = False
         request.extensions[LOOKUP_FOUND] = False
         self.context.guard.check()
-        if self.context.lease.stage_type == "EXPORT_CLIP":
+        if self.context.lease.stage_type == "EXPORT_CLIP" or getattr(self.context.lease, "required_worker_protocol", None) == 3:
             raise ModelBudgetError("MODEL_OPERATION_NOT_ALLOWED")
         path = request.url.path.rstrip("/")
         if self.context.lease.stage_type in {"AGENT_VISUAL", "AGENT_VISUAL_FOCUS", "AGENT_EVIDENCE"} and (request.method != "POST" or not path.endswith("/chat/completions")):

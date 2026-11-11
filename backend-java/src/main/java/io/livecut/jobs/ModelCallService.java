@@ -69,6 +69,7 @@ public class ModelCallService {
         return transactions.execute(transaction -> {
             // The same parent lock serializes every reservation and stage write.
             var active = jobs.lockActiveStage(request.stageId(), new JobModels.Credential(request.attempt(), request.runToken()));
+            if("AGENT_TURN".equals(active.stage().ownerType())&&jdbc.queryForObject("SELECT replay_source_turn_id IS NOT NULL FROM agent_turn WHERE id=?",Boolean.class,active.stage().ownerId()))throw error(HttpStatus.CONFLICT,"MODEL_CALL_FORBIDDEN","Cached answer recovery cannot reserve a model request");
             boolean clipRequest="CLIP_REQUEST".equals(active.stage().ownerType());
             boolean agentTurn="AGENT_TURN".equals(active.stage().ownerType()),ownedText=clipRequest||agentTurn;
             String textTable=clipRequest?"clip_request":"agent_turn";
@@ -128,6 +129,7 @@ public class ModelCallService {
         validateReserve(request);
         return transactions.execute(transaction -> {
             var active=jobs.lockActiveStage(request.stageId(),new JobModels.Credential(request.attempt(),request.runToken()));
+            if("AGENT_TURN".equals(active.stage().ownerType())&&jdbc.queryForObject("SELECT replay_source_turn_id IS NOT NULL FROM agent_turn WHERE id=?",Boolean.class,active.stage().ownerId()))throw error(HttpStatus.CONFLICT,"MODEL_CALL_FORBIDDEN","Recovery cannot look up ordinary model operations");
             if(!Set.of("ANALYSIS","CLIP_REQUEST","AGENT_TURN").contains(active.stage().ownerType())
                     || !("SEGMENT".equals(active.stage().stageType())||"AGENT_TURN".equals(active.stage().ownerType())&&Set.of("CAPTION_PROOFREAD","AGENT_VISUAL","AGENT_VISUAL_FOCUS","AGENT_EVIDENCE").contains(active.stage().stageType())||"CLIP_REQUEST".equals(active.stage().ownerType())&&"ANCHOR_CLIP".equals(active.stage().stageType())) || !"TEXT".equals(request.kind())) {
                 throw error(HttpStatus.CONFLICT,"MODEL_KIND_CONFLICT","Only active text stages may recover text responses");

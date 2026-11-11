@@ -697,6 +697,18 @@ def _endpoint(base_url: str) -> str:
     return path + ("" if path.endswith("/api/v1") else "/api/v1") + suffix
 
 
+def _provider_request_body(endpoint: str, model: str, messages: list[dict]) -> dict:
+    if urlsplit(endpoint).path.endswith("/chat/completions"):
+        request = {"model": model, "messages": messages, "stream": False,
+                   "response_format": {"type": "json_object"}, "temperature": 0}
+        if urlsplit(endpoint).hostname == "api.deepseek.com":
+            request["thinking"] = {"type": "disabled"}
+        return request
+    return {"model": model, "input": {"messages": messages}, "parameters": {
+        "result_format": "message", "response_format": {"type": "json_object"},
+        "enable_thinking": False, "temperature": 0}}
+
+
 def _request(
     client: httpx.Client, *, endpoint: str, key: str, model: str, messages: list[dict],
     directory: Path, state: dict, window_index: int, attempt: int, max_calls: int,
@@ -732,19 +744,7 @@ def _request(
         state["calls"].append(call)
         _save(directory / "state.json", state)
     openai = urlsplit(endpoint).path.endswith("/chat/completions")
-    if openai:
-        request = {"model": model, "messages": messages, "stream": False,
-                   "response_format": {"type": "json_object"}, "temperature": 0}
-        if urlsplit(endpoint).hostname == "api.deepseek.com":
-            request["thinking"] = {"type": "disabled"}
-    else:
-        request = {
-            "model": model, "input": {"messages": messages},
-            "parameters": {
-                "result_format": "message", "response_format": {"type": "json_object"},
-                "enable_thinking": False, "temperature": 0,
-            },
-        }
+    request = _provider_request_body(endpoint, model, messages)
     try:
         response = client.post(
             endpoint, headers={"Authorization": f"Bearer {key}"}, json=request,

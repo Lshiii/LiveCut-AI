@@ -32,7 +32,7 @@ public class WorkerController {
     public Snapshot snapshot(@RequestParam(value="job_id", required=false) String jobId,
             @RequestParam(value="required_worker_protocol",required=false) String requiredProtocol,HttpServletResponse response) {
         response.setHeader("Cache-Control", "no-store");
-        Integer protocol=requiredProtocol==null?null:JobController.queryNumber(requiredProtocol,1,2,"required_worker_protocol");
+        Integer protocol=requiredProtocol==null?null:JobController.queryNumber(requiredProtocol,1,3,"required_worker_protocol");
         return service.snapshot(jobId,protocol);
     }
 }

@@ -31,6 +31,7 @@ public final class AgentNoteRenderer {
         checkedStrings(result);
         for(String id:Arrays.asList(snapshot.turnId(),snapshot.sessionId(),snapshot.jobId(),snapshot.videoId()))uuid(id);
         for(String hash:Arrays.asList(snapshot.sourceHash(),snapshot.transcriptHash(),snapshot.resultHash()))hash(hash);
+        if(snapshot.replaySourceTurnId()!=null){uuid(snapshot.replaySourceTurnId());hash(snapshot.replaySnapshotHash());if(snapshot.replaySourceTurnId().equals(snapshot.turnId()))throw invalid();}else if(snapshot.replaySnapshotHash()!=null)throw invalid();
         identity(result,"turn_id",snapshot.turnId());identity(result,"session_id",snapshot.sessionId());identity(result,"job_id",snapshot.jobId());identity(result,"video_id",snapshot.videoId());
         identity(result,"source_hash",snapshot.sourceHash());identity(result,"transcript_hash",snapshot.transcriptHash());
         if(!ClipRequestService.sha(ClipRequestService.canonicalJson(result)).equals(snapshot.resultHash()))throw invalid();
@@ -76,10 +77,12 @@ public final class AgentNoteRenderer {
         if(version.equals("1.4")){source.put("evidence_policy",AgentSpeechLookup.POLICY);source.set("speech_lookup",result.path("speech_lookup").deepCopy());}
         var publicFrames=source.putArray("visual_evidence");selectedFrames.forEach(frame->publicFrames.add(frame.deepCopy()));
         if(focus!=null)source.put("focus_timestamp_ms",focus);
+        if(snapshot.replaySourceTurnId()!=null){source.put("replay_source_turn_id",snapshot.replaySourceTurnId()).put("replay_snapshot_hash",snapshot.replaySnapshotHash()).put("additional_model_requests",0);}
         byte[] sourceBytes=AgentAnswerValidator.JSON.writeValueAsBytes(source);if(sourceBytes.length>MAX_BYTES)throw tooLarge();
 
         var out=new LimitedText();out.append("# 视频问答学习笔记\n\n视频：").append(plainBlock(filename)).append("\n\n");
         out.append("回答范围：").append(scopeLabel(scope)).append("\n\n");
+        if(snapshot.replaySourceTurnId()!=null)out.append("本回答复用原轮次已收响应，新增模型请求为 0；原失败状态保留。原轮次：").append(code(snapshot.replaySourceTurnId())).append("。\n\n");
         out.append(switch(scope){case "GENERAL"->"这是通用知识补充，不能当作视频中已经说过的话。\n\n";case "INSUFFICIENT"->"当前视频证据不足；本笔记保留原回答的不确定性。\n\n";default->"以下为基于本轮视频依据的 AI 回答，仍需结合来源核对。\n\n";});
         if(focus!=null)out.append("用户定位提示：").append(time(focus)).append("（").append(Long.toString(focus)).append(" ms）。这是查找提示，不是已观察画面的证明；实际画面时间见下方。\n\n");
         out.append("## 问题\n\n").append(plainBlock(question)).append("\n\n## 回答\n\n").append(answerMarkdown(answer)).append("\n\n");

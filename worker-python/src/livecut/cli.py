@@ -79,6 +79,8 @@ def main(argv: list[str] | None = None) -> int:
     worker.add_argument("--once", action="store_true", help="Handle one stage or pending callback")
     worker.add_argument("--job-id", help="Only claim this analysis job, including fenced export stages")
     worker.add_argument("--reuse-asr-job", help="Explicitly reuse a verified successful ASR from this job")
+    worker.add_argument("--cached-answer-replay-only", action="store_true",
+                        help="Only claim protocol-3 cached answers; never configure a model transport")
     worker.add_argument("--stage-type", choices=("MEDIA", "ASR", "SEGMENT", "CAPTION_PROOFREAD", "ANCHOR_CLIP", "AGENT_VISUAL", "AGENT_VISUAL_FOCUS", "AGENT_EVIDENCE", "TIMELINE", "EXPORT_CLIP"),
                         help="Only claim this stage type; useful for a media-only smoke check")
     worker.add_argument("--poll-seconds", type=float, default=3)
@@ -168,15 +170,19 @@ def main(argv: list[str] | None = None) -> int:
                 raise WorkerError("INVALID_RECONNECT_WAIT_CONFIGURATION")
             if args.reuse_asr_job and (not args.once or args.stage_type != "ASR" or not args.job_id):
                 raise WorkerError("INVALID_ASR_REUSE_CONFIGURATION")
+            if args.cached_answer_replay_only and (args.reuse_asr_job or args.stage_type not in {None, "AGENT_EVIDENCE"}):
+                raise WorkerError("INVALID_CACHED_REPLAY_CONFIGURATION")
             worker_key = os.environ.get("LIVECUT_WORKER_API_KEY") or os.environ.get("LIVECUT_WORKER_KEY", "")
             client = WorkerClient(args.java_url, worker_key)
             runner = None
             try:
                 source = client.job(args.reuse_asr_job) if args.reuse_asr_job else None
-                executor = AnalysisStageExecutor(transport_factory=transport_factory(client),
+                executor = AnalysisStageExecutor(transport_factory=None if args.cached_answer_replay_only else transport_factory(client),
                                                  ffmpeg_path=args.ffmpeg, ffprobe_path=args.ffprobe,
                                                  asr_reuse_source=source)
                 target = {"target_job_id": args.job_id} if args.job_id is not None else {}
+                if args.cached_answer_replay_only:
+                    target["cached_answer_replay_only"] = True
                 runner = StageWorker(client, args.storage_root, args.journal_dir, args.worker_id, executor,
                                      registration_wait_seconds=registration_wait_seconds,
                                      reconnect_wait_seconds=reconnect_wait_seconds,

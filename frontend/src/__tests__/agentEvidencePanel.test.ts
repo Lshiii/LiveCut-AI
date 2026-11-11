@@ -13,6 +13,8 @@ import * as sequence from '../sequencePreview.ts'
 import * as anchors from '../answerClip.ts'
 import * as topics from '../topics.ts'
 import * as recovery from '../agentSubmissionRecovery.ts'
+import * as answerReplay from '../agentAnswerReplay.ts'
+import * as answerReplayStorage from '../agentAnswerReplayStorage.ts'
 import * as history from '../agentSessionHistory.ts'
 import * as refresh from '../agentRefresh.ts'
 import { evidenceSample, cloneEvidence } from './support/agentEvidenceFixture.ts'
@@ -53,8 +55,9 @@ async function mount(active = true) {
   let handle = defaultHandle
   const api = (path: string, init: any = {}) => { calls.push({ path, init, stored: init.headers?.['Idempotency-Key'] ? [...storage.values.values()].find(value => JSON.parse(value).key === init.headers['Idempotency-Key']) : undefined }); return handle(path, init) }
   const nullComponent = { render: () => null }, cards = compileHostComponent(new URL('../AgentEvidenceAnswer.vue', import.meta.url), { './agentEvidenceAnswer': evidence, './agentEvidenceReview': review, './agentSpeechLookup': speech, './agentVisualEvidence': visual, './topics': topics })
+  const replayPanel = compileHostComponent(new URL('../AgentAnswerReplayPanel.vue', import.meta.url), { './api': { api }, './videoAgent': videoAgent, './agentAnswerReplay': answerReplay, './agentAnswerReplayStorage': answerReplayStorage })
   const component = compileHostComponent(new URL('../VideoAgentPanel.vue', import.meta.url), { './api': { api, ApiError: HttpError, post: (path: string, body?: unknown, headers: any = {}) => api(path, { method: 'POST', headers: { 'Content-Type': 'application/json', ...headers }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) }) },
-    './FailureDiagnostic.vue': nullComponent, './TextRequestProgress.vue': nullComponent, './AgentAnswer.vue': nullComponent, './AgentEvidenceAnswer.vue': cards, './AgentVisualEvidence.vue': nullComponent, './AgentNotePanel.vue': nullComponent,
+    './AgentAnswerReplayPanel.vue': replayPanel, './FailureDiagnostic.vue': nullComponent, './TextRequestProgress.vue': nullComponent, './AgentAnswer.vue': nullComponent, './AgentEvidenceAnswer.vue': cards, './AgentVisualEvidence.vue': nullComponent, './AgentNotePanel.vue': nullComponent,
     './agentRefresh': refresh, './agentSessionHistory': history, './agentVisualEvidence': visual, './agentFocus': focus, './agentFrameFollowup': followup, './sequencePreview': sequence, './answerClip': anchors, './topics': topics,
     './videoAgent': videoAgent, './agentSubmissionRecovery': recovery, './agentEvidenceAnswer': evidence, './agentSpeechLookup': speech, './executors': executors })
   const exposed = ref<any>(null), root = hostNode('root'), props = { jobId: session.job_id, videoId: session.video_id, videoHash: session.source.video_sha256, videoUrl: '/original.mp4', active }
@@ -259,5 +262,22 @@ test('actual 1.4 history rendering labels the policy step as program work and ke
     assert.match(hostText(ui.root), /程序按预查策略读取/); assert.match(hostText(ui.root), /用户位置触发/)
     assert.equal(ui.nodes().filter(node => node.props['aria-label'] === '程序原句预查').length, 1); assert.equal(ui.nodes().filter(node => node.props['aria-label'] === '证据核查摘要').length, 1)
     assert.equal(ui.exposed.value.dirty, false, 'Viewing a source policy does not select it for the next question')
+  } finally { ui.close() }
+})
+
+
+test('actual parent exposes unresolved recovery as protected work without clearing a new question or creating any request', async () => {
+  const ui = await mount()
+  try {
+    await settle(() => !ui.exposed.value.pending)
+    assert.equal(ui.exposed.value.dirty, false)
+    answerReplayStorage.prepareAnswerReplay(ui.storage, ui.session, 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', 'a'.repeat(64), 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb')
+    ui.window.dispatchEvent(new Event('focus')); await flushHost()
+    assert.equal(ui.exposed.value.dirty, true)
+    assert.equal(ui.button('＋ 新对话').props.disabled, true)
+    await ui.fill('保留新的问题和模式')
+    assert.equal(ui.question().value, '保留新的问题和模式')
+    assert.equal(ui.calls.some(call => call.init.method === 'POST'), false)
+    assert.match(hostText(ui.root), /原恢复提交结果待核对/)
   } finally { ui.close() }
 })

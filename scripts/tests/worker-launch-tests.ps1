@@ -77,7 +77,25 @@ try {
             throw 'Stage launch did not restore the fixture environment.'
         }
     }
+    foreach ($replayStage in @('', 'AGENT_EVIDENCE')) {
+        & $launcher -EnvFile $configPath -WorkerId 'replay-launch-test' -JobId $stageJob -StageType $replayStage -CachedAnswerReplayOnly -Once
+        if (@($workerLaunchTestState.Arguments | Where-Object { $_ -ceq '--cached-answer-replay-only' }).Count -ne 1) {
+            throw 'Replay-only mode did not reach the CLI exactly once.'
+        }
+        Assert-WorkerFlag '--job-id' $stageJob
+        if ([Environment]::GetEnvironmentVariable($variableName, 'Process') -cne 'before-launch') {
+            throw 'Replay launch did not restore the fixture environment.'
+        }
+    }
     $launchCountBeforeInvalid = $workerLaunchTestState.LaunchCount
+    foreach ($badReplay in @(@{ StageType = 'ASR' }, @{ StageType = 'MEDIA' }, @{ ReuseAsrJob = $stageJob })) {
+        $rejectedReplay = $false
+        try { & $launcher -EnvFile $configPath -CachedAnswerReplayOnly @badReplay }
+        catch { $rejectedReplay = $true }
+        if (-not $rejectedReplay -or $workerLaunchTestState.LaunchCount -ne $launchCountBeforeInvalid) {
+            throw 'Conflicting replay-only arguments were not rejected before launch.'
+        }
+    }
     $invalidWaits = 0
     foreach ($parameterName in @('RegistrationWaitSeconds', 'ReconnectWaitSeconds')) {
         foreach ($value in @(-1, 3600.01, [double]::NaN, [double]::PositiveInfinity, [double]::NegativeInfinity, 'not-a-number')) {
