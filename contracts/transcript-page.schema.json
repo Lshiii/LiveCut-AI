@@ -1,0 +1,156 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://livecut.local/contracts/transcript-page.schema.json",
+  "title": "Published original ASR transcript page",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "data_kind",
+    "source",
+    "q",
+    "offset",
+    "limit",
+    "total_utterances",
+    "matched_utterances",
+    "next_offset",
+    "items"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "data_kind": {
+      "const": "transcript_page"
+    },
+    "source": {
+      "$ref": "#/$defs/source"
+    },
+    "q": {
+      "type": "string",
+      "maxLength": 200
+    },
+    "offset": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "limit": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 50
+    },
+    "total_utterances": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 100000
+    },
+    "matched_utterances": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100000
+    },
+    "next_offset": {
+      "anyOf": [
+        {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100000
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "items": {
+      "type": "array",
+      "maxItems": 50,
+      "items": {
+        "$ref": "#/$defs/utterance"
+      }
+    }
+  },
+  "$defs": {
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "job_id",
+        "video_id",
+        "generation",
+        "source_video_sha256",
+        "transcript_sha256",
+        "analysis_sha256",
+        "duration_ms",
+        "source_fingerprint"
+      ],
+      "properties": {
+        "job_id": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$"
+        },
+        "video_id": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$"
+        },
+        "generation": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2147483647
+        },
+        "source_video_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "transcript_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "analysis_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "duration_ms": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "source_fingerprint": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      }
+    },
+    "utterance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "utterance_id",
+        "start_ms",
+        "end_ms",
+        "text"
+      ],
+      "properties": {
+        "utterance_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$"
+        },
+        "start_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "end_ms": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100000
+        }
+      }
+    }
+  }
+}

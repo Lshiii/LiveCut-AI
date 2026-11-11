@@ -1,5 +1,9 @@
 # 视频分析结果契约
 
+## 全文原句搜索与前后文
+
+[transcript-page.schema.json](./transcript-page.schema.json) 与 [transcript-context.schema.json](./transcript-context.schema.json) 定义原始ASR的只读分页和单句前后文。来源绑定原视频、分析代次和ASR/时间轴摘要；页与上下文都固定同一个source_fingerprint。Schema只校结构，三端另核真实产物、时序、查询回显、实收分页及UTF-16字符预算，不能把摘要当成可信来源或字面搜索当成语义检索。两份[分页夹具](../fixtures/transcript-page.synthetic.json)、[上下文夹具](../fixtures/transcript-context.synthetic.json)完全合成；使用和验收边界见[全文原句搜索](../docs/70-全文原句搜索与回看.md)。
+
 ## 已完成MP4交付包
 
 [export-video-package.schema.json](./export-video-package.schema.json) 定义明确选择的同批原MP4交付清单。视频包不设字幕确认门槛，保留合法源修订0和实际区间/文件哈希；编码profile与内部render_mode分开。各文件、选择、时序及旧人工证明仍需程序核验，Schema不是媒体存在或来源可信的证明。[合成夹具](../fixtures/export-video-package.synthetic.json)不是实际成片；操作和资源边界见[批量下载MP4](../docs/69-批量下载已完成MP4.md)。

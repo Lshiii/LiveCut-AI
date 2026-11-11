@@ -5,6 +5,7 @@ import ReviewPanel from './ReviewPanel.vue'
 import TopicReviewPanel from './TopicReviewPanel.vue'
 import IntentClipPanel from './IntentClipPanel.vue'
 import VideoAgentPanel from './VideoAgentPanel.vue'
+import TranscriptSearchPanel from './TranscriptSearchPanel.vue'
 import type { AnswerClipSelection } from './answerClip'
 import UploadPanel from './UploadPanel.vue'
 import FailureDiagnostic from './FailureDiagnostic.vue'
@@ -30,7 +31,7 @@ const uploadPanel = ref<{ chooseFile: () => void } | null>(null)
 const reviewEditor = ref<{ dirty: boolean; pending: boolean } | null>(null)
 const intentEditor = ref<{ dirty: boolean; pending: boolean; prefillInstruction(value: string): boolean; prefillAnswerClip(value: AnswerClipSelection): boolean } | null>(null)
 const agentEditor = ref<{ dirty: boolean; pending: boolean } | null>(null)
-type WorkbenchTab = 'agent' | 'topics' | 'clips' | 'task'
+type WorkbenchTab = 'agent' | 'transcript' | 'topics' | 'clips' | 'task'
 const activeTab = ref<WorkbenchTab>('task'), mobileTasksOpen = ref(false)
 const compactLayout = ref(window.matchMedia('(max-width: 1100px)').matches)
 const sidebarCollapsed = ref(new URL(location.href).searchParams.has('job'))
@@ -105,13 +106,13 @@ watch(() => selectedJob.value?.id, (id, previous) => {
 })
 watch(activeTab, value => { if (value !== 'task') taskPreview.value?.pause() }, { flush: 'sync' })
 function setTab(tab: WorkbenchTab) {
-  if ((tab === 'agent' || tab === 'clips') && !topicResultsAvailable.value) return
+  if ((tab === 'agent' || tab === 'transcript' || tab === 'clips') && !topicResultsAvailable.value) return
   if (tab === 'topics' && !resultsAvailable.value) return
   activeTab.value = tab
 }
 function tabKey(event: KeyboardEvent) {
   if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return
-  const tabs: WorkbenchTab[] = topicResultsAvailable.value ? ['agent', 'topics', 'clips', 'task'] : resultsAvailable.value ? ['topics', 'task'] : ['task']
+  const tabs: WorkbenchTab[] = topicResultsAvailable.value ? ['agent', 'transcript', 'topics', 'clips', 'task'] : resultsAvailable.value ? ['topics', 'task'] : ['task']
   event.preventDefault()
   const index = tabs.indexOf(activeTab.value)
   const next = event.key === 'Home' ? tabs[0]! : event.key === 'End' ? tabs.at(-1)! : tabs[(index + (event.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length]!
@@ -429,6 +430,7 @@ onUnmounted(() => { stopped = true; compactQuery.removeEventListener('change', u
       <div class="upload-host"><UploadPanel ref="uploadPanel" :can-start="canStartUpload" @busy="uploadBusy" @started="uploadStarted" @complete="uploaded" /></div>
       <div class="workspace-tabs" role="tablist" aria-label="视频工作区" @keydown="tabKey">
         <button id="workbench-tab-agent" role="tab" aria-controls="workbench-pane-agent" :aria-selected="activeTab === 'agent'" :tabindex="activeTab === 'agent' ? 0 : -1" :disabled="!topicResultsAvailable" @click="setTab('agent')"><svg class="workspace-tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M5 4h14a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H9l-6 3V6a2 2 0 0 1 2-2Z"/><path d="M7 9h10M7 13h6"/></svg>视频对话<span v-if="agentEditor?.dirty" class="draft-dot" aria-label="有未提交输入"></span></button>
+        <button id="workbench-tab-transcript" role="tab" aria-controls="workbench-pane-transcript" :aria-selected="activeTab === 'transcript'" :tabindex="activeTab === 'transcript' ? 0 : -1" :disabled="!topicResultsAvailable" @click="setTab('transcript')"><svg class="workspace-tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5M7 9h7M7 12h5"/></svg>原句搜索</button>
         <button id="workbench-tab-topics" role="tab" aria-controls="workbench-pane-topics" :aria-selected="activeTab === 'topics'" :tabindex="activeTab === 'topics' ? 0 : -1" :disabled="!resultsAvailable" @click="setTab('topics')"><svg class="workspace-tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M8 4v16M15 4v16"/></svg>{{ selectedJob && !topicMode ? '片段审核' : '话题切分' }}<span v-if="reviewEditor?.dirty" class="draft-dot" aria-label="有未保存修改"></span></button>
         <button id="workbench-tab-clips" role="tab" aria-controls="workbench-pane-clips" :aria-selected="activeTab === 'clips'" :tabindex="activeTab === 'clips' ? 0 : -1" :disabled="!topicResultsAvailable" @click="setTab('clips')"><svg class="workspace-tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="m8.5 7.5 12 13m-12-4 12-13"/></svg>按需剪辑<span v-if="intentEditor?.dirty" class="draft-dot" aria-label="有未提交修改"></span></button>
         <button id="workbench-tab-task" role="tab" aria-controls="workbench-pane-task" :aria-selected="activeTab === 'task'" :tabindex="activeTab === 'task' ? 0 : -1" @click="setTab('task')"><svg class="workspace-tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M5 4h14v16H5zM8 8h8M8 12h8M8 16h5"/></svg>{{ selectedJob ? '任务详情' : '创建分析' }}</button>
@@ -436,6 +438,9 @@ onUnmounted(() => { stopped = true; compactQuery.removeEventListener('change', u
       <div class="workbench-content">
         <div id="workbench-pane-agent" v-show="activeTab === 'agent'" class="workbench-pane conversation-pane" role="tabpanel" aria-labelledby="workbench-tab-agent">
           <VideoAgentPanel v-if="selectedJob?.status === 'REVIEW_READY' && currentVideo && topicMode" :key="`agent-${selectedJob.id}`" ref="agentEditor" :active="activeTab === 'agent'" :job-id="selectedJob.id" :video-id="currentVideo.id" :video-hash="currentVideo.content_hash" :video-url="currentVideo.content_url" :clip-target-busy="!!intentEditor?.dirty || !!intentEditor?.pending" @clip-instruction="useAgentClipInstruction" @clip-anchor="useAgentClipAnchor" />
+        </div>
+        <div id="workbench-pane-transcript" v-show="activeTab === 'transcript'" class="workbench-pane" role="tabpanel" aria-labelledby="workbench-tab-transcript">
+          <TranscriptSearchPanel v-if="selectedJob?.status === 'REVIEW_READY' && currentVideo && topicMode" :key="`transcript-${selectedJob.id}`" :active="activeTab === 'transcript'" :job-id="selectedJob.id" :video-id="currentVideo.id" :generation="selectedJob.generation" :video-hash="currentVideo.content_hash" :video-url="currentVideo.content_url" :video-name="currentVideo.original_filename" />
         </div>
         <div id="workbench-pane-topics" v-show="activeTab === 'topics'" class="workbench-pane" :class="{ 'topic-workspace-pane': topicMode }" role="tabpanel" aria-labelledby="workbench-tab-topics">
           <TopicReviewPanel v-if="selectedJob?.status === 'REVIEW_READY' && currentVideo && topicMode" :key="selectedJob.id" ref="reviewEditor" :active="activeTab === 'topics'" :job-id="selectedJob.id" :video-url="currentVideo.content_url" />
