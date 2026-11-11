@@ -103,7 +103,10 @@ public final class JobModels {
     public record ReadyStage(String id, @JsonProperty("job_id") String jobId,
                               @JsonProperty("stage_type") String stageType,
                               @JsonProperty("shard_key") String shardKey,
-                              @JsonProperty("next_run_at") Instant nextRunAt) {}
+                              @JsonProperty("next_run_at") Instant nextRunAt,
+                              @JsonProperty("required_worker_protocol") @JsonInclude(JsonInclude.Include.NON_NULL) Integer requiredWorkerProtocol) {
+        public ReadyStage(String id,String jobId,String stageType,String shardKey,Instant nextRunAt){this(id,jobId,stageType,shardKey,nextRunAt,null);}
+    }
     public record ArtifactRef(@JsonProperty("stage_id") String stageId,
                                @JsonProperty("stage_type") String stageType,
                                @JsonProperty("shard_key") String shardKey,
@@ -122,7 +125,8 @@ public final class JobModels {
                                 @JsonProperty("checkpoint_key") String checkpointKey,
                                 @JsonProperty("checkpoint_hash") String checkpointHash,
                                 @JsonProperty("input_hash") String inputHash,
-                                @JsonProperty("video_id") String videoId, int generation) {}
+                                @JsonProperty("video_id") String videoId, int generation,
+                                @JsonProperty("required_worker_protocol") @JsonInclude(JsonInclude.Include.NON_NULL) Integer requiredWorkerProtocol) {}
     public record StageActionResult(String outcome, StageSnapshot stage) {}
 
     /** Internal row, never return this record from public job endpoints. */
@@ -131,7 +135,13 @@ public final class JobModels {
                            Instant hardDeadlineAt, Instant nextRunAt, String inputHash,
                            String checkpointKey, String checkpointHash, String manifestKey,
                            String manifestHash, String errorCode, String ownerType, String ownerId,
-                           Map<String, Object> diagnostic,Map<String,Object> textProgress) {
+                            Map<String, Object> diagnostic,Map<String,Object> textProgress,int requiredWorkerProtocol) {
+        public StageRow(String id,String jobId,String stageType,String shardKey,String status,int attempt,
+                String runToken,String workerId,Instant leaseUntil,Instant hardDeadlineAt,Instant nextRunAt,String inputHash,
+                String checkpointKey,String checkpointHash,String manifestKey,String manifestHash,String errorCode,
+                String ownerType,String ownerId,Map<String,Object> diagnostic,Map<String,Object> textProgress){
+            this(id,jobId,stageType,shardKey,status,attempt,runToken,workerId,leaseUntil,hardDeadlineAt,nextRunAt,inputHash,checkpointKey,checkpointHash,manifestKey,manifestHash,errorCode,ownerType,ownerId,diagnostic,textProgress,1);
+        }
         public StageRow(String id,String jobId,String stageType,String shardKey,String status,int attempt,
                 String runToken,String workerId,Instant leaseUntil,Instant hardDeadlineAt,Instant nextRunAt,String inputHash,
                 String checkpointKey,String checkpointHash,String manifestKey,String manifestHash,String errorCode,

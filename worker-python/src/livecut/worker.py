@@ -160,6 +160,7 @@ class Lease:
     config: dict
     artifacts: list[dict]
     input_hash: str | None = None
+    required_worker_protocol: int | None = None
 
     @classmethod
     def parse(cls, value: dict, *, validate_export: bool = True) -> Lease:
@@ -180,6 +181,13 @@ class Lease:
         if value.get("input_hash") is not None:
             if not isinstance(value["input_hash"], str) or not re.fullmatch(r"[a-f0-9]{64}", value["input_hash"]):
                 raise WorkerError("INVALID_CLAIM")
+        protocol = value.get("required_worker_protocol", 1)
+        policy = value["config"].get("agent_turn", {}).get("evidence_policy") if isinstance(value["config"].get("agent_turn", {}), dict) else None
+        if (type(protocol) is not int or protocol not in {1, 2}
+                or "required_worker_protocol" in value and protocol != 2
+                or protocol == 2 and (value["stage_type"] != "AGENT_EVIDENCE" or policy != "speech_lookup_v1")
+                or policy is not None and protocol != 2):
+            raise WorkerError("INVALID_WORKER_PROTOCOL")
         lease = cls(**{field: value[field] for field in cls.__dataclass_fields__ if field in value})
         if validate_export and lease.stage_type == "EXPORT_CLIP":
             from .worker_export import ExportSpec
@@ -354,6 +362,8 @@ class StageWorker:
         self.reconnect_wait_seconds = reconnect_wait_seconds
         self._lifecycle_observer = lifecycle_observer
         self.session_id: str | None = None
+        self._protocol_versions: tuple[int, ...] | None = None
+        self._evidence_protocol_versions: tuple[int, ...] | None = None
         self._presence_error: WorkerClientError | None = None
         self._presence_deadline: float | None = None
         self._presence_lock = threading.RLock()
@@ -579,6 +589,8 @@ class StageWorker:
             if conflict is not None and remaining <= 0:
                 raise conflict
             options = dict(target)
+            if self._protocol_versions == (1, 2):
+                options["supported_protocol_versions"] = [1, 2]
             options["request_guard"] = self._registration_guard
             if self.registration_wait_seconds > 0:
                 # Each attempt has its own timeout and presence start time. A
@@ -637,6 +649,24 @@ class StageWorker:
         if any(thread is not None and thread.is_alive()
                for thread in (self._presence_thread, self._stage_thread)):
             raise WorkerError("WORKER_HEARTBEAT_NOT_STOPPED")
+        if "AGENT_EVIDENCE" in capabilities:
+            if self._evidence_protocol_versions is None:
+                bootstrap = getattr(self.client, "worker_protocol_versions", None)
+                try:
+                    with self._client_scope(deadline=lambda: self._runtime_deadline, guard=self._registration_guard):
+                        protocols = bootstrap() if callable(bootstrap) else (1,)
+                except WorkerClientError as error:
+                    if error.code == "WORKER_STOPPED" and self.stop.is_set():
+                        yield False
+                        return
+                    raise
+                if not isinstance(protocols, tuple) or protocols not in {(1,), (1, 2)} or any(type(v) is not int for v in protocols):
+                    raise WorkerClientError("INVALID_WORKER_PROTOCOL_CAPABILITY")
+                self._evidence_protocol_versions = tuple(protocols)
+            self._protocol_versions = self._evidence_protocol_versions
+        else:
+            # MEDIA/ASR/export-only sessions do not depend on a speech route.
+            self._protocol_versions = (1,)
         session_id = candidate_session or str(uuid4())
         with self._presence_lock:
             self._presence_epoch += 1
@@ -829,7 +859,10 @@ class StageWorker:
                         return "unavailable" if attempted else "idle"
                     query_stage = query_stages[query_index]
                     query_index += 1
-                    ready = self.client.ready(stage_type=query_stage, limit=page_size, **target)
+                    ready_options = dict(target)
+                    if self.registry_enabled and self._protocol_versions == (1, 2):
+                        ready_options.update(worker_id=self.worker_id, session_id=self.session_id)
+                    ready = self.client.ready(stage_type=query_stage, limit=page_size, **ready_options)
                     candidates = ready.get("items")
                     if not isinstance(candidates, list) or len(candidates) > page_size:
                         raise WorkerError("INVALID_JAVA_RESPONSE")
@@ -837,6 +870,10 @@ class StageWorker:
                         if not isinstance(row, dict):
                             raise WorkerError("INVALID_JAVA_RESPONSE")
                         _identifier(row.get("id"))
+                        protocol = row.get("required_worker_protocol", 1)
+                        if (type(protocol) is not int or protocol not in (self._protocol_versions or (1,))
+                                or "required_worker_protocol" in row and protocol != 2):
+                            raise WorkerError("INVALID_WORKER_PROTOCOL")
                         if self.target_job_id is not None and row.get("job_id") != self.target_job_id:
                             raise WorkerError("CLAIM_TARGET_CHANGED")
                         if self.registry_enabled and query_stage is not None and row.get("stage_type") != query_stage:
@@ -854,6 +891,8 @@ class StageWorker:
                     raise WorkerError("CLAIM_STAGE_TYPE_CHANGED")
                 pending = {"stage_id": _identifier(item.get("id")),
                            "worker_id": self.worker_id, "claim_request_id": str(uuid4()), **target}
+                if item.get("required_worker_protocol") == 2:
+                    pending["required_worker_protocol"] = 2
                 _write(claim_path, pending)
             if pending.get("worker_id") != self.worker_id:
                 raise WorkerError("WORKER_ID_MISMATCH")
@@ -870,6 +909,10 @@ class StageWorker:
             self._check_presence()
             claim = self.client.claim(pending["stage_id"], self.worker_id, pending["claim_request_id"], **options)
             if claim.get("outcome") not in {"NO_WORK", "EXPIRED", "NO_CAPACITY"}:
+                required_protocol = claim.get("required_worker_protocol", 1)
+                if (type(required_protocol) is not int or required_protocol not in (self._protocol_versions or (1,))
+                        or required_protocol != pending.get("required_worker_protocol", 1)):
+                    raise WorkerError("CLAIM_PROTOCOL_CHANGED")
                 return claim, pending
             attempted.add(pending["stage_id"])
             _native_path(claim_path).unlink()
@@ -1165,6 +1208,10 @@ class AnalysisStageExecutor:
         if (evidence and config.get("evidence_mode") != "structured"
                 or not evidence and "evidence_mode" in config):
             raise WorkerError("INVALID_AGENT_EVIDENCE_INPUT")
+        speech = "evidence_policy" in config
+        if (speech and (not evidence or config["evidence_policy"] != "speech_lookup_v1" or lease.required_worker_protocol != 2)
+                or lease.required_worker_protocol == 2 and not speech):
+            raise WorkerError("INVALID_AGENT_SPEECH_INPUT")
         focus |= evidence and "focus_timestamp_ms" in config
         if caption:
             if config.get("kind") != "CAPTION" or not isinstance(config.get("caption_context"), dict) or config["history"] != []:
@@ -1206,7 +1253,7 @@ class AnalysisStageExecutor:
         if self.transport_factory is None:
             raise WorkerError("DURABLE_BUDGET_REQUIRED")
         embedder = None
-        if os.environ.get("LIVECUT_INTENT_EMBEDDING_DIR"):
+        if not speech and os.environ.get("LIVECUT_INTENT_EMBEDDING_DIR"):
             from .intent_embedding import LocalIntentEmbedder
 
             context.guard.check()
@@ -1247,6 +1294,8 @@ class AnalysisStageExecutor:
                     options["focus_timestamp_ms"] = config["focus_timestamp_ms"]
                 if evidence:
                     options["evidence_mode"] = "structured"
+                if speech:
+                    options["evidence_policy"] = "speech_lookup_v1"
                 options["budget_remaining"] = getattr(text_transport, "visual_text_budget", lambda: None)
                 options["max_request_attempts"] = text_transport.policy.max_attempts if isinstance(text_transport, ResilientTextTransport) else 1
                 build_visual_answer(transcript, analysis["segments"], config["duration_ms"], config["question"],

@@ -20,9 +20,10 @@ from .text_resilience import DeadlineHTTPTransport, TextRecoveryError
 class WorkerClientError(Exception):
     """Sanitized error; response bodies and authentication headers stay private."""
 
-    def __init__(self, code: str, *, retryable: bool = False) -> None:
+    def __init__(self, code: str, *, retryable: bool = False, status_code: int | None = None) -> None:
         super().__init__(code)
         self.code, self.retryable = code, retryable
+        self.status_code = status_code
 
 
 class WorkerClient:
@@ -124,7 +125,7 @@ class WorkerClient:
                 except (ValueError, AttributeError):
                     pass
                 raise WorkerClientError(code, retryable=response.status_code == 429
-                                        or response.status_code >= 500)
+                                        or response.status_code >= 500, status_code=response.status_code)
             try:
                 value = response.json()
             except ValueError:
@@ -152,13 +153,30 @@ class WorkerClient:
         return snapshot
 
     def ready(self, *, stage_type: str | None = None, limit: int = 10,
-              job_id: str | None = None) -> dict:
+              job_id: str | None = None, worker_id: str | None = None, session_id: str | None = None) -> dict:
         params: dict[str, str | int] = {"limit": limit}
         if stage_type is not None:
             params["stage_type"] = stage_type
         if job_id is not None:
             params["job_id"] = self._job_id(job_id)
+        if (worker_id is None) != (session_id is None):
+            raise WorkerClientError("INVALID_WORKER_SESSION")
+        if worker_id is not None:
+            params.update(worker_id=self._worker_identity(worker_id), session_id=self._session_id(session_id))
         return self._request("GET", "/internal/stages/ready", params=params)
+
+    def worker_protocol_versions(self) -> tuple[int, ...]:
+        try:
+            capability = self._request("GET", "/api/agent-capabilities/speech-lookup")
+        except WorkerClientError as error:
+            if error.status_code == 404:
+                return (1,)
+            raise
+        if (set(capability) != {"speech_lookup_supported", "worker_protocol"}
+                or capability["speech_lookup_supported"] is not True
+                or type(capability["worker_protocol"]) is not int or capability["worker_protocol"] != 2):
+            raise WorkerClientError("INVALID_WORKER_PROTOCOL_CAPABILITY")
+        return (1, 2)
 
     def claim(self, stage_id: str, worker_id: str, claim_request_id: str,
               *, job_id: str | None = None, session_id: str | None = None) -> dict:
@@ -206,6 +224,7 @@ class WorkerClient:
 
     def register_worker(self, worker_id: str, session_id: str, stage_types: list[str],
                         *, target_job_id: str | None = None,
+                        supported_protocol_versions: list[int] | None = None,
                         timeout_seconds: float | None = None,
                         request_guard: Callable[[], None] | None = None) -> dict:
         if (timeout_seconds is not None
@@ -219,6 +238,12 @@ class WorkerClient:
             raise WorkerClientError("INVALID_WORKER_CAPABILITIES")
         payload = {"worker_id": self._worker_identity(worker_id),
                    "session_id": self._session_id(session_id), "stage_types": stage_types, "slots": 1}
+        if supported_protocol_versions is not None:
+            if (not isinstance(supported_protocol_versions, list) or not supported_protocol_versions
+                    or any(type(v) is not int or v not in {1, 2} for v in supported_protocol_versions)
+                    or len(set(supported_protocol_versions)) != len(supported_protocol_versions)):
+                raise WorkerClientError("INVALID_WORKER_PROTOCOL_VERSIONS")
+            payload["supported_protocol_versions"] = sorted(supported_protocol_versions)
         if target_job_id is not None:
             payload["target_job_id"] = self._job_id(target_job_id)
         timeout = self._timeout_seconds if timeout_seconds is None else min(

@@ -6,10 +6,11 @@ import java.util.List;
 import java.util.Set;
 import tools.jackson.databind.JsonNode;
 
-/** Pure projection of an already verified 1.3 result, never a source or semantic validator. */
+/** Pure projection of an already verified structured result, never a source or semantic validator. */
 public final class AgentEvidenceReview {
     private AgentEvidenceReview() {}
     public static final String LIMITATION="本摘要仅由已有工具轨迹和引用派生，不新增检索，不判断回答正确性。工具轨迹未记录可区分的执行结果，空返回不能解释为查无匹配。";
+    public static final String LIMITATION_WITH_POLICY="本摘要仅由已有工具轨迹和引用派生，不新增检索，不判断回答正确性。程序预查的状态见独立记录；其他工具轨迹的空返回不能解释为查无匹配。";
 
     public enum SpeechStatus { SPEECH_CITED, SPEECH_NOT_CITED, NO_UTTERANCES_RETURNED, TOPIC_ANCHORS_ONLY, NOT_REQUESTED }
 
@@ -59,7 +60,7 @@ public final class AgentEvidenceReview {
     /** Old versions have no derived review. Callers must first verify result identity and provenance. */
     public static Review fromVerifiedResult(JsonNode result){
         if(result==null||!result.isObject())throw new IllegalArgumentException("A verified result is required");
-        if(!"1.3".equals(result.path("schema_version").asText()))return null;
+        if(!Set.of("1.3","1.4").contains(result.path("schema_version").asText()))return null;
         if(!"structured".equals(result.path("evidence_mode").asText()))throw new IllegalArgumentException("A verified structured result is required");
         int searches=0,contexts=0,topics=0,focusCalls=0,modelCalls=0,speechBlocks=0,changes=0,insufficient=0;
         Set<String> returned=new HashSet<>(),searchContext=new HashSet<>(),topicAnchors=new HashSet<>(),focusFrames=new HashSet<>(),modelFrames=new HashSet<>(),speech=new HashSet<>(),inference=new HashSet<>();

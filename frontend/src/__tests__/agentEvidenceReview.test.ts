@@ -5,6 +5,7 @@ import { h } from 'vue'
 import * as review from '../agentEvidenceReview.ts'
 import { reviewAgentEvidence, agentEvidenceReviewMessage, AGENT_EVIDENCE_REVIEW_BOUNDARY } from '../agentEvidenceReview.ts'
 import * as evidence from '../agentEvidenceAnswer.ts'
+import * as speech from '../agentSpeechLookup.ts'
 import * as visual from '../agentVisualEvidence.ts'
 import * as topics from '../topics.ts'
 import { parseAgentTurn, type AgentSession, type AgentTurn } from '../videoAgent.ts'
@@ -50,7 +51,7 @@ test('program messages do not infer success, no-match or semantic proof from a t
 
 test('production cards display unrequested speech warning and focus/model distinction directly, without added image/API work', async () => {
   const turn = verifiedCase(fixture.cases.find((sample: any) => sample.id === 'user_focus_is_not_speech_lookup'))
-  const component = compileHostComponent(new URL('../AgentEvidenceAnswer.vue', import.meta.url), { './agentEvidenceAnswer': evidence, './agentEvidenceReview': review, './agentVisualEvidence': visual, './topics': topics })
+  const component = compileHostComponent(new URL('../AgentEvidenceAnswer.vue', import.meta.url), { './agentEvidenceAnswer': evidence, './agentEvidenceReview': review, './agentSpeechLookup': speech, './agentVisualEvidence': visual, './topics': topics })
   const root = hostNode('root'), before = JSON.stringify(turn)
   const priorFetch = globalThis.fetch; let fetchCalls = 0; globalThis.fetch = (() => { fetchCalls++; throw Error('Summary must never request data') }) as any
   try {
@@ -66,7 +67,7 @@ test('production cards display unrequested speech warning and focus/model distin
 
 test('production summary updates only with result props, preserves raw answer and shows overlapping returned frame groups honestly', async () => {
   const turn = verifiedCase(fixture.cases.find((sample: any) => sample.id === 'focus_frame_reused_by_model_clip_not_added_twice'))
-  const component = compileHostComponent(new URL('../AgentEvidenceAnswer.vue', import.meta.url), { './agentEvidenceAnswer': evidence, './agentEvidenceReview': review, './agentVisualEvidence': visual, './topics': topics }), root = hostNode('root')
+  const component = compileHostComponent(new URL('../AgentEvidenceAnswer.vue', import.meta.url), { './agentEvidenceAnswer': evidence, './agentEvidenceReview': review, './agentSpeechLookup': speech, './agentVisualEvidence': visual, './topics': topics }), root = hostNode('root')
   try {
     hostRenderer.render(h(component, { turn, active: false }), root); await flushHost(); const summary = allHostNodes(root).find(node => node.props['aria-label'] === '证据核查摘要')!
     assert.match(hostText(summary), /实际画面 2 帧/); assert.match(hostText(summary), /用户定位 \/ 模型取图返回帧1 \/ 2 帧/); assert.match(hostText(summary), /不能直接相加/)

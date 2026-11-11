@@ -121,6 +121,61 @@ class AgentIntegrationTests {
         var tool=answer.withArray("tool_calls").addObject().put("step",2).put("tool_name","read_context");if(answer.has("focus_timestamp_ms"))tool.put("origin","MODEL");tool.putObject("arguments").put("utterance_id","u1").put("before",0).put("after",0);tool.putArray("result_frame_ids");tool.putArray("result_utterance_ids").add("u1");var citation=answer.withArray("citations").addObject();for(String field:List.of("utterance_id","start_ms","end_ms","text"))citation.set(field,f.utterances().get(0).path(field));
     }
 
+    private AgentModels.Turn speechTurn(String session,String question,int budget,Long focus,String key){
+        var input=JSON.createObjectNode().put("question",question).put("max_text_calls",budget).put("visual_mode","frames").put("evidence_mode","structured").put("evidence_policy",AgentSpeechLookup.POLICY);if(focus!=null)input.put("focus_timestamp_ms",focus);return agents.createTurn(session,input,key);
+    }
+    private ClaimResult claimSpeech(AgentModels.Turn turn){
+        String worker="speech-synthetic-"+UUID.randomUUID(),session=UUID.randomUUID().toString();ownWorkers.add(worker);
+        app.getBean(WorkerCapacityService.class).register(new WorkerModels.Registration(worker,session,List.of(AgentEvidence.STAGE),1,turn.jobId(),List.of(1,2)));
+        assertTrue(jobs.ready(AgentEvidence.STAGE,100,turn.jobId()).isEmpty());assertEquals(2,jobs.ready(AgentEvidence.STAGE,100,turn.jobId(),worker,session).getFirst().requiredWorkerProtocol());
+        return jobs.claim(new ClaimRequest(turn.stage().id(),worker,UUID.randomUUID().toString(),turn.jobId(),session));
+    }
+    private static void speechAnswer(ObjectNode answer,Fixture f){
+        structuredAnswer(answer,f);answer.put("schema_version","1.4").put("evidence_policy",AgentSpeechLookup.POLICY);((ObjectNode)answer.path("provenance")).put("prompt_version",AgentSpeechLookup.PROMPT);
+        ObjectNode visual=(ObjectNode)answer.path("tool_calls").get(0).deepCopy(),policy=(ObjectNode)answer.path("tool_calls").get(1).deepCopy();policy.put("origin","EVIDENCE_POLICY");
+        var receipt=answer.putObject("speech_lookup").put("status","RETURNED").put("query_truncated",false);
+        var calls=answer.putArray("tool_calls");
+        if(answer.has("focus_timestamp_ms")){
+            policy.putObject("arguments").put("utterance_id","u1").put("before",1).put("after",1);policy.putArray("result_utterance_ids").add("u1").add("u2");calls.add(visual);calls.add(policy);
+            receipt.put("tool_step",2).put("strategy","FOCUS_CONTEXT").put("anchor_distance_ms",0).put("candidate_utterance_count",2);receipt.putArray("returned_utterance_ids").add("u1").add("u2");
+        }else{
+            policy.put("step",1).put("tool_name","search_transcript");policy.putObject("arguments").put("query",AgentSpeechLookup.query(answer.path("question").asText()).text()).put("top_k",4);visual.put("step",2).put("origin","MODEL");calls.add(policy);calls.add(visual);
+            ((ObjectNode)answer.path("provenance")).put("retrieval_mode","bm25");receipt.put("tool_step",1).put("strategy","QUESTION_SEARCH").putNull("anchor_distance_ms");receipt.put("candidate_utterance_count",1);receipt.putArray("returned_utterance_ids").add("u1");
+        }
+    }
+
+    @Test void speechPolicyInputFreezesProtocolFingerprintAndOriginalUnknownSubmission()throws Exception{
+        var f=fixture();configureVisual();var session=session(f);String before=scopedState(f.job());
+        var input=JSON.createObjectNode().put("question","核对原句").put("visual_mode","frames").put("evidence_mode","structured");
+        for(JsonNode invalid:List.<JsonNode>of(JSON.getNodeFactory().nullNode(),JSON.valueToTree(true),JSON.valueToTree("none"),JSON.valueToTree("unknown"))){input.set("evidence_policy",invalid);assertEquals("INVALID_AGENT_TURN",failure(()->agents.createTurn(session.id(),input,UUID.randomUUID().toString())));}
+        for(String question:List.of("\uFEFF\u00A0","x\u001cy","x\u0085y","x\uD800","\uDC00x")){input.put("evidence_policy",AgentSpeechLookup.POLICY).put("question",question);assertEquals("INVALID_AGENT_TURN",failure(()->agents.createTurn(session.id(),input,UUID.randomUUID().toString())));}
+        input.put("question","核对原句").put("evidence_mode","none");assertEquals("INVALID_AGENT_TURN",failure(()->agents.createTurn(session.id(),input,"speech-invalid-mode")));assertEquals(before,scopedState(f.job()));
+        var legacy=evidenceTurn(session.id(),"\uFEFF\u00A0",1,null,"speech-legacy-question");assertNull(legacy.evidencePolicy());assertFalse(JSON.valueToTree(legacy).has("evidence_policy"));agents.cancel(legacy.id());
+        var request=speechTurn(session.id(),"核对原句",1,0L,"speech-original");assertEquals(AgentSpeechLookup.POLICY,request.evidencePolicy());assertEquals(AgentEvidence.STAGE,request.stage().stageType());assertEquals(2,jdbc.queryForObject("SELECT required_worker_protocol FROM job_stage WHERE id=?",Integer.class,request.stage().id()));
+        String material="agent-turn\n"+session.id()+"\n核对原句\n1\nvisual_mode=frames\nfocus_timestamp_ms=0\nevidence_mode=structured\nevidence_policy="+AgentSpeechLookup.POLICY;assertEquals(io.livecut.clips.ClipRequestService.sha(material),jdbc.queryForObject("SELECT request_hash FROM agent_turn WHERE id=?",String.class,request.id()));
+        assertEquals("IDEMPOTENCY_CONFLICT",failure(()->evidenceTurn(session.id(),"核对原句",1,0L,"speech-original")));
+        org.springframework.test.util.ReflectionTestUtils.setField(agents,"configuredVisualModel","");jdbc.update("UPDATE analysis_job SET status='RUNNING' WHERE id=?",f.job());assertEquals(request.id(),speechTurn(session.id(),"核对原句",1,0L,"speech-original").id());assertEquals(request.id(),agents.findTurnSubmission(session.id(),"speech-original").id());
+    }
+
+    @Test void speechPolicyCompletesAtBudgetOneAndConsumesNotesFramesHistoryAndOriginalAnchors()throws Exception{
+        for(Long focus:Arrays.asList(null,0L)){
+            var f=fixture();configureVisual();var request=speechTurn(session(f).id(),"核对讲者原句",1,focus,"speech-consume-"+focus);var lease=claimSpeech(request);assertEquals(2,lease.requiredWorkerProtocol());assertEquals(AgentSpeechLookup.POLICY,((Map<?,?>)lease.config().get("agent_turn")).get("evidence_policy"));
+            var reserve=new ReserveRequest(lease.stageId(),lease.attempt(),lease.runToken(),UUID.randomUUID().toString(),"a".repeat(64),"speech-decision","qwen-vl-synthetic","TEXT");assertEquals("RESERVED",calls.reserve(reserve).outcome());calls.update(reserve.requestId(),new UpdateRequest(lease.stageId(),lease.attempt(),lease.runToken(),"DISPATCHING",null,Map.of()));calls.update(reserve.requestId(),new UpdateRequest(lease.stageId(),lease.attempt(),lease.runToken(),"UNKNOWN_OUTCOME",null,Map.of()));assertEquals("EXISTING",calls.lookup(reserve).outcome());assertEquals(1,agents.getTurn(request.id()).budget().textCallsReserved());
+            assertEquals("MODEL_BUDGET_EXHAUSTED",failure(()->calls.reserve(new ReserveRequest(lease.stageId(),lease.attempt(),lease.runToken(),UUID.randomUUID().toString(),"b".repeat(64),"speech-extra","qwen-vl-synthetic","TEXT"))));
+            jobs.complete(lease.stageId(),publishVisual(f,request,lease,a->speechAnswer(a,f)));var result=agents.getTurn(request.id()).result();assertEquals("1.4",result.path("schema_version").asText());assertEquals("EVIDENCE_POLICY",result.path("tool_calls").get(focus==null?0:1).path("origin").asText());assertEquals(1,jdbc.queryForObject("SELECT COUNT(*) FROM model_call WHERE job_id=?",Integer.class,f.job()));assertEquals(0,jobs.get(f.job()).budget().textCallsReserved());
+            String before=scopedState(f.job());assertTrue(agents.visualFrame(request.id(),"f0001").length>4);var notes=app.getBean(AgentNoteService.class);var preview=notes.preview(request.id());assertTrue(preview.markdown().contains("## 程序原句预查"));assertTrue(preview.markdown().contains(AgentEvidenceReview.LIMITATION_WITH_POLICY));var zip=noteZip(notes.download(request.id()).bytes());JsonNode source=JSON.readTree(zip.get("source.json"));assertEquals(AgentSpeechLookup.POLICY,source.path("evidence_policy").asText());assertEquals(result.path("speech_lookup"),source.path("speech_lookup"));assertEquals(before,scopedState(f.job()));
+            var clips=app.getBean(io.livecut.clips.ClipRequestService.class);var clip=clips.create(f.job(),new io.livecut.clips.ClipRequestModels.CreateRequest("保留原句",4,JSON.valueToTree(Map.of("turn_id",request.id(),"utterance_ids",List.of("u1")))),"speech-anchor-"+focus);assertNotNull(clips.get(clip.id()).sourceAnswer());
+            var next=speechTurn(request.sessionId(),"后续核对",1,focus,"speech-next-"+focus);assertTrue(jdbc.queryForObject("SELECT history_json FROM agent_turn WHERE id=?",String.class,next.id()).contains("原句依据"));agents.cancel(next.id());
+        }
+    }
+
+    @Test void speechPolicyRejectsVersionOneClaimsAndInvalidReceiptsWithoutPublishing()throws Exception{
+        var f=fixture();configureVisual();var request=speechTurn(session(f).id(),"核对原句",1,0L,"speech-reject");String worker="speech-old-"+UUID.randomUUID(),session=UUID.randomUUID().toString();ownWorkers.add(worker);app.getBean(WorkerCapacityService.class).register(new WorkerModels.Registration(worker,session,List.of(AgentEvidence.STAGE),1,f.job()));
+        String key=UUID.randomUUID().toString();assertThrows(io.livecut.video.VideoApiException.class,()->jobs.claim(new ClaimRequest(request.stage().id(),worker,key,f.job(),session)));assertEquals(0,jdbc.queryForObject("SELECT COUNT(*) FROM stage_claim_request WHERE worker_id=? AND claim_request_id=?",Integer.class,worker,key));assertEquals(0,agents.getTurn(request.id()).stage().attempt());
+        var lease=claimSpeech(request);for(Consumer<ObjectNode> change:List.<Consumer<ObjectNode>>of(a->((ObjectNode)a.path("speech_lookup")).put("anchor_distance_ms",1),a->((ObjectNode)a.path("tool_calls").get(1)).put("origin","MODEL"),a->a.remove("evidence_policy"))){var completion=publishVisual(f,request,lease,a->{speechAnswer(a,f);change.accept(a);});assertEquals("INVALID_AGENT_ANSWER",failure(()->jobs.complete(lease.stageId(),completion)));assertNull(agents.getTurn(request.id()).result());}
+        jobs.complete(lease.stageId(),publishVisual(f,request,lease,a->speechAnswer(a,f)));String hash=jdbc.queryForObject("SELECT result_hash FROM agent_turn WHERE id=?",String.class,request.id());jdbc.update("UPDATE job_stage SET required_worker_protocol=1 WHERE id=?",request.stage().id());try{assertEquals("AGENT_STAGE_UNAVAILABLE",failure(()->app.getBean(AgentNoteService.class).preview(request.id())));assertEquals("AGENT_STAGE_UNAVAILABLE",failure(()->agents.visualFrame(request.id(),"f0001")));}finally{jdbc.update("UPDATE job_stage SET required_worker_protocol=2 WHERE id=?",request.stage().id());}assertEquals(hash,jdbc.queryForObject("SELECT result_hash FROM agent_turn WHERE id=?",String.class,request.id()));
+    }
+
     @Test void textNotePreviewAndDeterministicZipPreserveEvidenceWithoutAnyWrites()throws Exception{
         var f=fixture();var request=turn(session(f).id(),"请解释缓存失效",4,"note-text");var lease=claim(request);jobs.complete(lease.stageId(),publish(f,request,lease,null));String before=scopedState(f.job());
         var response=send("GET","/api/agent-turns/"+request.id()+"/note",null,null);assertEquals(200,response.statusCode());JsonNode preview=JSON.readTree(response.body());

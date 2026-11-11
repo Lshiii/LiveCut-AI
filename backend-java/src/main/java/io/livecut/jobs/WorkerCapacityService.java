@@ -26,11 +26,13 @@ public class WorkerCapacityService {
     private final int timeout;
     private final boolean required;
     private final Map<String, Integer> limits;
-    private record Instance(String id, String session, List<String> types, int slots, String target,
+    private record Instance(String id, String session, List<String> types, List<Integer> protocols, int slots, String target,
                             boolean accepting, Instant seen) {}
+    record ReadyCapabilities(List<String> types,List<Integer> protocols,String target) {}
     private record Occupancy(String worker, String type) {}
     private static final RowMapper<Instance> ROW = (row, index) -> new Instance(row.getString("worker_id"),
         row.getString("session_id"), Arrays.asList(JSON.readValue(row.getString("stage_types"), String[].class)),
+        readProtocols(row.getString("supported_protocol_versions")),
         row.getInt("slots"), row.getString("target_job_id"), row.getBoolean("accepting"), row.getTimestamp("last_seen_at").toInstant());
 
     public WorkerCapacityService(JdbcTemplate jdbc, PlatformTransactionManager manager,
@@ -59,13 +61,14 @@ public class WorkerCapacityService {
             throw bad("INVALID_WORKER", "Worker capabilities and slots are invalid");
         }
         List<String> types = TYPES.stream().filter(request.stageTypes()::contains).toList();
+        List<Integer> protocols=protocols(request.supportedProtocolVersions());
         return transaction.execute(tx -> {
             lockCapacity();
             Instant now = now();
             Instance old = instance(id);
             if (old != null && old.session().equals(session)) {
                 if (!online(old, now)) { throw expired(); }
-                if (!old.types().equals(types) || old.slots() != request.slots() || !Objects.equals(old.target(), target)) {
+                if (!old.types().equals(types) || !old.protocols().equals(protocols) || old.slots() != request.slots() || !Objects.equals(old.target(), target)) {
                     throw conflict("WORKER_REGISTRATION_CONFLICT", "A session's capabilities are immutable");
                 }
             } else if (old != null) {
@@ -74,8 +77,8 @@ public class WorkerCapacityService {
                     throw expired();
                 }
             }
-            jdbc.update("INSERT INTO worker_instance (worker_id,session_id,stage_types,slots,target_job_id,accepting,last_seen_at) VALUES (?,?,?,?,?,TRUE,?) ON DUPLICATE KEY UPDATE session_id=VALUES(session_id),stage_types=VALUES(stage_types),slots=VALUES(slots),target_job_id=VALUES(target_job_id),accepting=TRUE,last_seen_at=VALUES(last_seen_at)",
-                id, session, JSON.writeValueAsString(types), request.slots(), target, Timestamp.from(now));
+            jdbc.update("INSERT INTO worker_instance (worker_id,session_id,stage_types,supported_protocol_versions,slots,target_job_id,accepting,last_seen_at) VALUES (?,?,?,?,?,?,TRUE,?) ON DUPLICATE KEY UPDATE session_id=VALUES(session_id),stage_types=VALUES(stage_types),supported_protocol_versions=VALUES(supported_protocol_versions),slots=VALUES(slots),target_job_id=VALUES(target_job_id),accepting=TRUE,last_seen_at=VALUES(last_seen_at)",
+                id, session, JSON.writeValueAsString(types), JSON.writeValueAsString(protocols), request.slots(), target, Timestamp.from(now));
             jdbc.update("INSERT IGNORE INTO worker_session_history (worker_id,session_id) VALUES (?,?)", id, session);
             return receipt("REGISTERED", id, session, now);
         });
@@ -104,9 +107,13 @@ public class WorkerCapacityService {
 
     /** Caller holds job -> stage locks; then acquire global -> instance in this order. */
     boolean admit(String workerId, String sessionId, String type, String jobId, boolean additionalSlot) {
+        return admit(workerId,sessionId,type,jobId,additionalSlot,1);
+    }
+    boolean admit(String workerId, String sessionId, String type, String jobId, boolean additionalSlot,int requiredProtocol) {
+        requiredProtocol(requiredProtocol);
         if (!TransactionSynchronizationManager.isActualTransactionActive()) { throw new IllegalStateException("Capacity admission requires the stage transaction"); }
         // Explicit compatibility mode is used by old protocol fixtures. Production fails closed.
-        if (sessionId == null && !required) { return true; }
+        if (sessionId == null && !required && requiredProtocol==1) { return true; }
         if (sessionId == null) { throw conflict("WORKER_NOT_REGISTERED", "Register the worker before claiming work"); }
         String session = uuid(sessionId);
         lockCapacity();
@@ -115,6 +122,7 @@ public class WorkerCapacityService {
         if (worker == null) { throw conflict("WORKER_NOT_REGISTERED", "Worker is not registered"); }
         if (!worker.session().equals(session) || !online(worker, now)) { throw expired(); }
         if (!worker.types().contains(type)) { throw conflict("WORKER_CAPABILITY_MISMATCH", "Worker cannot execute this stage"); }
+        if (!worker.protocols().contains(requiredProtocol)) { throw conflict("WORKER_PROTOCOL_MISMATCH", "Worker cannot execute the frozen stage protocol"); }
         if (worker.target() != null && !worker.target().equals(jobId)) { throw conflict("WORKER_TARGET_MISMATCH", "Worker is scoped to another analysis job"); }
         if (!additionalSlot) { return true; }
         List<Occupancy> occupancy = occupancy(now);
@@ -123,13 +131,18 @@ public class WorkerCapacityService {
     }
 
     public Snapshot snapshot(String requestedJob) {
+        return snapshot(requestedJob,null);
+    }
+    public Snapshot snapshot(String requestedJob,Integer requestedProtocol) {
+        if(requestedProtocol!=null)requiredProtocol(requestedProtocol);
+        int protocol=requestedProtocol==null?1:requestedProtocol;
         String job = requestedJob == null ? null : uuid(requestedJob);
         return transaction.execute(tx -> {
             lockCapacity();
             Instant now = now();
             List<Instance> all = jdbc.query("SELECT * FROM worker_instance ORDER BY worker_id", ROW);
             List<Occupancy> occupancy = occupancy(now);
-            List<WorkerView> workers = all.stream().filter(w -> applies(w, job)).map(w -> new WorkerView(w.id(),
+            List<WorkerView> workers = all.stream().filter(w -> applies(w, job)&&w.protocols().contains(protocol)).map(w -> new WorkerView(w.id(),
                 online(w, now) ? "ONLINE" : "OFFLINE", w.types(), w.slots(), busy(w.id(), occupancy), w.seen(), w.target())).toList();
             int online = 0, total = 0, busy = 0, available = 0;
             for (WorkerView w : workers) {
@@ -156,6 +169,26 @@ public class WorkerCapacityService {
     }
 
     private boolean online(Instance worker, Instant now) { return worker.accepting() && worker.seen().plusSeconds(timeout).isAfter(now); }
+    /** A read-only hint for SQL filtering; claim repeats the authoritative check under capacity locks. */
+    ReadyCapabilities readyCapabilities(String workerId,String sessionId,String requestedJob){
+        String id=identifier(workerId),session=uuid(sessionId);
+        List<Instance> rows=jdbc.query("SELECT * FROM worker_instance WHERE worker_id=?",ROW,id);
+        Instance worker=rows.isEmpty()?null:rows.getFirst();
+        if(worker==null)throw conflict("WORKER_NOT_REGISTERED","Worker is not registered");
+        if(!worker.session().equals(session)||!online(worker,now()))throw expired();
+        if(requestedJob!=null&&worker.target()!=null&&!requestedJob.equals(worker.target()))throw conflict("WORKER_TARGET_MISMATCH","Worker is scoped to another analysis job");
+        return new ReadyCapabilities(worker.types(),worker.protocols(),worker.target());
+    }
+    private static List<Integer> protocols(List<Integer> values){
+        if(values==null||values.isEmpty()||values.size()>2||new HashSet<>(values).size()!=values.size()||values.stream().anyMatch(value->value==null||value!=1&&value!=2))throw bad("INVALID_WORKER","Worker protocol versions are invalid");
+        return values.stream().sorted().toList();
+    }
+    private static List<Integer> readProtocols(String raw){
+        var values=JSON.readTree(raw);if(!values.isArray())throw conflict("WORKER_PROTOCOL_INVALID","Stored worker protocols are invalid");
+        List<Integer> result=new ArrayList<>();for(var value:values){if(!value.isIntegralNumber()||!value.canConvertToInt())throw conflict("WORKER_PROTOCOL_INVALID","Stored worker protocols are invalid");result.add(value.intValue());}
+        try{return protocols(result);}catch(VideoApiException failure){throw conflict("WORKER_PROTOCOL_INVALID","Stored worker protocols are invalid");}
+    }
+    static void requiredProtocol(int value){if(value!=1&&value!=2)throw bad("INVALID_WORKER_PROTOCOL","Worker protocol must be 1 or 2");}
     private static boolean applies(Instance worker, String job) { return job == null || worker.target() == null || job.equals(worker.target()); }
     private static int busy(String id, List<Occupancy> occupancy) { return (int) occupancy.stream().filter(o -> id.equals(o.worker())).count(); }
     private static int resourceBusy(String name, List<Occupancy> occupancy) { return (int) occupancy.stream().filter(o -> resources(o.type()).contains(name)).count(); }

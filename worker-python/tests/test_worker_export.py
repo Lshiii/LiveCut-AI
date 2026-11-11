@@ -208,6 +208,7 @@ def test_complete_response_loss_replays_only_callback(tmp_path, tools_and_source
     context = prepare_context(tmp_path, sources[True])
     client = FakeClient()
     client.reply = {"outcome": "CLAIMED", **dataclasses.asdict(context.lease)}
+    client.reply.pop("required_worker_protocol")  # Legacy wire omits the new optional metadata.
     client.fail_complete_once = True
     actual, calls = AnalysisStageExecutor(ffmpeg_path=ffmpeg, ffprobe_path=ffprobe), []
 
@@ -230,6 +231,7 @@ def test_lost_lease_after_encoding_never_submits_completion(tmp_path, tools_and_
     context = prepare_context(tmp_path, sources[True])
     client = FakeClient()
     client.reply = {"outcome": "CLAIMED", **dataclasses.asdict(context.lease)}
+    client.reply.pop("required_worker_protocol")  # Legacy wire omits the new optional metadata.
 
     def execute(ctx):
         def export_then_lose(*args, **kwargs):

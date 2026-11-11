@@ -91,7 +91,8 @@ public class ModelCallService {
                 else {var configured=json.readTree(configJson).path("text_fallback_models");if(configured.isArray())fallbackModels=TextExecutionPolicy.fallbackModels(json.readValue(configured.toString(),List.class));}
             }
             if(Set.of("AGENT_VISUAL","AGENT_VISUAL_FOCUS","AGENT_EVIDENCE").contains(active.stage().stageType())&&(!agentTurn||!fallbackModels.isEmpty()
-                    ||!active.stage().stageType().equals(io.livecut.agent.AgentFocus.stage(jdbc.queryForMap("SELECT visual_mode,focus_timestamp_ms,evidence_mode FROM agent_turn WHERE id=?",active.stage().ownerId()))))){
+                    ||!active.stage().stageType().equals(io.livecut.agent.AgentFocus.stage(jdbc.queryForMap("SELECT visual_mode,focus_timestamp_ms,evidence_mode FROM agent_turn WHERE id=?",active.stage().ownerId())))
+                    ||active.stage().requiredWorkerProtocol()!=io.livecut.agent.AgentSpeechLookup.requiredProtocol(jdbc.queryForMap("SELECT visual_mode,evidence_mode,evidence_policy FROM agent_turn WHERE id=?",active.stage().ownerId())))){
                 throw error(HttpStatus.CONFLICT,"MODEL_CONFIG_CONFLICT","Visual stages require their frozen planner without text fallback");
             }
             if (!request.modelId().equals(expectedModel)&&!fallbackModels.contains(request.modelId())) {

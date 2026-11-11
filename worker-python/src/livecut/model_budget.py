@@ -128,6 +128,11 @@ class BudgetTransport(httpx.BaseTransport):
             if evidence and (turn.get("evidence_mode") != "structured"
                              or ("focus_timestamp_ms" in turn) != ("focus_timestamp_ms" in config)):
                 return None
+            if evidence and (("evidence_policy" in turn) != ("evidence_policy" in config)
+                             or turn.get("evidence_policy") != config.get("evidence_policy")
+                             or "evidence_policy" in config and (config["evidence_policy"] != "speech_lookup_v1"
+                                                                 or lease.required_worker_protocol != 2)):
+                return None
             if (lease.stage_type == "AGENT_VISUAL_FOCUS" or evidence and "focus_timestamp_ms" in config) and (type(config.get("focus_timestamp_ms")) is not int
                     or type(turn.get("focus_timestamp_ms")) is not int
                     or turn["focus_timestamp_ms"] != config["focus_timestamp_ms"]):

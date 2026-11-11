@@ -22,7 +22,7 @@ export interface AgentEvidenceReview {
 export const AGENT_EVIDENCE_REVIEW_BOUNDARY = '本摘要仅由已有工具轨迹和引用派生，不新增检索，不判断回答正确性。工具轨迹未记录可区分的执行结果，空返回不能解释为查无匹配。'
 const distinct = (ids: readonly string[]) => new Set(ids).size
 export function reviewAgentEvidence(input: AgentEvidenceReviewInput | null | undefined): Readonly<AgentEvidenceReview> | null {
-  if (!input || input.schema_version !== '1.3' || input.evidence_mode !== 'structured' || !input.answer_blocks || !input.visual_evidence || !input.visual_citations) return null
+  if (!input || !['1.3', '1.4'].includes(input.schema_version) || input.evidence_mode !== 'structured' || !input.answer_blocks || !input.visual_evidence || !input.visual_citations) return null
   const calls = input.tool_calls, blocks = input.answer_blocks
   const search = calls.filter(call => call.tool_name === 'search_transcript'), context = calls.filter(call => call.tool_name === 'read_context')
   const topics = calls.filter(call => call.tool_name === 'list_topics'), lookup = [...search, ...context]

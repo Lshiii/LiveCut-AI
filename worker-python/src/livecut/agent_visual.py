@@ -81,7 +81,7 @@ def _visual_citations(value, available):
     return result
 
 
-def _decision(raw, by_id, visible, frames, tools_left, duration, *, evidence_mode=None, tool_calls=None):
+def _decision(raw, by_id, visible, frames, tools_left, duration, *, evidence_mode=None, tool_calls=None, speech_policy=False):
     value = _object(raw)
     if not isinstance(value, dict):
         raise AgentOutputError("VISUAL_DECISION")
@@ -93,6 +93,11 @@ def _decision(raw, by_id, visible, frames, tools_left, duration, *, evidence_mod
             args = visual_arguments(name, value["arguments"], duration) if name in VISUAL_TOOLS else _arguments(name, value["arguments"], by_id)
         except ValueError:
             raise AgentOutputError("VISUAL_ARGUMENTS") from None
+        if speech_policy and name == "search_transcript":
+            from .agent_evidence import utf16_length
+
+            if utf16_length(args["query"]) > 300:
+                raise AgentOutputError("SPEECH_QUERY_UTF16_LIMIT")
         return {"type": "tool", "tool_name": name, "arguments": args}
     if evidence_mode == "structured":
         from .agent_evidence import answer_decision
@@ -114,6 +119,10 @@ def _decision(raw, by_id, visible, frames, tools_left, duration, *, evidence_mod
 
 
 def validate_visual_answer(result: dict, utterances: list[dict], *, expected: dict | None = None, expected_frames: list[dict] | None = None, duration_ms: int | None = None) -> dict:
+    if isinstance(result, dict) and result.get("schema_version") == "1.4":
+        from .agent_speech_lookup import validate_speech_answer
+
+        return validate_speech_answer(result, utterances, expected=expected, expected_frames=expected_frames, duration_ms=duration_ms)
     if isinstance(result, dict) and result.get("schema_version") == "1.3":
         from .agent_evidence import validate_evidence_answer
 
@@ -202,7 +211,7 @@ def build_visual_answer(utterances, topics, duration_ms, question, output_dir, *
                        source_hash, transcript_hash, model, api_key, base_url, max_calls=8, max_tool_steps=4, history=None,
                        client=None, timeout_seconds=300, dense_embedder=None, embedding_model_id=None, index_cache_dir=None,
                        guard=lambda: None, ffmpeg_path="ffmpeg", ffprobe_path="ffprobe", media_info=None, budget_remaining=None, max_request_attempts=1,
-                       focus_timestamp_ms=MISSING, evidence_mode=None):
+                       focus_timestamp_ms=MISSING, evidence_mode=None, evidence_policy=None):
     if client is None:
         raise SegmentationError("DURABLE_BUDGET_REQUIRED", "Visual generation requires an injected budgeted transport")
     target = endpoint(base_url)
@@ -212,6 +221,9 @@ def build_visual_answer(utterances, topics, duration_ms, question, output_dir, *
     if evidence_mode not in (None, "structured"):
         raise SegmentationError("INVALID_AGENT_EVIDENCE_INPUT", "Unsupported structured evidence mode")
     structured = evidence_mode == "structured"
+    if evidence_policy not in (None, "speech_lookup_v1") or evidence_policy is not None and not structured:
+        raise SegmentationError("INVALID_AGENT_SPEECH_INPUT", "The speech policy requires structured visual evidence")
+    speech = evidence_policy == "speech_lookup_v1"
     focused = focus_timestamp_ms is not MISSING
     if focused and not _int(focus_timestamp_ms, 0, min(2**53-1, duration_ms-1)):
         raise SegmentationError("INVALID_AGENT_FOCUS_INPUT", "The attached position must be an integer within this video")
@@ -224,6 +236,14 @@ def build_visual_answer(utterances, topics, duration_ms, question, output_dir, *
 
         prompt_version = EVIDENCE_PROMPT
         system = EVIDENCE_SYSTEM + (EVIDENCE_FOCUS + f"\n本轮明确附加位置：{focus_timestamp_ms}毫秒。" if focused else "")
+    if speech:
+        from .agent_speech_lookup import PROMPT_VERSION as SPEECH_PROMPT
+        from .agent_speech_lookup import SPEECH_SYSTEM, validate_question
+
+        validate_question(question)
+        prompt_version = SPEECH_PROMPT
+        system = SPEECH_SYSTEM + (EVIDENCE_FOCUS + f"\n本轮明确附加位置：{focus_timestamp_ms}毫秒。" if focused else "")
+        dense_embedder, embedding_model_id = None, None
     if (not _int(max_calls, 1, 24) or not _int(max_tool_steps, 1, 4) or not _int(max_request_attempts, 1, 3)
             or not isinstance(question, str) or not question.strip() or len(question) > 2000
             or any(not isinstance(v, str) or not _ID.fullmatch(v) for v in (session_id, turn_id, job_id, video_id, model))
@@ -244,7 +264,7 @@ def build_visual_answer(utterances, topics, duration_ms, question, output_dir, *
                 or topic["start_utterance_id"] not in by_id or topic["end_utterance_id"] not in by_id or order[topic["start_utterance_id"]] > order[topic["end_utterance_id"]]):
             raise SegmentationError("INVALID_AGENT_INPUT", "Invalid visual topic anchors")
         safe_topics.append({k: topic[k][:800] for k in ("segment_id", "title", "summary", "start_utterance_id", "end_utterance_id")})
-    root, directory = Path(output_dir), Path(output_dir) / ("agent-evidence" if structured else "agent-visual")
+    root, directory = Path(output_dir), Path(output_dir) / ("agent-evidence-speech" if speech else "agent-evidence" if structured else "agent-visual")
     config = {"prompt": PROMPT_VERSION, "source_hash": source_hash, "transcript_hash": transcript_hash, "duration_ms": duration_ms,
               "question": question, "model": model, "endpoint": target, "session": session_id, "turn": turn_id, "job": job_id,
               "video": video_id, "utterances": items, "topics": safe_topics, "history": history, "max_steps": max_tool_steps,
@@ -255,8 +275,13 @@ def build_visual_answer(utterances, topics, duration_ms, question, output_dir, *
                       system_sha256=hashlib.sha256(system.encode()).hexdigest())
     if structured:
         config.update(prompt=prompt_version, evidence_mode="structured", system_sha256=hashlib.sha256(system.encode()).hexdigest())
+    if speech:
+        config.update(evidence_policy=evidence_policy, worker_protocol=2)
     fingerprint = hashlib.sha256(_json(config).encode()).hexdigest()
-    decision_steps = max_tool_steps-1 if focused else max_tool_steps
+    prelude_steps = int(focused) + int(speech)
+    decision_steps = max_tool_steps-prelude_steps if speech else max_tool_steps-1 if focused else max_tool_steps
+    if decision_steps < 0:
+        raise SegmentationError("INVALID_AGENT_SPEECH_INPUT", "The requested tool limit cannot fit the explicit preflight")
     with _discovery_directory_lock(directory):
         state_path, plan_path = directory / "state.json", directory / "request-plans.json"
         state = _state(state_path, fingerprint, max_calls, decision_steps)
@@ -290,7 +315,7 @@ def build_visual_answer(utterances, topics, duration_ms, question, output_dir, *
             guard()
             return min(max_calls-len(state["calls"]), value) if _int(value, 0, max_calls) else None
 
-        if focused:
+        if focused or speech:
             initial = next((p for p in plans["requests"] if p["window_index"] == 0 and p["attempt"] == 0), None)
             if initial is None:
                 if state["calls"] or (directory / "focus-observation.json").exists():
@@ -301,9 +326,10 @@ def build_visual_answer(utterances, topics, duration_ms, question, output_dir, *
                     raise SegmentationError(unavailable if remaining is None else "BUDGET_EXHAUSTED",
                                             "The attached frame cannot be observed without a verified model request budget")
                 initial = {"window_index": 0, "attempt": 0, "remaining_calls": remaining, "payload_sha256": None,
-                           "remaining_tool_steps": min(max_tool_steps-1, max(0, remaining-max_request_attempts))}
+                           "remaining_tool_steps": min(decision_steps, max(0, remaining-max_request_attempts))}
                 plans["requests"].append(initial)
                 _save(plan_path, plans)
+        if focused:
             frame = prime_focus(store, directory, fingerprint, focus_timestamp_ms)
             delivered = [frame]
             trace = [{"step": 1, "tool_name": "inspect_frames", "arguments": {"timestamps_ms": [focus_timestamp_ms]},
@@ -311,6 +337,22 @@ def build_visual_answer(utterances, topics, duration_ms, question, output_dir, *
             observations = [{"tool_name": "inspect_frames", "arguments": {"timestamps_ms": [focus_timestamp_ms]}, "origin": "USER_FOCUS",
                              "result": {"utterances": [], "frames": [frame], "sampling": "keyframes", "audio_included": False}}]
             remaining_context -= len(_json(observations[0]["result"]))
+        if speech:
+            from .agent_speech_lookup import prime_speech_lookup
+
+            prepared = prime_speech_lookup(directory, fingerprint, items, question,
+                prior_requests=bool(state["calls"]) or any(p["payload_sha256"] for p in plans["requests"]),
+                focus_timestamp_ms=focus_timestamp_ms if focused else None, source_hash=source_hash, transcript_hash=transcript_hash,
+                index_cache_dir=Path(index_cache_dir or directory / "indexes") / "speech-policy-v1", guard=guard)
+            speech_lookup = prepared["receipt"]
+            policy_step = {"step": speech_lookup["tool_step"], "tool_name": "read_context" if speech_lookup["strategy"] == "FOCUS_CONTEXT" else "search_transcript",
+                           "arguments": prepared["arguments"], "origin": "EVIDENCE_POLICY", "result_utterance_ids": speech_lookup["returned_utterance_ids"], "result_frame_ids": []}
+            trace.append(policy_step)
+            observations.append({"tool_name": policy_step["tool_name"], "arguments": prepared["arguments"], "origin": "EVIDENCE_POLICY", "result": prepared["observation"]})
+            visible.update(speech_lookup["returned_utterance_ids"])
+            remaining_context = max(0, remaining_context-len(_json(prepared["observation"])))
+            if speech_lookup["strategy"] == "QUESTION_SEARCH":
+                mode = "bm25"
         for number in range(decision_steps+1):
             repair_rule = None
             for repair in (0, 1):
@@ -355,6 +397,8 @@ def build_visual_answer(utterances, topics, duration_ms, question, output_dir, *
                            "sampling_notice": "Pictures are bounded samples, not continuous audio/video understanding."}
                 if focused:
                     payload["focus_timestamp_ms"] = focus_timestamp_ms
+                if speech:
+                    payload.update(evidence_policy=evidence_policy, speech_lookup=speech_lookup)
                 content = [{"type": "text", "text": _json(payload)}, *store.images(delivered)]
                 messages = [{"role": "system", "content": system}, {"role": "user", "content": content}]
                 if repair_rule:
@@ -375,7 +419,7 @@ def build_visual_answer(utterances, topics, duration_ms, question, output_dir, *
                 _save(state_path, state)
                 try:
                     action = (_decision(raw, by_id, visible, delivered, plan["remaining_tool_steps"], duration_ms,
-                                        evidence_mode="structured", tool_calls=trace) if structured else
+                                        evidence_mode="structured", tool_calls=trace, speech_policy=speech) if structured else
                               _decision(raw, by_id, visible, delivered, plan["remaining_tool_steps"], duration_ms))
                     break
                 except AgentOutputError as error:
@@ -394,6 +438,8 @@ def build_visual_answer(utterances, topics, duration_ms, question, output_dir, *
                     result["focus_timestamp_ms"] = focus_timestamp_ms
                 if structured:
                     result.update(schema_version="1.3", evidence_mode="structured", answer_blocks=action["answer_blocks"])
+                if speech:
+                    result.update(schema_version="1.4", evidence_policy=evidence_policy, speech_lookup=speech_lookup)
                 validate_visual_answer(result, items, expected={"focus_timestamp_ms": focus_timestamp_ms} if focused else None,
                                        expected_frames=delivered, duration_ms=duration_ms)
                 store.images(delivered)
@@ -446,9 +492,9 @@ def build_visual_answer(utterances, topics, duration_ms, question, output_dir, *
             remaining_context = max(0, remaining_context-len(_json(observation)))
             ids = [u["utterance_id"] for u in observation["utterances"]]
             visible.update(ids)
-            trace.append({"step": number+(2 if focused else 1), "tool_name": name, "arguments": args, "result_utterance_ids": ids, "result_frame_ids": frame_ids})
+            trace.append({"step": number+prelude_steps+1 if speech else number+(2 if focused else 1), "tool_name": name, "arguments": args, "result_utterance_ids": ids, "result_frame_ids": frame_ids})
             observations.append({"tool_name": name, "arguments": args, "result": observation})
-            if focused:
+            if focused or speech:
                 trace[-1]["origin"] = "MODEL"
                 observations[-1]["origin"] = "MODEL"
         raise AgentOutputError("TOOL_LIMIT")

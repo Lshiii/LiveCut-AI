@@ -35,9 +35,9 @@ public final class AgentNoteRenderer {
         identity(result,"source_hash",snapshot.sourceHash());identity(result,"transcript_hash",snapshot.transcriptHash());
         if(!ClipRequestService.sha(ClipRequestService.canonicalJson(result)).equals(snapshot.resultHash()))throw invalid();
         String version=text(result,"schema_version"),scope=text(result,"answer_scope"),question=text(result,"question"),answer=text(result,"answer"),filename=checked(snapshot.sourceFilename());
-        if(!Set.of("1.0","1.1","1.2","1.3").contains(version)||!Set.of("VIDEO","GENERAL","INSUFFICIENT").contains(scope)||filename.isBlank())throw invalid();
-        if(version.equals("1.3")){try{AgentEvidenceAnswerValidator.verifyAssembly(result,result.path("citations"));AgentVisualEvidence.validate(result,snapshot.durationMs());}catch(RuntimeException failure){throw invalid();}}
-        Long focus=null;if(version.equals("1.2")||version.equals("1.3")&&result.has("focus_timestamp_ms")){focus=number(result,"focus_timestamp_ms");if(focus>=snapshot.durationMs())throw invalid();}
+        if(!Set.of("1.0","1.1","1.2","1.3","1.4").contains(version)||!Set.of("VIDEO","GENERAL","INSUFFICIENT").contains(scope)||filename.isBlank())throw invalid();
+        if(Set.of("1.3","1.4").contains(version)){try{JsonNode projection=version.equals("1.4")?AgentSpeechLookupAnswerValidator.noteProjection(result):result;AgentEvidenceAnswerValidator.verifyAssembly(projection,projection.path("citations"));AgentVisualEvidence.validate(projection,snapshot.durationMs());}catch(RuntimeException failure){throw invalid();}}
+        Long focus=null;if(version.equals("1.2")||Set.of("1.3","1.4").contains(version)&&result.has("focus_timestamp_ms")){focus=number(result,"focus_timestamp_ms");if(focus>=snapshot.durationMs())throw invalid();}
         else if(result.has("focus_timestamp_ms"))throw invalid();
         JsonNode citations=array(result,"citations",24),provenance=result.path("provenance");
         var publicProvenance=AgentAnswerValidator.JSON.createObjectNode();for(String key:List.of("text_model_id","prompt_version","retrieval_mode"))publicProvenance.put(key,text(provenance,key));
@@ -72,7 +72,8 @@ public final class AgentNoteRenderer {
             .put("source_hash",snapshot.sourceHash()).put("transcript_hash",snapshot.transcriptHash()).put("result_hash",snapshot.resultHash())
             .put("source_filename",filename).put("duration_ms",snapshot.durationMs()).put("question",question).put("answer_scope",scope);
         source.set("provenance",publicProvenance);source.set("citations",publicCitations);source.set("visual_citations",publicVisualCitations);
-        if(version.equals("1.3")){source.put("evidence_mode","structured");source.set("answer_blocks",result.path("answer_blocks").deepCopy());}
+        if(Set.of("1.3","1.4").contains(version)){source.put("evidence_mode","structured");source.set("answer_blocks",result.path("answer_blocks").deepCopy());}
+        if(version.equals("1.4")){source.put("evidence_policy",AgentSpeechLookup.POLICY);source.set("speech_lookup",result.path("speech_lookup").deepCopy());}
         var publicFrames=source.putArray("visual_evidence");selectedFrames.forEach(frame->publicFrames.add(frame.deepCopy()));
         if(focus!=null)source.put("focus_timestamp_ms",focus);
         byte[] sourceBytes=AgentAnswerValidator.JSON.writeValueAsBytes(source);if(sourceBytes.length>MAX_BYTES)throw tooLarge();
@@ -82,11 +83,12 @@ public final class AgentNoteRenderer {
         out.append(switch(scope){case "GENERAL"->"这是通用知识补充，不能当作视频中已经说过的话。\n\n";case "INSUFFICIENT"->"当前视频证据不足；本笔记保留原回答的不确定性。\n\n";default->"以下为基于本轮视频依据的 AI 回答，仍需结合来源核对。\n\n";});
         if(focus!=null)out.append("用户定位提示：").append(time(focus)).append("（").append(Long.toString(focus)).append(" ms）。这是查找提示，不是已观察画面的证明；实际画面时间见下方。\n\n");
         out.append("## 问题\n\n").append(plainBlock(question)).append("\n\n## 回答\n\n").append(answerMarkdown(answer)).append("\n\n");
-        if(version.equals("1.3")){
+        if(version.equals("1.4"))appendSpeechLookup(out,result);
+        if(Set.of("1.3","1.4").contains(version)){
             AgentEvidenceReview.Review review;try{review=AgentEvidenceReview.fromVerifiedResult(result);}catch(RuntimeException failure){throw invalid();}
             out.append("## 证据核查摘要\n\n").append(review.statusText()).append("\n\n");
             for(String line:review.detailLines())out.append("- ").append(line).append("\n");
-            out.append("\n").append(AgentEvidenceReview.LIMITATION).append("\n\n");
+            out.append("\n").append(version.equals("1.4")?AgentEvidenceReview.LIMITATION_WITH_POLICY:AgentEvidenceReview.LIMITATION).append("\n\n");
         }
         out.append("## 原句依据\n\n");
         if(publicCitations.isEmpty())out.append("本轮没有原句引用，不能把截图中的文字当作已读取的语音原句。\n\n");
@@ -117,6 +119,28 @@ public final class AgentNoteRenderer {
             for(JsonNode frame:selectedFrames){String id=frame.path("frame_id").asText();packaged.append("![").append(id).append(" · ").append(time(frame.path("timestamp_ms").longValue())).append("](").append(imagePath(id)).append(")\n\n");}
         }
         return new Document(markdown,packaged.toString(),sourceBytes);
+    }
+
+    private static void appendSpeechLookup(LimitedText out,JsonNode result){
+        JsonNode receipt=result.path("speech_lookup"),call=result.path("tool_calls").get(receipt.path("tool_step").intValue()-1),args=call.path("arguments");
+        long candidate=receipt.path("candidate_utterance_count").longValue();int returned=receipt.path("returned_utterance_ids").size();
+        out.append("## 程序原句预查\n\n用户明确启用了回答前原句预查；这是程序提供的本地 ASR 观察，不是模型自主选择工具。\n\n")
+            .append("- 工具轨迹：EVIDENCE_POLICY，第 ").append(receipt.path("tool_step").asText()).append(" 步。\n");
+        if(receipt.path("strategy").asText().equals("FOCUS_CONTEXT")){
+            out.append("- 实际范围：以原句 ").append(code(args.path("utterance_id").asText())).append(" 为中心，前后各 1 句；距附加位置 ").append(receipt.path("anchor_distance_ms").asText()).append(" ms。\n");
+        }else{
+            out.append("- 实际范围：本地单句 BM25 问题检索，最多 4 条候选。\n- 实际 query：").append(plainBlock(args.path("query").asText())).append("\n")
+                .append(receipt.path("query_truncated").booleanValue()?"- query 已按 300 个 UTF-16 代码单元截取安全前缀，不能声称覆盖原问题后面的子问题。\n":"- query 未因长度截断；使用去除首尾空白后的原问题。\n");
+            if(!receipt.path("anchor_distance_ms").isNull())out.append("- 最近原句距附加位置 ").append(receipt.path("anchor_distance_ms").asText()).append(" ms，超过 15000 ms，改用问题检索。\n");
+        }
+        StringJoiner ids=new StringJoiner("、");for(JsonNode id:receipt.path("returned_utterance_ids"))ids.add(code(id.asText()));
+        out.append("- 裁剪前候选：").append(Long.toString(candidate)).append(" 条；实际进入首个模型输入：").append(Integer.toString(returned)).append(" 条完整原句。\n")
+            .append("- 实际原句 ID：").append(returned==0?"无":ids.toString()).append("。\n\n");
+        out.append(switch(receipt.path("status").asText()){
+            case "RETURNED"->"状态：RETURNED。本次预查已记录完整原句，不表示相关问题已回答或原句一定支持回答。";
+            case "EMPTY_RETURN"->"状态：EMPTY_RETURN。本次有限查询没有返回原句，不证明全片不存在相关讲解。";
+            default->"状态：CONTEXT_LIMIT。受 10000 个 UTF-16 代码单元的文字预算限制，仅提供能完整装入的原句，没有截断原文。";
+        }).append("\n\n实际取得与作为 SPEECH 引用分别计数；本记录不证明检索排名、相关性或语义正确。\n\n");
     }
 
     private record Part(String marker,List<String> lines) {}

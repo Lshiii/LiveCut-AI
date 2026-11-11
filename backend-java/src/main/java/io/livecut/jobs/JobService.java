@@ -49,7 +49,7 @@ public class JobService {
             row.getString("input_hash"), row.getString("checkpoint_key"), row.getString("checkpoint_hash"),
             row.getString("manifest_key"), row.getString("manifest_hash"), row.getString("error_code"),
             row.getString("owner_type"), row.getString("owner_id"),
-            StageDiagnostics.read(row.getString("diagnostic_json"), row.getString("error_code"), row.getInt("attempt")),TextExecutionPolicy.readProgress(row.getString("text_progress_json")));
+            StageDiagnostics.read(row.getString("diagnostic_json"), row.getString("error_code"), row.getInt("attempt")),TextExecutionPolicy.readProgress(row.getString("text_progress_json")),row.getInt("required_worker_protocol"));
     private final JdbcTemplate jdbc;
     private final TransactionTemplate transaction;
     private final ArtifactVerifier artifactVerifier;
@@ -260,16 +260,25 @@ public class JobService {
     }
 
     public List<ReadyStage> ready(String stageType, int limit, String jobId) {
+        return ready(stageType,limit,jobId,null,null);
+    }
+    public List<ReadyStage> ready(String stageType,int limit,String jobId,String workerId,String sessionId){
         if (limit < 1 || limit > 100) { throw bad("INVALID_ARGUMENT", "limit must be 1..100"); }
         if (stageType != null && !FLOW.contains(stageType) && !Set.of("EXPORT_CLIP","CAPTION_PROOFREAD","ANCHOR_CLIP","AGENT_VISUAL","AGENT_VISUAL_FOCUS","AGENT_EVIDENCE").contains(stageType)) { throw bad("INVALID_ARGUMENT", "Unknown stage type"); }
         String targetJob = jobId == null ? null : uuid(jobId, "INVALID_JOB_ID");
+        if((workerId==null)!=(sessionId==null))throw bad("INVALID_ARGUMENT","Worker and session are required together");
+        WorkerCapacityService.ReadyCapabilities capabilities=workerId==null?null:workers.readyCapabilities(workerId,sessionId,targetJob);
+        if(capabilities!=null&&targetJob==null)targetJob=capabilities.target();
         String predicate = stageType == null ? "" : " AND s.stage_type=?";
         List<Object> parameters = new ArrayList<>();
         if (stageType != null) { parameters.add(stageType); }
         if (targetJob != null) { predicate += " AND s.job_id=?"; parameters.add(targetJob); }
+        List<Integer> protocols=capabilities==null?List.of(1):capabilities.protocols();
+        predicate+=" AND s.required_worker_protocol IN ("+String.join(",",java.util.Collections.nCopies(protocols.size(),"?"))+")";parameters.addAll(protocols);
+        if(capabilities!=null){predicate+=" AND s.stage_type IN ("+String.join(",",java.util.Collections.nCopies(capabilities.types().size(),"?"))+")";parameters.addAll(capabilities.types());}
         parameters.add(limit);
         return jdbc.query("SELECT s.* FROM job_stage s JOIN analysis_job j ON j.id=s.job_id LEFT JOIN export_job e ON s.owner_type='EXPORT' AND e.id=s.owner_id AND e.job_id=s.job_id LEFT JOIN clip_request c ON s.owner_type='CLIP_REQUEST' AND c.id=s.owner_id AND c.job_id=s.job_id LEFT JOIN agent_turn a ON s.owner_type='AGENT_TURN' AND a.id=s.owner_id AND a.job_id=s.job_id WHERE s.status='READY' AND s.next_run_at<=CURRENT_TIMESTAMP(6) AND ((s.owner_type='ANALYSIS' AND j.status IN ('QUEUED','RUNNING')) OR (s.owner_type='EXPORT' AND j.status='REVIEW_READY' AND e.status IN ('QUEUED','RUNNING')) OR (s.owner_type='CLIP_REQUEST' AND j.status='REVIEW_READY' AND c.status IN ('QUEUED','RUNNING')) OR (s.owner_type='AGENT_TURN' AND j.status='REVIEW_READY' AND a.status IN ('QUEUED','RUNNING')))" + predicate + " ORDER BY s.next_run_at,s.id LIMIT ?",
-                (row, index) -> new ReadyStage(row.getString("id"), row.getString("job_id"), row.getString("stage_type"), row.getString("shard_key"), instant(row, "next_run_at")), parameters.toArray());
+                (row, index) -> new ReadyStage(row.getString("id"), row.getString("job_id"), row.getString("stage_type"), row.getString("shard_key"), instant(row, "next_run_at"),row.getInt("required_worker_protocol")==1?null:row.getInt("required_worker_protocol")), parameters.toArray());
     }
 
     public ClaimResult claim(ClaimRequest request) {
@@ -296,7 +305,7 @@ public class JobService {
             if (!requestHash.equals(receipt.get("request_hash"))) { throw conflict("IDEMPOTENCY_CONFLICT", "Claim request ID belongs to a different request"); }
             if (inserted == 0) {
                 if (!java.util.Objects.equals(session, receipt.get("worker_session_id"))) { return noClaim("EXPIRED", stageId); }
-                workers.admit(worker, session, stage.stageType(), jobId, false);
+                workers.admit(worker, session, stage.stageType(), jobId, false,stage.requiredWorkerProtocol());
                 if (!"CLAIMED".equals(receipt.get("outcome"))) {
                     return noClaim("EXPIRED".equals(receipt.get("outcome")) ? "EXPIRED" : "NO_CAPACITY".equals(receipt.get("outcome")) ? "NO_CAPACITY" : "NO_WORK", stageId);
                 }
@@ -310,6 +319,7 @@ public class JobService {
                 }
                 return claimed("ALREADY_CLAIMED", stage, job);
             }
+            if(stage.requiredWorkerProtocol()!=1)workers.admit(worker,session,stage.stageType(),jobId,false,stage.requiredWorkerProtocol());
             if (!activeParent(parent) || !stage.status().equals("READY") || stage.nextRunAt().isAfter(now)) {
                 jdbc.update("UPDATE stage_claim_request SET outcome='NO_WORK' WHERE worker_id=? AND claim_request_id=?", worker, claimId);
                 return noClaim("NO_WORK", stageId);
@@ -319,7 +329,7 @@ public class JobService {
                 jdbc.update("UPDATE stage_claim_request SET outcome='NO_WORK' WHERE worker_id=? AND claim_request_id=?", worker, claimId);
                 return noClaim("NO_WORK", stageId);
             }
-            if (!workers.admit(worker, session, stage.stageType(), jobId, true)) {
+            if (!workers.admit(worker, session, stage.stageType(), jobId, true,stage.requiredWorkerProtocol())) {
                 jdbc.update("UPDATE stage_claim_request SET outcome='NO_CAPACITY' WHERE worker_id=? AND claim_request_id=?", worker, claimId);
                 return noClaim("NO_CAPACITY", stageId);
             }
@@ -645,7 +655,7 @@ public class JobService {
                 isExport(stage) ? exports.manifestIdentity(stage, job).sourceHash() : String.valueOf(video.get("content_hash")),
                 isExport(stage) ? exports.claimConfig(stage) : isClipRequest(stage) ? clips.claimConfig(stage) : isAgentTurn(stage) ? agents.claimConfig(stage) : analysisClaimConfig(job), artifacts,
                 stage.checkpointKey(), stage.checkpointHash(), stage.inputHash(),
-                String.valueOf(job.get("video_id")), ((Number) job.get("generation")).intValue());
+                String.valueOf(job.get("video_id")), ((Number) job.get("generation")).intValue(),stage.requiredWorkerProtocol()==1?null:stage.requiredWorkerProtocol());
     }
 
     private Map<String, Object> analysisClaimConfig(Map<String, Object> job) {
@@ -655,7 +665,7 @@ public class JobService {
         return config;
     }
 
-    private static ClaimResult noClaim(String outcome, String stageId) { return new ClaimResult(outcome, stageId, null, null, null, null, null, null, null, null, null, null, List.of(), null, null, null, null, 0); }
+    private static ClaimResult noClaim(String outcome, String stageId) { return new ClaimResult(outcome, stageId, null, null, null, null, null, null, null, null, null, null, List.of(), null, null, null, null, 0,null); }
 
     private void touch(String id, String status) {
         if (status == null) { jdbc.update("UPDATE analysis_job SET state_version=state_version+1,updated_at=CURRENT_TIMESTAMP(6) WHERE id=?", id); }
