@@ -190,6 +190,31 @@ def _artifact_key(value: Any) -> bool:
                     for part in value.split("/")))
 
 
+def _oversized_ocr_segment(manifest: dict, prefix: str) -> bool:
+    """Match only the bounded OCR cohort emitted by generic analysis SEGMENT.
+
+    Legacy manifests of at most 64 entries retain their existing validation.
+    This is a shape allowance, not evidence that referenced files were opened.
+    """
+    artifacts = manifest["artifacts"]
+    if (manifest["stage_type"] != "SEGMENT" or manifest["data_kind"] != "model_result"
+            or len(artifacts) > 126 or any(not isinstance(row, dict) for row in artifacts)):
+        return False
+    paths = {"analysis_result": "analysis-result.json",
+             "ocr_cache_provenance": "ocr/cache-provenance.json",
+             "ocr_observations": "ocr/observations.json", "ocr_frames": "ocr/frames.json",
+             "ocr_state": "ocr/ocr-state.json"}
+    if any(row.get("kind") == "text_execution_trace" for row in artifacts):
+        paths["text_execution_trace"] = "text-execution-trace.json"
+    frame_count = len(artifacts) - len(paths)
+    if not 1 <= frame_count <= 120:
+        return False
+    paths.update((f"ocr_frame_{index:06d}", f"ocr/frames/ocr_{index:06d}.jpg")
+                 for index in range(1, frame_count + 1))
+    return all(isinstance(row.get("kind"), str) and row["kind"] in paths
+               and row.get("key") == prefix + paths[row["kind"]] for row in artifacts)
+
+
 def _manifest_binding(manifest: Any, prediction: dict, source_hash: str,
                       prediction_hash: Any) -> None:
     if not isinstance(manifest, dict) or not _digest(prediction_hash):
@@ -209,11 +234,12 @@ def _manifest_binding(manifest: Any, prediction: dict, source_hash: str,
             or not re.fullmatch(r"[A-Za-z0-9_-]{16,64}", manifest["run_token"])):
         raise _invalid("EVALUATION_BINDING_MISMATCH")
     artifacts = manifest["artifacts"]
-    if not isinstance(artifacts, list) or not 1 <= len(artifacts) <= 64:
-        raise _invalid("INVALID_EVALUATION_MANIFEST")
-    matches, keys, kinds = [], set(), set()
     prefix = (f"jobs/{manifest['job_id']}/stages/{manifest['stage_id']}/attempts/"
               f"{manifest['attempt']}/{manifest['run_token']}/")
+    if (not isinstance(artifacts, list) or not artifacts
+            or len(artifacts) > 64 and not _oversized_ocr_segment(manifest, prefix)):
+        raise _invalid("INVALID_EVALUATION_MANIFEST")
+    matches, keys, kinds = [], set(), set()
     for artifact in artifacts:
         if (not isinstance(artifact, dict) or set(artifact) != {"kind", "key", "sha256"}
                 or not isinstance(artifact["kind"], str)

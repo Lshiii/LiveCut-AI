@@ -41,6 +41,11 @@ public class ArtifactVerifier {
             "MEDIA", Set.of("media_info", "audio"), "ASR", Set.of("transcript"),
             "SEGMENT", Set.of("analysis_result"), "TIMELINE", Set.of("analysis_result"),
             "EXPORT_CLIP", Set.of("clip", "media_info"), "CAPTION_PROOFREAD", Set.of("caption_proofread"),"ANCHOR_CLIP",Set.of("clip_plan"),"AGENT_VISUAL",Set.of("agent_answer"),"AGENT_VISUAL_FOCUS",Set.of("agent_answer"),"AGENT_EVIDENCE",Set.of("agent_answer"));
+    private static final Map<String, String> OCR_PUBLICATION_FILES = Map.of(
+            "analysis_result", "analysis-result.json", "ocr_cache_provenance", "ocr/cache-provenance.json",
+            "ocr_observations", "ocr/observations.json", "ocr_frames", "ocr/frames.json", "ocr_state", "ocr/ocr-state.json",
+            "text_execution_trace", "text-execution-trace.json");
+    private static final Set<String> OCR_REQUIRED_KINDS = Set.of("analysis_result", "ocr_cache_provenance", "ocr_observations", "ocr_frames", "ocr_state");
     private static final JsonMapper JSON = JsonMapper.builder()
             .enable(StreamReadFeature.STRICT_DUPLICATE_DETECTION)
             .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS).build();
@@ -214,7 +219,8 @@ public class ArtifactVerifier {
             } else if(manifest.has("parts")||manifest.has("clip_request_id"))throw invalidManifest();
         } else if (!text(manifest, "data_kind", "model_result") || !text(manifest, "review_status", "DRAFT")) { throw invalidManifest(); }
         JsonNode artifacts = manifest.path("artifacts");
-        if (!artifacts.isArray() || artifacts.isEmpty() || artifacts.size() > 64) { throw invalidManifest(); }
+        if (!artifacts.isArray() || artifacts.isEmpty() || artifacts.size() > 126
+                || artifacts.size() > 64 && !largeOcrPublication(artifacts, expected, export, specialKind)) { throw invalidManifest(); }
         Set<String> kinds = new HashSet<>();
         Set<String> keys = new HashSet<>();
         List<VerifiedArtifact> verified = new ArrayList<>();
@@ -233,6 +239,28 @@ public class ArtifactVerifier {
         if (!kinds.containsAll(specialKind==null?REQUIRED_KINDS.get(expected.stageType()):Set.of(specialKind))) { throw invalidManifest(); }
         if(export!=null&&export.captionRender()!=null&&!kinds.contains("caption_render_info"))throw invalidManifest();
         return new VerifiedManifest(verified);
+    }
+
+    /** The existing Worker can publish 120 OCR JPEGs plus five fixed files and one trace. */
+    private static boolean largeOcrPublication(JsonNode artifacts, ManifestIdentity expected, ExportIdentity export, String specialKind) {
+        if (export != null || specialKind != null || !"SEGMENT".equals(expected.stageType())) return false;
+        Set<String> kinds = new HashSet<>(); Set<Integer> frames = new HashSet<>(); String prefix = expected.attemptPrefix();
+        for (JsonNode artifact : artifacts) {
+            if (!artifact.isObject() || !artifact.propertyNames().equals(Set.of("kind", "key", "sha256"))
+                    || !artifact.path("kind").isString() || !artifact.path("key").isString()) return false;
+            String kind = artifact.path("kind").stringValue(), key = artifact.path("key").stringValue();
+            if (!kinds.add(kind)) return false;
+            String fixed = OCR_PUBLICATION_FILES.get(kind);
+            if (fixed != null) { if (!key.equals(prefix + fixed)) return false; }
+            else {
+                if (!kind.matches("ocr_frame_[0-9]{6}")) return false;
+                String digits = kind.substring("ocr_frame_".length()); int frame = Integer.parseInt(digits);
+                if (frame < 1 || frame > 120 || !frames.add(frame) || !key.equals(prefix + "ocr/frames/ocr_" + digits + ".jpg")) return false;
+            }
+        }
+        if (!kinds.containsAll(OCR_REQUIRED_KINDS) || frames.isEmpty()) return false;
+        for (int frame = 1; frame <= frames.size(); frame++) if (!frames.contains(frame)) return false;
+        return artifacts.size() == OCR_REQUIRED_KINDS.size() + frames.size() + (kinds.contains("text_execution_trace") ? 1 : 0);
     }
 
     /** Checkpoints are opaque provider/worker state, not a model-quality assertion. */

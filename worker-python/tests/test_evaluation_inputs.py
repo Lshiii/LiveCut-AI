@@ -11,6 +11,7 @@ import pytest
 from livecut.evaluation_inputs import (
     MAX_JSON_BYTES,
     EvaluationInputError,
+    _manifest_binding,
     load_json,
     validate_annotation,
     validate_evaluation_binding,
@@ -250,6 +251,96 @@ def test_manifest_rejects_duplicate_non_prediction_kinds_like_the_java_publisher
                                         "sha256": "d" * 64})
     with pytest.raises(EvaluationInputError):
         bound(pred, reference, manifest=value_manifest)
+
+
+def ocr_manifest(pred: dict, frames: int, trace: bool = True) -> dict:
+    value = manifest(pred)
+    prefix = value["artifacts"][0]["key"].rsplit("/", 1)[0] + "/"
+    paths = {"ocr_cache_provenance": "ocr/cache-provenance.json",
+             "ocr_observations": "ocr/observations.json", "ocr_frames": "ocr/frames.json",
+             "ocr_state": "ocr/ocr-state.json"}
+    paths.update((f"ocr_frame_{index:06d}", f"ocr/frames/ocr_{index:06d}.jpg")
+                 for index in range(1, frames + 1))
+    if trace:
+        paths["text_execution_trace"] = "text-execution-trace.json"
+    value["artifacts"].extend({"kind": kind, "key": prefix + key, "sha256": "c" * 64}
+                              for kind, key in paths.items())
+    return value
+
+
+@pytest.mark.parametrize("frames,trace", [(58, True), (59, True), (60, False),
+                                          (120, False), (120, True)])
+def test_complete_bounded_ocr_segment_manifests_can_be_evaluated_without_opening_files(frames, trace):
+    pred, reference = real_pair()
+    value = ocr_manifest(pred, frames, trace)
+    original = deepcopy(value)
+    bound(pred, reference, manifest=value)
+    assert value == original
+
+
+@pytest.mark.parametrize("mutation", ["timeline", "missing_meta", "gap", "wrong_frame_path",
+                                     "wrong_meta_path", "unrelated", "too_many", "duplicate",
+                                     "extra_field", "bad_hash", "cross_attempt"])
+def test_large_ocr_allowance_rejects_incomplete_or_unrelated_cohorts(mutation):
+    pred, reference = real_pair()
+    value = ocr_manifest(pred, 120)
+    artifacts = value["artifacts"]
+    frame = next(row for row in artifacts if row["kind"] == "ocr_frame_000001")
+    if mutation == "timeline":
+        value["stage_type"] = "TIMELINE"
+    elif mutation == "missing_meta":
+        artifacts[:] = [row for row in artifacts if row["kind"] != "ocr_state"]
+    elif mutation == "gap":
+        artifacts[:] = [row for row in artifacts if row["kind"] != "ocr_frame_000002"]
+    elif mutation == "wrong_frame_path":
+        frame["key"] = frame["key"].replace("ocr_000001.jpg", "other.jpg")
+    elif mutation == "wrong_meta_path":
+        artifacts[1]["key"] = artifacts[1]["key"].replace("cache-provenance", "other")
+    elif mutation == "unrelated":
+        frame["kind"] = "agent_answer"
+    elif mutation == "too_many":
+        value = ocr_manifest(pred, 121, trace=False)
+    elif mutation == "duplicate":
+        artifacts[-2] = dict(frame)
+    elif mutation == "extra_field":
+        frame["extra"] = True
+    elif mutation == "bad_hash":
+        frame["sha256"] = "A" * 64
+    elif mutation == "cross_attempt":
+        frame["key"] = frame["key"].replace("/attempts/1/", "/attempts/2/")
+    with pytest.raises(EvaluationInputError, match="INVALID_EVALUATION_MANIFEST"):
+        bound(pred, reference, manifest=value)
+
+
+def test_large_ocr_exception_does_not_expand_synthetic_or_ordinary_manifests():
+    pred, reference = prediction(), annotation()
+    with pytest.raises(EvaluationInputError, match="INVALID_EVALUATION_MANIFEST"):
+        bound(pred, reference, manifest=ocr_manifest(pred, 120), fixture=True)
+    pred, reference = real_pair()
+    value = manifest(pred)
+    prefix = value["artifacts"][0]["key"].rsplit("/", 1)[0] + "/"
+    value["artifacts"].extend({"kind": f"legacy_{index}", "key": prefix + f"legacy-{index}.json",
+                                "sha256": "c" * 64} for index in range(63))
+    bound(pred, reference, manifest=value)
+    value["artifacts"].append({"kind": "legacy_63", "key": prefix + "legacy-63.json", "sha256": "c" * 64})
+    with pytest.raises(EvaluationInputError, match="INVALID_EVALUATION_MANIFEST"):
+        bound(pred, reference, manifest=value)
+
+
+@pytest.mark.parametrize("case", load_json(
+    ROOT / "fixtures/ocr-segment-artifact-capacity.synthetic.json")["cases"],
+    ids=lambda case: case["case_id"])
+def test_java_shared_ocr_manifest_capacity_cases(case):
+    value = case["manifest"]
+    pred = {name: value[name] for name in ("job_id", "video_id", "analysis_generation", "data_kind")}
+    result_hash = next(row["sha256"] for row in value["artifacts"] if row["kind"] == "analysis_result")
+    before = deepcopy(value)
+    if case["expected_valid"]:
+        _manifest_binding(value, pred, value["input_sha256"], result_hash)
+    else:
+        with pytest.raises(EvaluationInputError):
+            _manifest_binding(value, pred, value["input_sha256"], result_hash)
+    assert value == before
 
 
 def test_json_limits_flags_and_unreadable_files_fail_safely(tmp_path):
