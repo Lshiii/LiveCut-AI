@@ -310,7 +310,7 @@ test('screen radio is explicit, preserves outer-off selection and fresh source i
 })
 
 test('screen missing OCR, old source route, malformed source and unverifiable v4 queue leave zero entries and zero POST', async () => {
-  for (const failure of ['no-ocr', 'route404', 'invalid-source', 'no-v4', 'cap503', 'bad-cap']) {
+  for (const failure of ['no-ocr', 'corrupt-source', 'route404', 'invalid-source', 'no-v4', 'cap503', 'bad-cap']) {
     const ui = await mount()
     try {
       await ui.setVisual('frames'); await ui.setEvidence(true); await ui.setScreen(); await ui.fill('保留画面查找')
@@ -318,6 +318,7 @@ test('screen missing OCR, old source route, malformed source and unverifiable v4
         if (path.endsWith('/agent-screen-source')) {
           assert.equal(ui.storage.length, 0)
           if (failure === 'no-ocr') throw new HttpError('AGENT_SCREEN_SOURCE_UNAVAILABLE', undefined, 409)
+          if (failure === 'corrupt-source') throw new HttpError('AGENT_SCREEN_SOURCE_INVALID', undefined, 409)
           if (failure === 'route404') throw new HttpError('HTTP_404', undefined, 404)
           if (failure === 'invalid-source') return { screen_source: { ...screenSample().turn.screen_source, secret_path: '/private' } }
         }
@@ -332,9 +333,63 @@ test('screen missing OCR, old source route, malformed source and unverifiable v4
       assert.equal(ui.storage.length, 0); assert.equal(ui.calls.filter(call => call.init.method === 'POST').length, 0)
       assert.equal(ui.question().value, '保留画面查找'); assert.equal(ui.nodes().find(node => node.props['aria-label'] === '搜索画面文字并看图')!.checked, true)
       if (failure === 'no-ocr') assert.match(hostText(ui.root), /不会自动解析或 OCR/)
+      if (failure === 'corrupt-source') assert.match(hostText(ui.root), /已发布画面文字来源未通过校验/)
       if (failure === 'route404') assert.match(hostText(ui.root), /升级后重试/)
     } finally { ui.close() }
   }
+})
+
+test('screen source GET transport and server failures keep an unsubmitted draft that can be explicitly retried', async () => {
+  for (const failure of [
+    { code: 'REQUEST_TIMEOUT' }, { code: 'NETWORK_UNAVAILABLE' },
+    { code: 'HTTP_503', status: 503 }, { code: 'SERVICE_UNAVAILABLE', status: 503 },
+  ]) {
+    const ui = await mount()
+    try {
+      await ui.setVisual('frames'); await ui.setEvidence(true); await ui.setScreen(); await ui.fill('暂存待查的画面问题')
+      ui.setHandle(async (path, init) => {
+        if (path.endsWith('/agent-screen-source')) throw new HttpError(failure.code, undefined, failure.status)
+        return ui.defaultHandle(path, init)
+      })
+      await ui.submit(); await settle(() => !ui.exposed.value.pending)
+      assert.equal(ui.storage.length, 0); assert.equal(ui.calls.filter(call => call.init.method === 'POST').length, 0)
+      assert.match(hostText(ui.root), /画面文字来源核对暂时失败；本次未提交，草稿保留，请稍后重试发送/)
+      assert.doesNotMatch(hostText(ui.root), /提交结果尚未确认|核对原提交/)
+      assert.equal(ui.question().value, '暂存待查的画面问题'); assert.equal(ui.evidenceCheckbox()!.checked, true)
+      assert.equal(ui.nodes().find(node => node.props['aria-label'] === '搜索画面文字并看图')!.checked, true)
+      assert.equal(ui.button('开始提问 ↑').props.disabled, false)
+      await flushHost()
+      assert.equal(ui.calls.filter(call => call.path.endsWith('/agent-screen-source')).length, 1)
+      ui.setHandle(ui.defaultHandle); await ui.submit(); await settle(() => !ui.exposed.value.pending)
+      assert.equal(ui.calls.filter(call => call.path.endsWith('/agent-screen-source')).length, 2)
+      assert.equal(ui.calls.filter(call => call.path.endsWith('/turns') && call.init.method === 'POST').length, 1)
+      assert.equal(ui.storage.length, 0); assert.equal(ui.question().value, '')
+    } finally { ui.close() }
+  }
+})
+
+test('screen TURN POST timeout retains the exact receipt and requires original-submission reconciliation', async () => {
+  const ui = await mount()
+  try {
+    await ui.setVisual('frames'); await ui.setEvidence(true); await ui.setScreen(); await ui.fill('已经发送的画面问题')
+    ui.setHandle(async (path, init) => {
+      const value = await ui.defaultHandle(path, init)
+      if (path.endsWith('/turns') && init.method === 'POST') throw new HttpError('REQUEST_TIMEOUT')
+      return value
+    })
+    await ui.submit(); await settle(() => !ui.exposed.value.pending)
+    const posts = ui.calls.filter(call => call.path.endsWith('/turns') && call.init.method === 'POST')
+    assert.equal(posts.length, 1); assert.equal(ui.storage.length, 1)
+    const receipt = JSON.parse([...ui.storage.values.values()][0]!)
+    assert.equal(receipt.key, posts[0]!.init.headers['Idempotency-Key']); assert.equal(receipt.input, posts[0]!.init.body)
+    assert.match(hostText(ui.root), /提交结果尚未确认/); assert.doesNotMatch(hostText(ui.root), /画面文字来源核对暂时失败/)
+    assert.equal(ui.question().value, '已经发送的画面问题')
+    const before = ui.calls.length
+    ui.setHandle(ui.defaultHandle); await ui.click('核对原提交'); await settle(() => !ui.exposed.value.pending && ui.storage.length === 0)
+    assert.ok(ui.calls.slice(before).some(call => call.path.includes('/turn-submissions/')))
+    assert.ok(!ui.calls.slice(before).some(call => call.init.method === 'POST' || call.path.endsWith('/agent-screen-source')))
+    assert.equal(ui.calls.filter(call => call.path.endsWith('/turns') && call.init.method === 'POST').length, 1)
+  } finally { ui.close() }
 })
 
 test('hidden late screen source cannot create entry or write; returning performs a fresh source GET', async () => {
