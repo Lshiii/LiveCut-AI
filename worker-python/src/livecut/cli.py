@@ -9,6 +9,12 @@ import sys
 from dataclasses import asdict
 from pathlib import Path
 
+from .agent_evidence_evaluation import EvidenceEvaluationError
+from .agent_evidence_evaluation_runner import (
+    evaluate_agent_evidence_files,
+    evidence_reference_template,
+    write_agent_evidence_reference,
+)
 from .asr import ASRError, transcribe_file
 from .contracts import ContractValidationError, validate_analysis_result
 from .evaluation import EvaluationError
@@ -70,6 +76,23 @@ def main(argv: list[str] | None = None) -> int:
         command.add_argument("--fixture", action="store_true", help="Synthetic inputs only; no real quality conclusion")
         command.add_argument("--output-dir", type=Path, required=True)
         command.add_argument("--ffprobe", default=os.environ.get("LIVECUT_FFPROBE_PATH", "ffprobe"))
+    agent_reference = sub.add_parser("init-agent-evidence-reference", help="Prepare an unlabeled, source-bound question evidence reference offline")
+    agent_reference.add_argument("source", type=Path)
+    agent_reference.add_argument("transcript", type=Path)
+    agent_reference.add_argument("--video-id", required=True)
+    agent_reference.add_argument("--question", required=True)
+    agent_reference.add_argument("--output", type=Path, required=True)
+    agent_reference.add_argument("--ffprobe", default=os.environ.get("LIVECUT_FFPROBE_PATH", "ffprobe"))
+    agent_evaluation = sub.add_parser("evaluate-agent-evidence", help="Compare required evidence with validated tool traces and citations offline; no semantic score")
+    agent_evaluation.add_argument("answer", type=Path)
+    agent_evaluation.add_argument("reference", type=Path)
+    agent_evaluation.add_argument("--transcript", type=Path, required=True)
+    agent_evaluation.add_argument("--source", type=Path)
+    agent_evaluation.add_argument("--answer-manifest", type=Path)
+    agent_evaluation.add_argument("--storage-root", type=Path)
+    agent_evaluation.add_argument("--fixture", action="store_true", help="Synthetic metadata only; incompatible with real-source parameters")
+    agent_evaluation.add_argument("--output-dir", type=Path, required=True)
+    agent_evaluation.add_argument("--ffprobe", default=os.environ.get("LIVECUT_FFPROBE_PATH", "ffprobe"))
     sub.add_parser("doctor", help="Report tools and credential presence, never secret values")
     worker = sub.add_parser("worker", help="Execute leased Java stages with durable model budgets")
     worker.add_argument("--java-url", default=os.environ.get("LIVECUT_JAVA_URL", "http://127.0.0.1:8080"))
@@ -222,6 +245,16 @@ def main(argv: list[str] | None = None) -> int:
             validate_annotation(document, require_annotated=args.require_annotated)
             _emit({"status": "valid", "annotation_status": document["annotation_status"],
                    "scorable": document["annotation_status"] != "not_annotated"})
+        elif args.command == "init-agent-evidence-reference":
+            document = evidence_reference_template(args.source, args.transcript, video_id=args.video_id,
+                                                   question=args.question, ffprobe_path=args.ffprobe)
+            write_agent_evidence_reference(args.output, document)
+            _emit({"status": "created", "annotation_status": "not_annotated", "scorable": False})
+        elif args.command == "evaluate-agent-evidence":
+            report = evaluate_agent_evidence_files(args.answer, args.reference, transcript_path=args.transcript,
+                source=args.source, answer_manifest=args.answer_manifest, storage_root=args.storage_root,
+                fixture=args.fixture, output_dir=args.output_dir, ffprobe_path=args.ffprobe)
+            _emit(report)
         elif args.command in {"evaluate-localization", "audit-localization"}:
             common = {"output_dir": args.output_dir, "source": args.source,
                       "prediction_manifest": args.prediction_manifest, "fixture": args.fixture,
@@ -322,7 +355,7 @@ def main(argv: list[str] | None = None) -> int:
                    "credentials_verified": False})
         return 0
     except (MediaError, ASRError, SegmentationError, PipelineError, VisionError,
-            WorkerError, WorkerClientError, ModelBudgetError, EvaluationError, EvaluationInputError) as exc:
+            WorkerError, WorkerClientError, ModelBudgetError, EvaluationError, EvaluationInputError, EvidenceEvaluationError) as exc:
         _emit({"status": "error", "error_code": exc.code, "message": str(exc)})
         return 2
     except (ContractValidationError, DatasetValidationError, ValueError, OSError) as exc:

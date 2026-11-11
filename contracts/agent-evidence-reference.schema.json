@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://livecut.local/contracts/agent-evidence-reference.schema.json",
+  "title": "Declared question-level evidence reference; not an answer correctness label",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "data_kind", "reference_id", "source", "question", "annotation_status", "provenance", "requirements"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "data_kind": {"const": "agent_evidence_reference"},
+    "reference_id": {"$ref": "#/$defs/id"},
+    "source": {
+      "type": "object", "additionalProperties": false,
+      "required": ["video_id", "source_sha256", "transcript_sha256", "duration_ms"],
+      "properties": {
+        "video_id": {"$ref": "#/$defs/id"},
+        "source_sha256": {"$ref": "#/$defs/hash"},
+        "transcript_sha256": {"$ref": "#/$defs/hash"},
+        "duration_ms": {"type": "integer", "minimum": 1, "maximum": 9007199254740991}
+      }
+    },
+    "question": {"type": "string", "minLength": 1, "maxLength": 2000, "x-max-utf16-units": 2000},
+    "annotation_status": {"enum": ["not_annotated", "annotated"]},
+    "provenance": {
+      "type": "object", "additionalProperties": false,
+      "required": ["label_source", "split", "independently_reviewed"],
+      "properties": {
+        "label_source": {"enum": ["unlabeled", "agent_assisted", "human"]},
+        "split": {"enum": ["dev", "test"]},
+        "independently_reviewed": {"type": "boolean"}
+      }
+    },
+    "requirements": {
+      "type": "array", "maxItems": 200,
+      "items": {"oneOf": [{"$ref": "#/$defs/asr"}, {"$ref": "#/$defs/frame"}]}
+    },
+    "notes": {"type": "string", "maxLength": 2000}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"annotation_status": {"const": "not_annotated"}}},
+      "then": {"properties": {
+        "requirements": {"maxItems": 0},
+        "provenance": {"properties": {"label_source": {"const": "unlabeled"}, "split": {"const": "dev"}, "independently_reviewed": {"const": false}}}
+      }},
+      "else": {"properties": {
+        "requirements": {"minItems": 1},
+        "provenance": {"properties": {"label_source": {"enum": ["human", "agent_assisted"]}}}
+      }}
+    },
+    {
+      "if": {"properties": {"provenance": {"properties": {"label_source": {"const": "agent_assisted"}}}}},
+      "then": {"properties": {"provenance": {"properties": {"split": {"const": "dev"}, "independently_reviewed": {"const": false}}}}}
+    },
+    {
+      "if": {"properties": {"provenance": {"properties": {"label_source": {"const": "human"}, "split": {"const": "test"}}}}},
+      "then": {"properties": {"provenance": {"properties": {"independently_reviewed": {"const": true}}}}}
+    }
+  ],
+  "$defs": {
+    "id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$"},
+    "hash": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "time": {"type": "integer", "minimum": 0, "maximum": 9007199254740991},
+    "asr": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "modality", "acceptable_utterance_ids"],
+      "properties": {
+        "id": {"$ref": "#/$defs/id"}, "modality": {"const": "ASR"},
+        "acceptable_utterance_ids": {"type": "array", "minItems": 1, "maxItems": 200, "uniqueItems": true, "items": {"$ref": "#/$defs/id"}}
+      }
+    },
+    "frame": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "modality", "start_ms", "end_ms"],
+      "properties": {
+        "id": {"$ref": "#/$defs/id"}, "modality": {"const": "FRAME"},
+        "start_ms": {"$ref": "#/$defs/time"},
+        "end_ms": {"type": "integer", "minimum": 1, "maximum": 9007199254740991}
+      }
+    }
+  }
+}

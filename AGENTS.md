@@ -44,6 +44,7 @@
 - 单JAR工作台按 docs/76-单JAR工作台交付.md：仅opt-in workbench profile与全新独立输出，完整冻结UI及上传hash Worker，保持API/internal真实404和鉴权，不加SPA兜底。profile clean必须固定跳过防validate之前误删；源码/dist/包字节一致且不加载私有配置、不启动服务/Worker/模型。普通target不得污染，失败产物保留而不冒充成功。外置配置及repo/portable相对路径基准分开，切origin不自动迁移或清除草稿/未决回执；运行Java仍可能迁移DB与扫描维护，不称只读。此前自动UI启动被审批拒绝，不可换服务或端口绕过；无监听MockMvc、包检与有限静态浏览器验收需标明实际范围。
 - OCR高帧发布按 docs/77-OCR高帧结果发布.md：仅普通分析SEGMENT超过64项时放行完整固定OCR清单，最多120个连续编号JPEG、5项固定产物及可选trace，共126项；其他类型、旧≤64行为及来源/hash/租约守卫保持。Java与Python共享合成边界Fixture，不把结构验收说成识别效果，也不自动复活旧失败任务、重置预算或重发UNKNOWN请求。
 - Agent画面文字定位按 docs/78-Agent画面文字定位.md：显式screen_search_v1/1.5/协议4，仅同任务已发布完整OCR，冻结私有来源及公开index摘要，不读取全局cache或自动重跑；复合MODEL工具用原requested取标准新图并核exact有理PTS，不把OCR当ASR/图片或变化证据。HashRow只对raw UTF-8文字先SHA，保旧canonical；全部请求含重试仍计原账本，500 UNKNOWN记录保留。旧1.0～1.4、未决body及协议3恢复不扩范围；公开验证不假称重算完整index，内部投影不改真实轨迹。
+- Agent必要证据覆盖评测按 docs/79-Agent必要证据覆盖评测.md：仅离线读取来源绑定的参考、原转写、既有回答与本地文件，分开取得、引用和未评测的语义质量。ASR组内OR、FRAME实际有理PTS半开窗；首取得origin与后续复用分别记录，未标注N/A。合成、辅助开发参考及声明独立人工参考分别标明，局部要求不当完整负例；本地manifest/JPEG一致性不冒充在线发布或供应商真实性，不改旧SYSTEM/缓存/预算，不新增模型或业务请求。
 - 按 docs/03-AI开发任务书.md 的关口推进，先真实算法验证，再扩建前端与 MQ。
 - contracts 是跨 Java/Python/前端的共同契约；字段变更同步文档与各调用方。
 

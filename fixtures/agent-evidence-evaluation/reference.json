@@ -1,0 +1,46 @@
+{
+  "schema_version": "1.0",
+  "data_kind": "agent_evidence_reference",
+  "reference_id": "synthetic-required-evidence-v1",
+  "source": {
+    "video_id": "44444444-4444-4444-8444-444444444444",
+    "source_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "transcript_sha256": "cda760cc5987c94a64074ee6c625a6f53e9399d4e304ff43204339f61bb5f896",
+    "duration_ms": 4000
+  },
+  "question": "合成示例：画面前后发生什么变化，讲者怎样说明？",
+  "annotation_status": "annotated",
+  "provenance": {
+    "label_source": "agent_assisted",
+    "split": "dev",
+    "independently_reviewed": false
+  },
+  "requirements": [
+    {
+      "id": "speaker-explanation",
+      "modality": "ASR",
+      "acceptable_utterance_ids": [
+        "u1"
+      ]
+    },
+    {
+      "id": "before-view",
+      "modality": "FRAME",
+      "start_ms": 1000,
+      "end_ms": 1500
+    },
+    {
+      "id": "after-view",
+      "modality": "FRAME",
+      "start_ms": 1500,
+      "end_ms": 2000
+    },
+    {
+      "id": "unobserved-later-view",
+      "modality": "FRAME",
+      "start_ms": 3000,
+      "end_ms": 3500
+    }
+  ],
+  "notes": "合成回归演示；没有真实JPEG、原视频或模型调用。文字与画面答复是程序构造的合成数据，不能当作模型质量对照。"
+}

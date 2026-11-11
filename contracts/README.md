@@ -111,6 +111,8 @@ uv run pytest worker-python/tests/test_contracts.py worker-python/tests/test_inp
 
 `livecut evaluate-localization` 对未经人工修改的 DRAFT 预测做来源绑定及一对一定位评测；没有参考时使用 `livecut audit-localization`，不会输出质量分数。完整命令和部分标注口径见 [离线定位评测](../docs/23-离线定位评测与证据审计.md)。
 
+`agent-evidence-reference.schema.json` 用于离线 Agent 证据覆盖评测：冻结单个问题及视频/转写来源，列出 ASR 组内可选原句或 FRAME 半开时间窗。未标注模板不产生覆盖率，辅助开发参考不能提升为独立人工测试参考。`livecut evaluate-agent-evidence` 复用既有 1.0～1.5 回答校验，分开轨迹取得与引用用途，不评分语义或修改原结果。合成运行示例位于 `fixtures/agent-evidence-evaluation/`，完整参数与文件核验边界见 [评测指南](../docs/79-Agent必要证据覆盖评测.md)。
+
 ## 确认字幕烧录输入 v1
 
 [caption-render-spec.schema.json](./caption-render-spec.schema.json) 定义独立派生 EXPORT_CLIP 的小型冻结输入，包含已验证 clean MP4、确认字幕修订与 cues 文件、固定字体、样式和输出几何。canonical hash 绑定 claim、checkpoint 与新 captioned_export manifest；旧 reviewed_export 分支继续保持。本文 Schema 检查结构，三端另核验来源/相对 key/真实字节哈希、时序、非重叠、允许的固定参数与租约。API、进度及验收见 [带字幕成片](../docs/49-带字幕成片导出.md)。
