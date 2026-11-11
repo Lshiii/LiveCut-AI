@@ -37,12 +37,12 @@ class AgentNoteRendererTests {
         var result=answer("1.0");citation(result,"u1",3_600_001,3_601_999,"完整原句 😀\n第二行\n");var document=AgentNoteRenderer.render(snapshot(result,Map.of()));
         assertTrue(document.markdown().contains("为什么分两条路径？"));assertTrue(document.markdown().contains("1. **有效**"));assertTrue(document.markdown().contains("2. **过期**"));assertTrue(document.markdown().contains("`旧工具结果`"));
         assertTrue(document.markdown().contains("01:00:00.001 → 01:00:01.999"));assertTrue(document.markdown().contains("3600001–3601999 ms"));assertTrue(document.markdown().contains("完整原句 😀  \n第二行  \n"));
-        assertEquals(document.markdown(),document.packageMarkdown());var source=JSON.readTree(document.sourceJson());assertEquals("完整原句 😀\n第二行\n",source.path("citations").get(0).path("text").asText());assertTrue(source.path("visual_evidence").isEmpty());
+        assertEquals(document.markdown(),document.packageMarkdown());assertFalse(document.markdown().contains("## 证据核查摘要"));var source=JSON.readTree(document.sourceJson());assertEquals("完整原句 😀\n第二行\n",source.path("citations").get(0).path("text").asText());assertTrue(source.path("visual_evidence").isEmpty());
     }
     @Test void bothVisualVersionsPackageOnlyReferencedFramesUsingFixedRelativePaths(){
         for(String version:List.of("1.1","1.2")){
             var result=answer(version);frame(result,"f0001",0,false);frame(result,"f0003",162533,true);var document=AgentNoteRenderer.render(snapshot(result,Map.of("f0003",JPEG)));
-            assertTrue(document.markdown().contains("本轮没有原句引用"));assertTrue(document.markdown().contains("图片文件包含在 ZIP 中"));assertFalse(document.markdown().contains("!["));
+            assertTrue(document.markdown().contains("本轮没有原句引用"));assertTrue(document.markdown().contains("图片文件包含在 ZIP 中"));assertFalse(document.markdown().contains("!["));assertFalse(document.markdown().contains("## 证据核查摘要"));
             assertTrue(document.packageMarkdown().startsWith(document.markdown()));assertTrue(document.packageMarkdown().contains("![f0003 · 00:02:42.533](images/f0003.jpg)"));assertFalse(document.packageMarkdown().contains("images/f0001.jpg"));
             var source=JSON.readTree(document.sourceJson());assertEquals(1,source.path("visual_evidence").size());assertEquals("f0003",source.path("visual_evidence").get(0).path("frame_id").asText());assertEquals(version.equals("1.2"),source.has("focus_timestamp_ms"));
             if(version.equals("1.2"))assertTrue(document.markdown().contains("用户定位提示：00:00:00.000（0 ms）"));
