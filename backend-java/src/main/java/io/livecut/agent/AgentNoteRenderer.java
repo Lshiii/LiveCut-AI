@@ -81,7 +81,14 @@ public final class AgentNoteRenderer {
         out.append("回答范围：").append(scopeLabel(scope)).append("\n\n");
         out.append(switch(scope){case "GENERAL"->"这是通用知识补充，不能当作视频中已经说过的话。\n\n";case "INSUFFICIENT"->"当前视频证据不足；本笔记保留原回答的不确定性。\n\n";default->"以下为基于本轮视频依据的 AI 回答，仍需结合来源核对。\n\n";});
         if(focus!=null)out.append("用户定位提示：").append(time(focus)).append("（").append(Long.toString(focus)).append(" ms）。这是查找提示，不是已观察画面的证明；实际画面时间见下方。\n\n");
-        out.append("## 问题\n\n").append(plainBlock(question)).append("\n\n## 回答\n\n").append(answerMarkdown(answer)).append("\n\n## 原句依据\n\n");
+        out.append("## 问题\n\n").append(plainBlock(question)).append("\n\n## 回答\n\n").append(answerMarkdown(answer)).append("\n\n");
+        if(version.equals("1.3")){
+            AgentEvidenceReview.Review review;try{review=AgentEvidenceReview.fromVerifiedResult(result);}catch(RuntimeException failure){throw invalid();}
+            out.append("## 证据核查摘要\n\n").append(review.statusText()).append("\n\n");
+            for(String line:review.detailLines())out.append("- ").append(line).append("\n");
+            out.append("\n").append(AgentEvidenceReview.LIMITATION).append("\n\n");
+        }
+        out.append("## 原句依据\n\n");
         if(publicCitations.isEmpty())out.append("本轮没有原句引用，不能把截图中的文字当作已读取的语音原句。\n\n");
         for(JsonNode citation:publicCitations){
             long start=citation.path("start_ms").longValue(),end=citation.path("end_ms").longValue();

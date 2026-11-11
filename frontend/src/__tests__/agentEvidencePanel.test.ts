@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { h, ref } from 'vue'
 import * as videoAgent from '../videoAgent.ts'
 import * as evidence from '../agentEvidenceAnswer.ts'
+import * as review from '../agentEvidenceReview.ts'
 import * as executors from '../executors.ts'
 import * as visual from '../agentVisualEvidence.ts'
 import * as focus from '../agentFocus.ts'
@@ -47,7 +48,7 @@ async function mount(active = true) {
   }
   let handle = defaultHandle
   const api = (path: string, init: any = {}) => { calls.push({ path, init, stored: init.headers?.['Idempotency-Key'] ? [...storage.values.values()].find(value => JSON.parse(value).key === init.headers['Idempotency-Key']) : undefined }); return handle(path, init) }
-  const nullComponent = { render: () => null }, cards = compileHostComponent(new URL('../AgentEvidenceAnswer.vue', import.meta.url), { './agentEvidenceAnswer': evidence, './agentVisualEvidence': visual, './topics': topics })
+  const nullComponent = { render: () => null }, cards = compileHostComponent(new URL('../AgentEvidenceAnswer.vue', import.meta.url), { './agentEvidenceAnswer': evidence, './agentEvidenceReview': review, './agentVisualEvidence': visual, './topics': topics })
   const component = compileHostComponent(new URL('../VideoAgentPanel.vue', import.meta.url), { './api': { api, ApiError: HttpError, post: (path: string, body?: unknown, headers: any = {}) => api(path, { method: 'POST', headers: { 'Content-Type': 'application/json', ...headers }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) }) },
     './FailureDiagnostic.vue': nullComponent, './TextRequestProgress.vue': nullComponent, './AgentAnswer.vue': nullComponent, './AgentEvidenceAnswer.vue': cards, './AgentVisualEvidence.vue': nullComponent, './AgentNotePanel.vue': nullComponent,
     './agentRefresh': refresh, './agentSessionHistory': history, './agentVisualEvidence': visual, './agentFocus': focus, './agentFrameFollowup': followup, './sequencePreview': sequence, './answerClip': anchors, './topics': topics,

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { h } from 'vue'
 import { assembleAgentEvidenceAnswer, evidenceTextValid, parseAgentEvidenceCapability } from '../agentEvidenceAnswer.ts'
 import * as evidence from '../agentEvidenceAnswer.ts'
+import * as review from '../agentEvidenceReview.ts'
 import * as visual from '../agentVisualEvidence.ts'
 import * as topics from '../topics.ts'
 import { newestAgentTurn, parseAgentSession, parseAgentTurn } from '../videoAgent.ts'
@@ -95,7 +96,7 @@ test('1.3 note identity and cited-frame followup preserve actual images/labels a
 })
 test('production evidence cards render pure text and two actual before/after evidence IDs/times with fixed safety labels', async () => {
   const sample = evidenceSample(); sample.turn.result!.answer_blocks![0]!.text = '<img src=x onerror=alert(1)> **原文**'; rebuild(sample); sample.turn = parseAgentTurn(sample.turn, sample.session)
-  const component = compileHostComponent(new URL('../AgentEvidenceAnswer.vue', import.meta.url), { './agentEvidenceAnswer': evidence, './agentVisualEvidence': visual, './topics': topics }), root = hostNode('root'), located: number[] = []
+  const component = compileHostComponent(new URL('../AgentEvidenceAnswer.vue', import.meta.url), { './agentEvidenceAnswer': evidence, './agentEvidenceReview': review, './agentVisualEvidence': visual, './topics': topics }), root = hostNode('root'), located: number[] = []
   hostRenderer.render(h(component, { turn: sample.turn, active: true, onLocate: (value: number) => located.push(value) }), root); await flushHost()
   try { const nodes = allHostNodes(root); assert.match(hostText(root), /<img src=x onerror=alert\(1\)> \*\*原文\*\*/); assert.equal(nodes.filter(v=>v.type==='img').length,2); assert.equal(nodes.filter(v=>v.type==='script').length,0); assert.match(hostText(root), /前侧采样 · f0001/); assert.match(hostText(root), /后侧采样 · f0002/); assert.match(hostText(root), /来源与结构核对不代表每项语义已被规则证明/); nodes.find(v=>v.type==='button'&&hostText(v)==='定位 f0002 画面时间')!.props.onClick(); assert.deepEqual(located,[1500]) }
   finally { hostRenderer.render(null, root) }
