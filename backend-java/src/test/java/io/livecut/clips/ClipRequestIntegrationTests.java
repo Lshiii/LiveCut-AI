@@ -10,8 +10,10 @@ import java.nio.file.*;
 import java.security.MessageDigest;
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
+import java.util.zip.ZipFile;
 import io.livecut.LivecutBackendApplication;
 import io.livecut.exports.ExportService;
+import io.livecut.exports.ExportVideoDeliveryService;
 import io.livecut.agent.AgentService;
 import io.livecut.agent.AgentModels;
 import io.livecut.jobs.*;
@@ -390,6 +392,47 @@ class ClipRequestIntegrationTests {
         var other=exports.createClipRequest(r.id(),exportInput(r));assertEquals(batch.id(),other.id());
         JsonNode downloaded=JSON.readTree(send("GET","/api/exports/"+batch.id()+"/manifest",null,null,false).body());assertEquals(r.id(),downloaded.path("clip_request_id").asText());
     }
+    @Test void videoPackagePreservesSelectedComposedSourceAndIgnoresCorruptUnselectedSuccessfulClip()throws Exception{
+        Fixture f=fixture();var r=select(ready(f));clips.confirm(r.id(),confirmation(r));var batch=exports.createClipRequest(r.id(),exportInput(r));
+        for(var clip:batch.clips()){
+            var lease=jobs.claim(new ClaimRequest(clip.stageId(),"video-package-synthetic",UUID.randomUUID().toString()));
+            assertEquals("ACCEPTED",jobs.complete(lease.stageId(),publishExport(lease,(Map<?,?>)lease.config().get("export"),false)).outcome());
+        }
+        var selected=batch.clips().stream().filter(clip->clip.segmentId().equals("out-cause")).findFirst().orElseThrow();
+        var unselected=batch.clips().stream().filter(clip->clip.segmentId().equals("out-method")).findFirst().orElseThrow();
+        byte[] selectedBytes=Files.readAllBytes(exports.content(batch.id(),selected.id()).path());
+        Path unselectedFile=exports.content(batch.id(),unselected.id()).path();
+        Files.write(unselectedFile,new byte[]{3,2,1,0});
+        jdbc.update("UPDATE export_clip SET source_parts_json=?,topic_title=? WHERE id=?","[]","损坏的未选片元数据",unselected.id());
+        assertEquals("SUCCEEDED",jdbc.queryForObject("SELECT status FROM job_stage WHERE id=?",String.class,unselected.stageId()));
+
+        var admitted=exports.videoPackagePlan(batch.id(),List.of(selected.id()));
+        assertEquals(r.id(),admitted.clipRequestId());assertEquals(1,admitted.clips().size());
+        assertEquals(2,admitted.clips().getFirst().parts().size());assertEquals(2000,admitted.clips().getFirst().durationMs());
+        assertEquals(3000,admitted.clips().getFirst().endMs()-admitted.clips().getFirst().startMs());
+        assertEquals(4,exports.videoPackageContent(admitted,admitted.clips().getFirst()).sizeBytes());
+        var delivery=app.getBean(ExportVideoDeliveryService.class);
+        try(var ready=delivery.bundle(batch.id(),List.of(selected.id()));ZipFile zip=new ZipFile(ready.path().toFile(),StandardCharsets.UTF_8)){
+            assertEquals(Set.of("clips/001-"+selected.id()+".mp4","README.txt","manifest.json"),new HashSet<>(zip.stream().map(entry->entry.getName()).toList()));
+            assertArrayEquals(selectedBytes,zip.getInputStream(zip.getEntry("clips/001-"+selected.id()+".mp4")).readAllBytes());
+            JsonNode manifest=JSON.readTree(zip.getInputStream(zip.getEntry("manifest.json")).readAllBytes());
+            assertEquals("export_video_package",manifest.path("data_kind").asText());assertEquals(r.id(),manifest.path("clip_request_id").asText());
+            assertEquals(f.job(),manifest.path("job_id").asText());assertEquals(f.video(),manifest.path("video_id").asText());assertEquals(f.hash(),manifest.path("source_video_sha256").asText());
+            assertEquals(batch.snapshotHash(),manifest.path("snapshot_hash").asText());assertEquals(r.revision(),manifest.path("approved_revision").longValue());
+            assertEquals("h264-aac-v1",manifest.path("profile").asText());assertEquals("CLEAN",manifest.path("render_mode").asText());
+            JsonNode clip=manifest.path("clips").get(0);assertEquals(1,manifest.path("clips").size());assertEquals(selected.id(),clip.path("clip_id").asText());
+            assertEquals("out-cause",clip.path("segment_id").asText());assertEquals(0,clip.path("start_ms").longValue());assertEquals(3000,clip.path("end_ms").longValue());assertEquals(2000,clip.path("duration_ms").longValue());
+            assertEquals(JSON.readTree("[{\"start_ms\":0,\"end_ms\":1000},{\"start_ms\":2000,\"end_ms\":3000}]"),clip.path("parts"));
+            assertEquals(sha(selectedBytes),clip.path("file").path("sha256").asText());assertFalse(clip.has("caption_revision"));
+        }
+        assertEquals(0,jdbc.queryForObject("SELECT COUNT(*) FROM caption_document WHERE export_id=?",Integer.class,batch.id()));
+        assertEquals(0,jdbc.queryForObject("SELECT COUNT(*) FROM model_call WHERE job_id=?",Integer.class,f.job()));
+        jdbc.update("UPDATE export_clip SET source_parts_json=? WHERE id=?","[{\"start_ms\":0,\"end_ms\":1000}]",selected.id());
+        assertEquals("EXPORT_SNAPSHOT_INVALID",failure(()->exports.videoPackagePlan(batch.id(),List.of(selected.id()))));
+        assertEquals("EXPORT_SNAPSHOT_INVALID",failure(()->exports.videoPackageContent(admitted,admitted.clips().getFirst())));
+        assertEquals("EXPORT_SNAPSHOT_INVALID",failure(()->delivery.bundle(batch.id(),List.of(selected.id()))));
+        try(var temporary=Files.list(root.resolve("delivery-tmp"))){assertEquals(0,temporary.count());}
+    }
     @Test void changedPartOrderOrOmittedExclusionCannotMasqueradeAsFrozenExport() throws Exception {
         Fixture f=fixture();var r=select(ready(f));clips.confirm(r.id(),confirmation(r));var batch=exports.createClipRequest(r.id(),exportInput(r));var clip=batch.clips().stream().filter(c->c.segmentId().equals("out-cause")).findFirst().orElseThrow();var lease=jobs.claim(new ClaimRequest(clip.stageId(),"intent-export-test",UUID.randomUUID().toString()));var config=(Map<?,?>)lease.config().get("export");var broken=publishExport(lease,config,true);assertEquals("INVALID_MANIFEST",failure(()->jobs.complete(lease.stageId(),broken)));
     }
@@ -589,6 +632,21 @@ class ClipRequestIntegrationTests {
         assertEquals("CLIP_MANUAL_REVIEW_INVALID",failure(()->jobs.complete(lease.stageId(),completion)));assertNull(jdbc.queryForObject("SELECT content_hash FROM export_clip WHERE id=?",String.class,clip.id()));jdbc.update("UPDATE clip_plan_manual_review SET review_json=? WHERE id=?",original,key);assertEquals("ACCEPTED",jobs.complete(lease.stageId(),completion).outcome());assertEquals(4,exports.content(batch.id(),clip.id()).sizeBytes());
         var captions=app.getBean(io.livecut.captions.CaptionService.class);var caption=captions.initialize(batch.id(),clip.id());assertEquals(2,caption.cues().size());assertTrue(caption.confirmedRevisions().isEmpty());
         jdbc.update("DELETE FROM clip_plan_manual_review WHERE id=?",key);assertEquals("CLIP_MANUAL_REVIEW_INVALID",failure(()->exports.get(batch.id())));assertEquals("CLIP_MANUAL_REVIEW_INVALID",failure(()->exports.content(batch.id(),clip.id())));assertEquals("CLIP_MANUAL_REVIEW_INVALID",failure(()->captions.get(batch.id(),clip.id(),null)));
+    }
+    @Test void videoPackageRequiresOriginalManualSelectionProofAfterMediaHasCompleted()throws Exception{
+        var r=readyManual(fixture(),null);clips.createManualReview(r.id(),manualInput(r,"out-cause"),UUID.randomUUID().toString());
+        var human=clips.get(r.id());clips.confirm(human.id(),manualConfirmation(human));var batch=exports.createClipRequest(human.id(),manualExport(human));var clip=batch.clips().getFirst();
+        var lease=jobs.claim(new ClaimRequest(clip.stageId(),"manual-video-package-synthetic",UUID.randomUUID().toString()));
+        assertEquals("ACCEPTED",jobs.complete(lease.stageId(),publishExport(lease,(Map<?,?>)lease.config().get("export"),false)).outcome());
+        var admitted=exports.videoPackagePlan(batch.id(),List.of(clip.id()));assertEquals(2000,admitted.clips().getFirst().durationMs());
+        var delivery=app.getBean(ExportVideoDeliveryService.class);
+        try(var ready=delivery.bundle(batch.id(),List.of(clip.id()))){assertTrue(Files.exists(ready.path()));}
+        assertEquals(0,jdbc.queryForObject("SELECT COUNT(*) FROM caption_document WHERE export_id=?",Integer.class,batch.id()));
+        jdbc.update("DELETE FROM clip_plan_manual_review WHERE id=?",human.manualReview().path("id").asText());
+        assertEquals("CLIP_MANUAL_REVIEW_INVALID",failure(()->exports.videoPackagePlan(batch.id(),List.of(clip.id()))));
+        assertEquals("CLIP_MANUAL_REVIEW_INVALID",failure(()->exports.videoPackageContent(admitted,admitted.clips().getFirst())));
+        assertEquals("CLIP_MANUAL_REVIEW_INVALID",failure(()->delivery.bundle(batch.id(),List.of(clip.id()))));
+        try(var temporary=Files.list(root.resolve("delivery-tmp"))){assertEquals(0,temporary.count());}
     }
     @Test void manualExportCannotClaimFrozenWrongPartsOrDetachedProofEvenWithRehashedJson()throws Exception{
         for(String mutation:List.of("proof-hash","frozen-parts","persisted-parts","missing-proof")){

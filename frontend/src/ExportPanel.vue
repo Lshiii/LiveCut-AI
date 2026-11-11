@@ -6,6 +6,7 @@ import { downloadJson } from './download'
 import { SnapshotError, SnapshotStream, isExportTerminal, newestSnapshot, parseExportSnapshot, streamLabels, type StreamMode } from './snapshotStream'
 import { parseTopicReview, TopicResponseError } from './topics'
 import CaptionPanel from './CaptionPanel.vue'
+import VideoPackagePanel from './VideoPackagePanel.vue'
 import { CaptionBatchError, prepareCaptionBatch } from './captions'
 interface ApprovedReview {
   revision: number; status: string
@@ -104,7 +105,7 @@ async function downloadBatchPackage() {
     const prepared = await prepareCaptionBatch(batch, url => api<unknown>(url))
     if (stopped || op !== packageVersion || epoch !== resourceEpoch || currentBatch.value?.id !== batch.id) return
     packageUrl.value = prepared.url
-    notice.value = `已核对 ${prepared.items.length} 个成片的确认字幕版本，素材包已准备好。请点击“下载本批素材包”开始下载。`
+    notice.value = `已核对 ${prepared.items.length} 个成片的确认字幕版本。点击“下载本批素材包”后，服务端将校验文件并打包。`
   } catch (value) {
     if (!stopped && op === packageVersion && epoch === resourceEpoch) {
       if (value instanceof CaptionBatchError) error.value = value.code === 'BATCH_INCOMPLETE' ? `本批有 ${value.clips.length} 个片段尚未完成，不能整批打包。请先处理失败或未完成项。` : `有 ${value.clips.length} 个成片${value.code === 'CAPTIONS_MISSING' ? '尚未校对字幕' : '字幕尚未确认'}：${value.clips.slice(0, 3).join('、')}。请逐片校对并确认后再打包。`
@@ -227,6 +228,7 @@ onBeforeUnmount(() => { stopped = true; previewPlayer.value?.pause(); resourceEp
           <p class="package-note">素材包包含原 MP4 与确认字幕，需本批全部完成并确认字幕。</p>
         </div>
         <div class="export-clips-heading"><h4>成片列表</h4><span>每段可独立预览、校对字幕和下载</span></div>
+        <VideoPackagePanel :key="`video-package-${currentBatch.id}`" :batch="currentBatch" :source-key="jobId" :active="props.active !== false && !captionTarget" :busy="!!pending || !!captionEditor?.pending" />
         <div v-if="preview?.content_url" ref="previewRegion" class="export-preview" tabindex="-1" role="region" aria-label="成片预览"><div><b>{{ preview.title || preview.product_name }} · 成片预览</b><button class="text-button" @click="closePreview">关闭预览</button></div><video ref="previewPlayer" :key="preview.id" :src="preview.content_url" controls preload="metadata" playsinline @play="guardPlayback"></video></div>
         <div v-for="clip in currentBatch.clips" :key="clip.id" class="export-clip"><div><b>{{ clip.title || clip.product_name }}</b><p>{{ time(clip.start_ms) }} → {{ time(clip.end_ms) }} <span v-if="clip.attempt">· 第 {{ clip.attempt }} 次执行</span></p><FailureDiagnostic :diagnostic="clip.diagnostic" :error-code="clip.error_code" :attempt="clip.attempt" /></div><span class="status" :class="clip.status.toLowerCase()">{{ names[clip.status] ?? clip.status }}</span><small v-if="clip.size_bytes != null">{{ (clip.size_bytes / 1024 / 1024).toFixed(2) }} MB</small><div class="clip-actions"><template v-if="clip.status === 'SUCCEEDED' && clip.content_url"><button class="secondary" @click="openPreview(clip, $event)">预览</button><button class="secondary" :disabled="!!pending" @click="openCaptions(clip)">校对字幕</button><a v-if="clip.download_url" class="secondary" :href="clip.download_url" target="_blank" rel="noopener">下载 MP4 ↓</a></template><button v-if="clip.status === 'FAILED'" class="secondary" :disabled="!!pending" @click="retry(clip)">重试此片段</button></div></div>
       </template>
