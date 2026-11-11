@@ -74,8 +74,9 @@ public final class AnswerClipSource {
             for(String key:List.of("job_id","video_id","source_hash","transcript_hash"))if(!source.path(key).asText().equals(String.valueOf(owner.get(key))))throw invalid();
             long duration=((Number)owner.get("duration_ms")).longValue();if(number(source,"duration_ms")!=duration)throw invalid();
             Map<String,Object> frame=new HashMap<>(owner);frame.put("id",source.path("turn_id").asText());frame.put("session_id",source.path("session_id").asText());frame.put("question",source.path("question").asText());frame.put("text_model_id",answer.path("provenance").path("text_model_id").asText());
-            frame.put("visual_mode",Set.of("1.1","1.2").contains(answer.path("schema_version").asText())?"frames":"none");
-            if(answer.path("schema_version").asText().equals("1.2")){
+            frame.put("visual_mode",Set.of("1.1","1.2","1.3").contains(answer.path("schema_version").asText())?"frames":"none");
+            if(answer.path("schema_version").asText().equals("1.3"))frame.put("evidence_mode","structured");else frame.remove("evidence_mode");
+            if(answer.path("schema_version").asText().equals("1.2")||answer.path("schema_version").asText().equals("1.3")&&answer.has("focus_timestamp_ms")){
                 JsonNode focus=answer.path("focus_timestamp_ms");if(!focus.isIntegralNumber()||!focus.canConvertToLong())throw invalid();frame.put("focus_timestamp_ms",focus.longValue());
             }else frame.remove("focus_timestamp_ms");
             AgentAnswerValidator.validate(answer,frame);if(!answer.path("answer_scope").asText().equals("VIDEO")||!ClipRequestService.canonicalJson(project(answer,frozen.path("utterances"),duration,source.path("utterance_ids"))).equals(ClipRequestService.canonicalJson(source)))throw invalid();

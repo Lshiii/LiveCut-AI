@@ -1,6 +1,7 @@
 import { parseDiagnostic, type StageDiagnostic } from './diagnostics.ts'
 import { parseTextProgress, type TextProgress } from './textProgress.ts'
 import { inspectClipRequestedTimes, parseAgentVisualCitations, parseAgentVisualFrames, visualFrameId, visualFrameInRange, type AgentVisualCitation, type AgentVisualFrame } from './agentVisualEvidence.ts'
+import { parseAgentEvidenceBlocks, type AgentEvidenceBlock } from './agentEvidenceAnswer.ts'
 
 export interface AgentSource { video_sha256: string; transcript_hash: string; duration_ms: number }
 export interface AgentCitation { utterance_id: string; start_ms: number; end_ms: number; text: string }
@@ -10,21 +11,23 @@ export type AgentToolCall = {
   origin?: 'USER_FOCUS' | 'MODEL'
 }
 export interface AgentResult {
-  schema_version: '1.0' | '1.1' | '1.2'; session_id: string; turn_id: string; job_id: string; video_id: string
+  schema_version: '1.0' | '1.1' | '1.2' | '1.3'; session_id: string; turn_id: string; job_id: string; video_id: string
   source_hash: string; transcript_hash: string; question: string; answer: string
   answer_scope: 'VIDEO' | 'GENERAL' | 'INSUFFICIENT'; citations: AgentCitation[]; tool_calls: AgentToolCall[]
-  provenance: { text_model_id: string; prompt_version: 'video-agent-v1' | 'video-agent-visual-v1' | 'video-agent-visual-focus-v1'; retrieval_mode: 'none' | 'bm25' | 'bm25_dense_rrf' }
+  provenance: { text_model_id: string; prompt_version: 'video-agent-v1' | 'video-agent-visual-v1' | 'video-agent-visual-focus-v1' | 'video-agent-evidence-v1'; retrieval_mode: 'none' | 'bm25' | 'bm25_dense_rrf' }
   suggested_clip_instruction: string | null
   visual_evidence?: AgentVisualFrame[]; visual_citations?: AgentVisualCitation[]
   focus_timestamp_ms?: number
+  evidence_mode?: 'structured'; answer_blocks?: AgentEvidenceBlock[]
 }
 export interface AgentTurn {
   id: string; session_id: string; job_id: string; question: string; sequence: number
   status: 'QUEUED' | 'RUNNING' | 'SUCCEEDED' | 'FAILED' | 'CANCELLED'; state_version: number
   created_at: string; updated_at: string; budget: { max_text_calls: number; text_calls_reserved: number }
   visual_mode?: 'none' | 'frames'
+  evidence_mode?: 'structured'
   focus_timestamp_ms?: number
-  stage: { id: string; stage_type: 'SEGMENT' | 'AGENT_VISUAL' | 'AGENT_VISUAL_FOCUS'; status: string; attempt: number; error_code: string | null; diagnostic?: StageDiagnostic; text_progress?: TextProgress }
+  stage: { id: string; stage_type: 'SEGMENT' | 'AGENT_VISUAL' | 'AGENT_VISUAL_FOCUS' | 'AGENT_EVIDENCE'; status: string; attempt: number; error_code: string | null; diagnostic?: StageDiagnostic; text_progress?: TextProgress }
   result: AgentResult | null
 }
 export interface AgentSession { id: string; job_id: string; video_id: string; created_at: string; source: AgentSource; turns: AgentTurn[] }
@@ -75,8 +78,16 @@ function tool(raw: unknown, index: number, visual: boolean, duration: number, fo
     arguments: { ...args } as AgentToolCall['arguments'], result_utterance_ids: [...raw.result_utterance_ids] as string[],
     ...(visual ? { result_frame_ids: [...raw.result_frame_ids as string[]] } : {}), ...(focus ? { origin: raw.origin as 'USER_FOCUS' | 'MODEL' } : {}) }
 }
-function result(raw: unknown, turn: AgentTurn, session: AgentSessionIdentity): AgentResult {
+function result(raw: unknown, turn: AgentTurn, session: AgentSessionIdentity, evidenceProjection = false): AgentResult {
   const visual = turn.visual_mode === 'frames', focus = turn.focus_timestamp_ms !== undefined
+  if (turn.evidence_mode === 'structured' && !evidenceProjection) {
+    if (!row(raw) || raw.schema_version !== '1.3' || raw.evidence_mode !== 'structured' || !Object.hasOwn(raw, 'answer_blocks')
+      || !row(raw.provenance) || raw.provenance.prompt_version !== 'video-agent-evidence-v1') invalid()
+    const { evidence_mode, answer_blocks, ...legacy } = raw
+    const checked = result({ ...legacy, schema_version: focus ? '1.2' : '1.1', provenance: { ...raw.provenance, prompt_version: focus ? 'video-agent-visual-focus-v1' : 'video-agent-visual-v1' } }, turn, session, true)
+    try { return { ...checked, schema_version: '1.3', evidence_mode, answer_blocks: parseAgentEvidenceBlocks(answer_blocks, checked), provenance: { ...checked.provenance, prompt_version: 'video-agent-evidence-v1' } } as AgentResult }
+    catch { invalid() }
+  }
   if (!row(raw) || raw.schema_version !== (focus ? '1.2' : visual ? '1.1' : '1.0') || raw.session_id !== session.id || raw.turn_id !== turn.id
     || raw.job_id !== session.job_id || raw.video_id !== session.video_id || raw.source_hash !== session.source.video_sha256
     || raw.transcript_hash !== session.source.transcript_hash || raw.question !== turn.question || !text(raw.answer, 6000)
@@ -142,8 +153,9 @@ export function parseAgentTurn(raw: unknown, session: AgentSessionIdentity, turn
     || !integer(raw.state_version, 1) || !date(raw.created_at) || !date(raw.updated_at)
     || !row(raw.budget) || !integer(raw.budget.max_text_calls, 1, 24) || !integer(raw.budget.text_calls_reserved, 0, raw.budget.max_text_calls)
     || !(raw.visual_mode === undefined || raw.visual_mode === 'none' || raw.visual_mode === 'frames')
+    || Object.hasOwn(raw, 'evidence_mode') && (raw.evidence_mode !== 'structured' || raw.visual_mode !== 'frames')
     || Object.hasOwn(raw, 'focus_timestamp_ms') && (raw.visual_mode !== 'frames' || !integer(raw.focus_timestamp_ms, 0, session.source.duration_ms - 1))
-    || !row(raw.stage) || !uuid(raw.stage.id) || raw.stage.stage_type !== (Object.hasOwn(raw, 'focus_timestamp_ms') ? 'AGENT_VISUAL_FOCUS' : raw.visual_mode === 'frames' ? 'AGENT_VISUAL' : 'SEGMENT') || !STAGES.has(raw.stage.status as string)
+    || !row(raw.stage) || !uuid(raw.stage.id) || raw.stage.stage_type !== (raw.evidence_mode === 'structured' ? 'AGENT_EVIDENCE' : Object.hasOwn(raw, 'focus_timestamp_ms') ? 'AGENT_VISUAL_FOCUS' : raw.visual_mode === 'frames' ? 'AGENT_VISUAL' : 'SEGMENT') || !STAGES.has(raw.stage.status as string)
     || !integer(raw.stage.attempt) || !(raw.stage.error_code === null || (typeof raw.stage.error_code === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(raw.stage.error_code)))) invalid()
   const { diagnostic: rawDiagnostic, text_progress: rawProgress, ...stage } = raw.stage
   const diagnostic = parseDiagnostic(rawDiagnostic, raw.stage.attempt, raw.stage.error_code)
@@ -175,6 +187,7 @@ export function newestAgentTurn(known: AgentTurn | undefined, incoming: AgentTur
     || known.sequence !== incoming.sequence || known.question !== incoming.question || known.created_at !== incoming.created_at
     || known.stage.id !== incoming.stage.id || known.stage.stage_type !== incoming.stage.stage_type || known.focus_timestamp_ms !== incoming.focus_timestamp_ms
     || (known.visual_mode ?? 'none') !== (incoming.visual_mode ?? 'none') || known.budget.max_text_calls !== incoming.budget.max_text_calls) invalid()
+  if (known.evidence_mode !== incoming.evidence_mode) invalid()
   if (incoming.state_version < known.state_version || (!agentTurnActive(known) && incoming.status !== known.status)
     || (incoming.state_version === known.state_version && incoming.status !== known.status)) return known
   return incoming

@@ -19,7 +19,7 @@ import static io.livecut.jobs.WorkerModels.*;
 /** Instance liveness and conservative stage capacity; not a provider-side concurrency guarantee. */
 @Service
 public class WorkerCapacityService {
-    static final List<String> TYPES = List.of("MEDIA", "ASR", "SEGMENT", "TIMELINE", "EXPORT_CLIP", "CAPTION_PROOFREAD","ANCHOR_CLIP","AGENT_VISUAL","AGENT_VISUAL_FOCUS");
+    static final List<String> TYPES = List.of("MEDIA", "ASR", "SEGMENT", "TIMELINE", "EXPORT_CLIP", "CAPTION_PROOFREAD","ANCHOR_CLIP","AGENT_VISUAL","AGENT_VISUAL_FOCUS","AGENT_EVIDENCE");
     private static final ObjectMapper JSON = new ObjectMapper();
     private final JdbcTemplate jdbc;
     private final TransactionTemplate transaction;
@@ -159,7 +159,7 @@ public class WorkerCapacityService {
     private static boolean applies(Instance worker, String job) { return job == null || worker.target() == null || job.equals(worker.target()); }
     private static int busy(String id, List<Occupancy> occupancy) { return (int) occupancy.stream().filter(o -> id.equals(o.worker())).count(); }
     private static int resourceBusy(String name, List<Occupancy> occupancy) { return (int) occupancy.stream().filter(o -> resources(o.type()).contains(name)).count(); }
-    private static Set<String> resources(String type) { return switch (type) { case "MEDIA", "EXPORT_CLIP" -> Set.of("FFMPEG"); case "ASR" -> Set.of("ASR"); case "SEGMENT", "CAPTION_PROOFREAD","ANCHOR_CLIP" -> Set.of("TEXT");case "AGENT_VISUAL","AGENT_VISUAL_FOCUS" -> Set.of("TEXT","FFMPEG"); default -> Set.of(); }; }
+    private static Set<String> resources(String type) { return switch (type) { case "MEDIA", "EXPORT_CLIP" -> Set.of("FFMPEG"); case "ASR" -> Set.of("ASR"); case "SEGMENT", "CAPTION_PROOFREAD","ANCHOR_CLIP" -> Set.of("TEXT");case "AGENT_VISUAL","AGENT_VISUAL_FOCUS","AGENT_EVIDENCE" -> Set.of("TEXT","FFMPEG"); default -> Set.of(); }; }
     private List<Occupancy> occupancy(Instant now) {
         return jdbc.query("SELECT worker_id,stage_type FROM job_stage WHERE status='RUNNING' AND lease_until>? AND hard_deadline_at>?", (row, index) -> new Occupancy(row.getString("worker_id"), row.getString("stage_type")), Timestamp.from(now), Timestamp.from(now));
     }

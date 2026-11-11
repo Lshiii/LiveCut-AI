@@ -18,7 +18,7 @@ public final class AgentVisualEvidence {
         Map<String,JsonNode> frames=new LinkedHashMap<>();Set<Long> requested=new HashSet<>();Set<String> actualPositions=new HashSet<>();long total=0;
         for(JsonNode frame:array(answer,"visual_evidence",32)){
             fields(frame,Set.of("frame_id","requested_ms","timestamp_ms","source_pts","source_time_base","sha256","bytes","width","height"));
-            String id=text(frame,"frame_id",5),expected="f%04d".formatted(frames.size()+1);
+            String id=text(frame,"frame_id",5),expected=String.format(Locale.ROOT,"f%04d",frames.size()+1);
             if(!id.equals(expected))throw bad("Frame IDs must be contiguous observation order");
             long request=safe(frame,"requested_ms"),actual=safe(frame,"timestamp_ms"),pts=safe(frame,"source_pts");
             if(request>=duration||actual>=duration||actual<request||actual-request>1000||!requested.add(request))throw bad("Invalid or duplicate frame time");
@@ -63,7 +63,7 @@ public final class AgentVisualEvidence {
                 if(frame==null||!positions.contains(frame.path("requested_ms").longValue()))throw bad("Frame not requested by this tool");
                 long request=frame.path("requested_ms").longValue();if(request<=previousRequest)throw bad("Tool frames must follow requested time order");previousRequest=request;
                 if(end>=0&&compareActualMillis(frame,end)>=0)throw bad("Frame outside sampled clip interval");
-                if(!produced.contains(ref.stringValue())&&!ref.stringValue().equals("f%04d".formatted(produced.size()+1)))throw bad("Frame IDs must follow first observation order");produced.add(ref.stringValue());}
+                if(!produced.contains(ref.stringValue())&&!ref.stringValue().equals(String.format(Locale.ROOT,"f%04d",produced.size()+1)))throw bad("Frame IDs must follow first observation order");produced.add(ref.stringValue());}
         }
         if(!produced.equals(frames.keySet()))throw bad("Every visual frame must have a tool observation");
         String previous="";for(JsonNode citation:array(answer,"visual_citations",12)){

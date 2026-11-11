@@ -35,8 +35,9 @@ public final class AgentNoteRenderer {
         identity(result,"source_hash",snapshot.sourceHash());identity(result,"transcript_hash",snapshot.transcriptHash());
         if(!ClipRequestService.sha(ClipRequestService.canonicalJson(result)).equals(snapshot.resultHash()))throw invalid();
         String version=text(result,"schema_version"),scope=text(result,"answer_scope"),question=text(result,"question"),answer=text(result,"answer"),filename=checked(snapshot.sourceFilename());
-        if(!Set.of("1.0","1.1","1.2").contains(version)||!Set.of("VIDEO","GENERAL","INSUFFICIENT").contains(scope)||filename.isBlank())throw invalid();
-        Long focus=null;if(version.equals("1.2")){focus=number(result,"focus_timestamp_ms");if(focus>=snapshot.durationMs())throw invalid();}
+        if(!Set.of("1.0","1.1","1.2","1.3").contains(version)||!Set.of("VIDEO","GENERAL","INSUFFICIENT").contains(scope)||filename.isBlank())throw invalid();
+        if(version.equals("1.3")){try{AgentEvidenceAnswerValidator.verifyAssembly(result,result.path("citations"));AgentVisualEvidence.validate(result,snapshot.durationMs());}catch(RuntimeException failure){throw invalid();}}
+        Long focus=null;if(version.equals("1.2")||version.equals("1.3")&&result.has("focus_timestamp_ms")){focus=number(result,"focus_timestamp_ms");if(focus>=snapshot.durationMs())throw invalid();}
         else if(result.has("focus_timestamp_ms"))throw invalid();
         JsonNode citations=array(result,"citations",24),provenance=result.path("provenance");
         var publicProvenance=AgentAnswerValidator.JSON.createObjectNode();for(String key:List.of("text_model_id","prompt_version","retrieval_mode"))publicProvenance.put(key,text(provenance,key));
@@ -71,6 +72,7 @@ public final class AgentNoteRenderer {
             .put("source_hash",snapshot.sourceHash()).put("transcript_hash",snapshot.transcriptHash()).put("result_hash",snapshot.resultHash())
             .put("source_filename",filename).put("duration_ms",snapshot.durationMs()).put("question",question).put("answer_scope",scope);
         source.set("provenance",publicProvenance);source.set("citations",publicCitations);source.set("visual_citations",publicVisualCitations);
+        if(version.equals("1.3")){source.put("evidence_mode","structured");source.set("answer_blocks",result.path("answer_blocks").deepCopy());}
         var publicFrames=source.putArray("visual_evidence");selectedFrames.forEach(frame->publicFrames.add(frame.deepCopy()));
         if(focus!=null)source.put("focus_timestamp_ms",focus);
         byte[] sourceBytes=AgentAnswerValidator.JSON.writeValueAsBytes(source);if(sourceBytes.length>MAX_BYTES)throw tooLarge();

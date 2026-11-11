@@ -50,6 +50,77 @@ class AgentIntegrationTests {
     @AfterEach void cleanup(){for(String id:ownJobs)jdbc.update("DELETE FROM analysis_job WHERE id=?",id);for(String id:ownVideos)jdbc.update("DELETE FROM video_asset WHERE id=?",id);for(String id:ownWorkers)jdbc.update("DELETE FROM worker_instance WHERE worker_id=?",id);ownJobs.clear();ownVideos.clear();ownWorkers.clear();}
     @AfterAll void stop(){if(app!=null)app.close();}
 
+    @Test void structuredModeHasItsOwnCapabilityWhileNoneKeepsLegacyWireAndFingerprints()throws Exception{
+        var f=fixture();configureVisual();var session=session(f);String before=scopedState(f.job());
+        var capability=send("GET","/api/agent-capabilities/evidence",null,null);assertEquals(200,capability.statusCode());assertEquals(JSON.readTree("{\"structured_evidence_supported\":true}"),JSON.readTree(capability.body()));assertEquals(before,scopedState(f.job()));
+        var legacy=agents.createTurn(session.id(),JSON.valueToTree(Map.of("question","旧画面","max_text_calls",4,"visual_mode","frames","evidence_mode","none")),"evidence-legacy");
+        assertNull(legacy.evidenceMode());assertFalse(JSON.valueToTree(legacy).has("evidence_mode"));assertEquals(legacy.id(),visualTurn(session.id(),"旧画面",4,"evidence-legacy").id());
+        assertEquals(io.livecut.clips.ClipRequestService.sha("agent-turn\n"+session.id()+"\n旧画面\n4\nvisual_mode=frames"),jdbc.queryForObject("SELECT request_hash FROM agent_turn WHERE id=?",String.class,legacy.id()));
+        assertFalse(((Map<?,?>)claimVisual(legacy).config().get("agent_turn")).containsKey("evidence_mode"));agents.cancel(legacy.id());
+        for(Long focus:Arrays.asList(null,0L)){
+            var request=evidenceTurn(session.id(),"分项问题",4,focus,"evidence-mode-"+focus);assertEquals(AgentEvidence.STAGE,request.stage().stageType());assertEquals("structured",request.evidenceMode());
+            String material="agent-turn\n"+session.id()+"\n分项问题\n4\nvisual_mode=frames"+(focus==null?"":"\nfocus_timestamp_ms="+focus)+"\nevidence_mode=structured";
+            assertEquals(io.livecut.clips.ClipRequestService.sha(material),jdbc.queryForObject("SELECT request_hash FROM agent_turn WHERE id=?",String.class,request.id()));
+            var config=(Map<?,?>)claimEvidence(request).config().get("agent_turn");var expected=new HashSet<>(Set.of("session_id","question","duration_ms","turn_id","source_job_id","source_transcript_key","source_transcript_hash","source_analysis_key","source_analysis_hash","max_tool_steps","history","visual_mode","evidence_mode"));if(focus!=null)expected.add("focus_timestamp_ms");assertEquals(expected,config.keySet());assertEquals("structured",config.get("evidence_mode"));
+            assertEquals("IDEMPOTENCY_CONFLICT",failure(()->visualTurn(session.id(),request.question(),4,"evidence-mode-"+focus)));agents.cancel(request.id());
+        }
+    }
+    @Test void structuredInvalidModeInputsLeaveNoTurnStageOrBudgetAndOriginalModeRecoversFirst()throws Exception{
+        var f=fixture();configureVisual();var session=session(f);String before=scopedState(f.job());
+        for(Object mode:List.of(true,1,"unknown")){assertError(send("POST","/api/agent-sessions/"+session.id()+"/turns",Map.of("question","x","visual_mode","frames","evidence_mode",mode),UUID.randomUUID().toString()),400,"INVALID_AGENT_TURN");}
+        var nullMode=JSON.createObjectNode().put("question","x").put("visual_mode","frames").putNull("evidence_mode");assertEquals("INVALID_AGENT_TURN",failure(()->agents.createTurn(session.id(),nullMode,"evidence-null")));
+        assertEquals("INVALID_AGENT_TURN",failure(()->agents.createTurn(session.id(),JSON.valueToTree(Map.of("question","x","evidence_mode","structured")),"evidence-text")));assertEquals(before,scopedState(f.job()));
+        var original=evidenceTurn(session.id(),"原模式",2,0L,"evidence-recover");org.springframework.test.util.ReflectionTestUtils.setField(agents,"configuredVisualModel","");jdbc.update("UPDATE analysis_job SET status='RUNNING' WHERE id=?",f.job());
+        assertEquals(original.id(),evidenceTurn(session.id(),original.question(),2,0L,"evidence-recover").id());assertEquals(original.id(),agents.findTurnSubmission(session.id(),"evidence-recover").id());
+        jdbc.update("UPDATE agent_turn SET evidence_mode='none' WHERE id=?",original.id());assertEquals("AGENT_SUBMISSION_INVALID",failure(()->agents.findTurnSubmission(session.id(),"evidence-recover")));jdbc.update("UPDATE agent_turn SET evidence_mode='structured' WHERE id=?",original.id());
+    }
+    @Test void evidenceCapabilityRejectsOldVisualWorkersAndOccupiesBothConservativeResources()throws Exception{
+        var f=fixture();configureVisual();var request=evidenceTurn(session(f).id(),"分项执行器",1,null,"evidence-capacity");var workers=app.getBean(WorkerCapacityService.class);
+        String old="evidence-old-"+UUID.randomUUID(),oldSession=UUID.randomUUID().toString();ownWorkers.add(old);workers.register(new WorkerModels.Registration(old,oldSession,List.of("AGENT_VISUAL",AgentFocus.STAGE,"SEGMENT"),2,f.job()));
+        assertEquals("WORKER_CAPABILITY_MISMATCH",failure(()->jobs.claim(new ClaimRequest(request.stage().id(),old,UUID.randomUUID().toString(),f.job(),oldSession))));
+        String worker="evidence-new-"+UUID.randomUUID(),sid=UUID.randomUUID().toString();ownWorkers.add(worker);workers.register(new WorkerModels.Registration(worker,sid,List.of(AgentEvidence.STAGE),1,f.job()));assertEquals("CLAIMED",jobs.claim(new ClaimRequest(request.stage().id(),worker,UUID.randomUUID().toString(),f.job(),sid)).outcome());
+        var snapshot=workers.snapshot(f.job());for(String resource:List.of("TEXT","FFMPEG"))assertEquals(1,snapshot.resources().stream().filter(r->r.name().equals(resource)).findFirst().orElseThrow().inUse());
+        var second=evidenceTurn(session(f).id(),"另一分项",1,null,"evidence-capacity-next");assertEquals("NO_CAPACITY",jobs.claim(new ClaimRequest(second.stage().id(),worker,UUID.randomUUID().toString(),f.job(),sid)).outcome());
+    }
+    @Test void evidenceKeepsOneFrozenVisualLedgerAndCanRecoverAtZeroRemainingBudget()throws Exception{
+        var f=fixture();configureVisual();var request=evidenceTurn(session(f).id(),"分项账本",1,0L,"evidence-ledger");var lease=claimEvidence(request);
+        var reserve=new ReserveRequest(lease.stageId(),lease.attempt(),lease.runToken(),UUID.randomUUID().toString(),"a".repeat(64),"evidence-decision","qwen-vl-synthetic","TEXT");assertEquals("RESERVED",calls.reserve(reserve).outcome());
+        calls.update(reserve.requestId(),new UpdateRequest(lease.stageId(),lease.attempt(),lease.runToken(),"DISPATCHING",null,Map.of()));calls.update(reserve.requestId(),new UpdateRequest(lease.stageId(),lease.attempt(),lease.runToken(),"UNKNOWN_OUTCOME",null,Map.of()));
+        assertEquals("EXISTING",calls.lookup(reserve).outcome());assertEquals("UNKNOWN_OUTCOME",calls.reserve(reserve).call().status());
+        assertEquals("MODEL_BUDGET_EXHAUSTED",failure(()->calls.reserve(new ReserveRequest(lease.stageId(),lease.attempt(),lease.runToken(),UUID.randomUUID().toString(),"b".repeat(64),"evidence-retry","qwen-vl-synthetic","TEXT"))));
+        assertEquals("MODEL_CONFIG_CONFLICT",failure(()->calls.reserve(new ReserveRequest(lease.stageId(),lease.attempt(),lease.runToken(),UUID.randomUUID().toString(),"c".repeat(64),"evidence-fallback","deepseek-chat","TEXT"))));
+        assertEquals("MODEL_KIND_CONFLICT",failure(()->calls.reserve(new ReserveRequest(lease.stageId(),lease.attempt(),lease.runToken(),UUID.randomUUID().toString(),"d".repeat(64),"evidence-asr","paraformer-v2","ASR"))));
+        assertEquals(0,jobs.get(f.job()).budget().textCallsReserved());assertEquals(1,agents.getTurn(request.id()).budget().textCallsReserved());jobs.complete(lease.stageId(),publishVisual(f,request,lease,a->structuredAnswer(a,f)));
+        assertEquals("SUCCEEDED",agents.getTurn(request.id()).status());assertEquals(1,jdbc.queryForObject("SELECT COUNT(*) FROM model_call WHERE job_id=?",Integer.class,f.job()));
+    }
+    @Test void evidenceCompleteReadJpegNotesHistoryAndAnchoredOriginalsRetainBothFocusPaths()throws Exception{
+        for(Long focus:Arrays.asList(null,0L)){
+            var f=fixture();configureVisual();var request=evidenceTurn(session(f).id(),"分项原句画面",4,focus,"evidence-consume-"+focus);var lease=claimEvidence(request);var completion=publishVisual(f,request,lease,a->structuredAnswer(a,f));jobs.complete(lease.stageId(),completion);
+            var result=agents.getTurn(request.id()).result();assertEquals("1.3",result.path("schema_version").asText());assertEquals(2,result.path("answer_blocks").size());assertEquals(focus!=null,result.has("focus_timestamp_ms"));String before=scopedState(f.job());
+            assertEquals(200,send("GET","/api/agent-turns/"+request.id(),null,null).statusCode());assertTrue(agents.visualFrame(request.id(),"f0001").length>4);
+            var notes=app.getBean(AgentNoteService.class);var preview=notes.preview(request.id());assertTrue(preview.markdown().contains("【画面观察 b01】"));assertTrue(preview.markdown().contains("【原句依据 b02】"));var files=noteZip(notes.download(request.id()).bytes());var publicSource=JSON.readTree(files.get("source.json"));assertEquals("structured",publicSource.path("evidence_mode").asText());assertEquals(result.path("answer_blocks"),publicSource.path("answer_blocks"));assertTrue(files.containsKey("images/f0001.jpg"));assertEquals(before,scopedState(f.job()));
+            var clips=app.getBean(io.livecut.clips.ClipRequestService.class);var selected=JSON.valueToTree(Map.of("turn_id",request.id(),"utterance_ids",List.of("u1")));var clip=clips.create(f.job(),new io.livecut.clips.ClipRequestModels.CreateRequest("保留原句",4,selected),"evidence-anchor-"+focus);assertEquals("ANCHOR_CLIP",clip.stage().stageType());assertNotNull(clips.get(clip.id()).sourceAnswer());
+            assertEquals("INVALID_ANSWER_SOURCE",failure(()->clips.create(f.job(),new io.livecut.clips.ClipRequestModels.CreateRequest("画面不是原句",4,JSON.valueToTree(Map.of("turn_id",request.id(),"utterance_ids",List.of("f0001")))),"evidence-no-frame-"+focus)));
+            var next=evidenceTurn(request.sessionId(),"后续分项问题",4,focus,"evidence-next-"+focus);var history=JSON.readTree(jdbc.queryForObject("SELECT history_json FROM agent_turn WHERE id=?",String.class,next.id()));assertTrue(history.get(0).path("answer").asText().contains("【画面观察 b01】"));agents.cancel(next.id());
+            String prefix=attemptPrefix(lease);byte[] jpeg=Files.readAllBytes(root.resolve(prefix+"visual-frames/f0001.jpg"));Files.write(root.resolve(prefix+"visual-frames/f0001.jpg"),new byte[]{1,2,3,4});try{assertThrows(JobException.class,()->agents.visualFrame(request.id(),"f0001"));assertThrows(JobException.class,()->notes.preview(request.id()));}finally{Files.write(root.resolve(prefix+"visual-frames/f0001.jpg"),jpeg);}
+        }
+    }
+    @Test void structuredCompletionRejectsDowngradesFreeTextAndExtraEvidenceWithoutPublishing()throws Exception{
+        var f=fixture();configureVisual();var request=evidenceTurn(session(f).id(),"拒绝旁路",4,null,"evidence-invalid");var lease=claimEvidence(request);
+        assertEquals("INVALID_AGENT_ANSWER",failure(()->jobs.complete(lease.stageId(),assertDoesNotThrow(()->publishVisual(f,request,lease,null)))));
+        for(Consumer<ObjectNode> change:List.<Consumer<ObjectNode>>of(a->a.put("answer",a.path("answer").asText()+"无依据结论"),a->a.put("evidence_mode","none"),a->a.putArray("answer_blocks"),a->((ObjectNode)a.path("visual_citations").get(0)).put("explanation","无关解释"),a->((ObjectNode)a.path("answer_blocks").get(1)).putArray("frame_ids").add("f0001"))){
+            var completion=publishVisual(f,request,lease,a->{structuredAnswer(a,f);change.accept(a);});assertEquals("INVALID_AGENT_ANSWER",failure(()->jobs.complete(lease.stageId(),completion)));assertNull(agents.getTurn(request.id()).result());
+        }
+        jobs.complete(lease.stageId(),publishVisual(f,request,lease,a->structuredAnswer(a,f)));assertEquals("SUCCEEDED",agents.getTurn(request.id()).status());
+    }
+    private AgentModels.Turn evidenceTurn(String session,String question,int budget,Long focus,String key){var input=JSON.createObjectNode().put("question",question).put("max_text_calls",budget).put("visual_mode","frames").put("evidence_mode","structured");if(focus!=null)input.put("focus_timestamp_ms",focus);return agents.createTurn(session,input,key);}
+    private ClaimResult claimEvidence(AgentModels.Turn turn){assertTrue(jobs.ready(AgentEvidence.STAGE,100,turn.jobId()).stream().anyMatch(s->s.id().equals(turn.stage().id())));return jobs.claim(new ClaimRequest(turn.stage().id(),"agent-synthetic",UUID.randomUUID().toString()));}
+    private static void structuredAnswer(ObjectNode answer,Fixture f){
+        answer.put("schema_version","1.3").put("evidence_mode","structured").put("answer","【画面观察 b01】\n合成测试画面。\n\n【原句依据 b02】\n修改前缀会使缓存失效");((ObjectNode)answer.path("provenance")).put("prompt_version",AgentEvidence.PROMPT);((ObjectNode)answer.path("visual_citations").get(0)).put("explanation","关联分项：b01");
+        var blocks=answer.putArray("answer_blocks");var frame=blocks.addObject().put("block_id","b01").put("kind","FRAME").put("text","合成测试画面。");frame.putArray("utterance_ids");frame.putArray("frame_ids").add("f0001");var speech=blocks.addObject().put("block_id","b02").put("kind","SPEECH").put("text","修改前缀会使缓存失效");speech.putArray("utterance_ids").add("u1");speech.putArray("frame_ids");
+        var tool=answer.withArray("tool_calls").addObject().put("step",2).put("tool_name","read_context");if(answer.has("focus_timestamp_ms"))tool.put("origin","MODEL");tool.putObject("arguments").put("utterance_id","u1").put("before",0).put("after",0);tool.putArray("result_frame_ids");tool.putArray("result_utterance_ids").add("u1");var citation=answer.withArray("citations").addObject();for(String field:List.of("utterance_id","start_ms","end_ms","text"))citation.set(field,f.utterances().get(0).path(field));
+    }
+
     @Test void textNotePreviewAndDeterministicZipPreserveEvidenceWithoutAnyWrites()throws Exception{
         var f=fixture();var request=turn(session(f).id(),"请解释缓存失效",4,"note-text");var lease=claim(request);jobs.complete(lease.stageId(),publish(f,request,lease,null));String before=scopedState(f.job());
         var response=send("GET","/api/agent-turns/"+request.id()+"/note",null,null);assertEquals(200,response.statusCode());JsonNode preview=JSON.readTree(response.body());

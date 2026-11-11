@@ -9,7 +9,7 @@ export interface HostNode {
   [key: string]: any
 }
 export function hostNode(type: string, text = ''): HostNode {
-  const value: HostNode = { type, tagName: type.toUpperCase(), text, props: {}, children: [], style: { display: '' }, value: '', scrollIntoView: () => {}, addEventListener: () => {}, removeEventListener: () => {}, getRootNode: () => globalThis.document }
+  const value: HostNode = { type, tagName: type.toUpperCase(), text, props: {}, children: [], style: { display: '' }, value: '', scrollTop: 0, scrollHeight: 0, clientHeight: 0, scrollTo: () => {}, focus: () => {}, querySelector: () => null, querySelectorAll: () => [], getBoundingClientRect: () => ({ top: 0 }), scrollIntoView: () => {}, addEventListener: () => {}, removeEventListener: () => {}, getRootNode: () => globalThis.document }
   if (type === 'video') Object.assign(value, { currentTime: 0, currentSrc: '', readyState: 2, paused: true, seeking: false, ended: false, playbackRate: 1,
     playCalls: 0, pauseCalls: 0, play: () => { value.playCalls++; value.paused = false; return Promise.resolve() },
     pause: () => { value.pauseCalls++; value.paused = true } })

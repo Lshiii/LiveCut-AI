@@ -212,7 +212,7 @@ class WorkerClient:
                 and (type(timeout_seconds) not in (int, float)
                      or not 0 < timeout_seconds <= 3600)):
             raise WorkerClientError("INVALID_WORKER_REGISTRATION_TIMEOUT")
-        allowed = {"MEDIA", "ASR", "SEGMENT", "CAPTION_PROOFREAD", "ANCHOR_CLIP", "AGENT_VISUAL", "AGENT_VISUAL_FOCUS", "TIMELINE", "EXPORT_CLIP"}
+        allowed = {"MEDIA", "ASR", "SEGMENT", "CAPTION_PROOFREAD", "ANCHOR_CLIP", "AGENT_VISUAL", "AGENT_VISUAL_FOCUS", "AGENT_EVIDENCE", "TIMELINE", "EXPORT_CLIP"}
         if (not isinstance(stage_types, list) or not stage_types
                 or any(not isinstance(value, str) or value not in allowed for value in stage_types)
                 or len(set(stage_types)) != len(stage_types)):

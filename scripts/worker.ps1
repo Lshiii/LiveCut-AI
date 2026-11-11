@@ -4,7 +4,7 @@ param(
     [string]$WorkerId = 'worker-local',
     [string]$JobId = '',
     [string]$ReuseAsrJob = '',
-    [ValidateSet('', 'MEDIA', 'ASR', 'SEGMENT', 'TIMELINE', 'EXPORT_CLIP', 'CAPTION_PROOFREAD', 'ANCHOR_CLIP', 'AGENT_VISUAL', 'AGENT_VISUAL_FOCUS')]
+    [ValidateSet('', 'MEDIA', 'ASR', 'SEGMENT', 'TIMELINE', 'EXPORT_CLIP', 'CAPTION_PROOFREAD', 'ANCHOR_CLIP', 'AGENT_VISUAL', 'AGENT_VISUAL_FOCUS', 'AGENT_EVIDENCE')]
     [string]$StageType = '',
     [ValidateScript({ -not [double]::IsNaN($_) -and -not [double]::IsInfinity($_) -and $_ -ge 0 -and $_ -le 3600 })]
     [double]$RegistrationWaitSeconds = 45,

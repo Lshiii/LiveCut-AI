@@ -81,7 +81,7 @@ def _visual_citations(value, available):
     return result
 
 
-def _decision(raw, by_id, visible, frames, tools_left, duration):
+def _decision(raw, by_id, visible, frames, tools_left, duration, *, evidence_mode=None, tool_calls=None):
     value = _object(raw)
     if not isinstance(value, dict):
         raise AgentOutputError("VISUAL_DECISION")
@@ -94,6 +94,10 @@ def _decision(raw, by_id, visible, frames, tools_left, duration):
         except ValueError:
             raise AgentOutputError("VISUAL_ARGUMENTS") from None
         return {"type": "tool", "tool_name": name, "arguments": args}
+    if evidence_mode == "structured":
+        from .agent_evidence import answer_decision
+
+        return answer_decision(value, by_id, visible, frames, tool_calls or [])
     if (set(value) != {"type", "answer_scope", "answer", "citation_ids", "visual_citations", "suggested_clip_instruction"}
             or value.get("type") != "answer" or value.get("answer_scope") not in {"VIDEO", "GENERAL", "INSUFFICIENT"}
             or not isinstance(value.get("citation_ids"), list) or len(value["citation_ids"]) > 24
@@ -110,6 +114,10 @@ def _decision(raw, by_id, visible, frames, tools_left, duration):
 
 
 def validate_visual_answer(result: dict, utterances: list[dict], *, expected: dict | None = None, expected_frames: list[dict] | None = None, duration_ms: int | None = None) -> dict:
+    if isinstance(result, dict) and result.get("schema_version") == "1.3":
+        from .agent_evidence import validate_evidence_answer
+
+        return validate_evidence_answer(result, utterances, expected=expected, expected_frames=expected_frames, duration_ms=duration_ms)
     try:
         focused = result.get("schema_version") == "1.2"
         schema_name = "contracts/agent-answer-visual-focus.schema.json" if focused else "contracts/agent-answer-visual.schema.json"
@@ -194,18 +202,28 @@ def build_visual_answer(utterances, topics, duration_ms, question, output_dir, *
                        source_hash, transcript_hash, model, api_key, base_url, max_calls=8, max_tool_steps=4, history=None,
                        client=None, timeout_seconds=300, dense_embedder=None, embedding_model_id=None, index_cache_dir=None,
                        guard=lambda: None, ffmpeg_path="ffmpeg", ffprobe_path="ffprobe", media_info=None, budget_remaining=None, max_request_attempts=1,
-                       focus_timestamp_ms=MISSING):
+                       focus_timestamp_ms=MISSING, evidence_mode=None):
     if client is None:
         raise SegmentationError("DURABLE_BUDGET_REQUIRED", "Visual generation requires an injected budgeted transport")
     target = endpoint(base_url)
     if not isinstance(api_key, str) or not api_key or "\r" in api_key or "\n" in api_key:
         raise SegmentationError("VISUAL_NOT_CONFIGURED", "Configure the independent visual API key")
     items = _inputs(utterances, duration_ms)
+    if evidence_mode not in (None, "structured"):
+        raise SegmentationError("INVALID_AGENT_EVIDENCE_INPUT", "Unsupported structured evidence mode")
+    structured = evidence_mode == "structured"
     focused = focus_timestamp_ms is not MISSING
     if focused and not _int(focus_timestamp_ms, 0, min(2**53-1, duration_ms-1)):
         raise SegmentationError("INVALID_AGENT_FOCUS_INPUT", "The attached position must be an integer within this video")
     prompt_version = FOCUS_PROMPT_VERSION if focused else PROMPT_VERSION
     system = SYSTEM_FOCUS + f"\n本轮明确附加位置：{focus_timestamp_ms}毫秒。" if focused else SYSTEM
+    if structured:
+        from .agent_evidence import FOCUS_SYSTEM as EVIDENCE_FOCUS
+        from .agent_evidence import PROMPT_VERSION as EVIDENCE_PROMPT
+        from .agent_evidence import SYSTEM as EVIDENCE_SYSTEM
+
+        prompt_version = EVIDENCE_PROMPT
+        system = EVIDENCE_SYSTEM + (EVIDENCE_FOCUS + f"\n本轮明确附加位置：{focus_timestamp_ms}毫秒。" if focused else "")
     if (not _int(max_calls, 1, 24) or not _int(max_tool_steps, 1, 4) or not _int(max_request_attempts, 1, 3)
             or not isinstance(question, str) or not question.strip() or len(question) > 2000
             or any(not isinstance(v, str) or not _ID.fullmatch(v) for v in (session_id, turn_id, job_id, video_id, model))
@@ -226,7 +244,7 @@ def build_visual_answer(utterances, topics, duration_ms, question, output_dir, *
                 or topic["start_utterance_id"] not in by_id or topic["end_utterance_id"] not in by_id or order[topic["start_utterance_id"]] > order[topic["end_utterance_id"]]):
             raise SegmentationError("INVALID_AGENT_INPUT", "Invalid visual topic anchors")
         safe_topics.append({k: topic[k][:800] for k in ("segment_id", "title", "summary", "start_utterance_id", "end_utterance_id")})
-    root, directory = Path(output_dir), Path(output_dir) / "agent-visual"
+    root, directory = Path(output_dir), Path(output_dir) / ("agent-evidence" if structured else "agent-visual")
     config = {"prompt": PROMPT_VERSION, "source_hash": source_hash, "transcript_hash": transcript_hash, "duration_ms": duration_ms,
               "question": question, "model": model, "endpoint": target, "session": session_id, "turn": turn_id, "job": job_id,
               "video": video_id, "utterances": items, "topics": safe_topics, "history": history, "max_steps": max_tool_steps,
@@ -235,6 +253,8 @@ def build_visual_answer(utterances, topics, duration_ms, question, output_dir, *
     if focused:
         config.update(prompt=prompt_version, focus_timestamp_ms=focus_timestamp_ms,
                       system_sha256=hashlib.sha256(system.encode()).hexdigest())
+    if structured:
+        config.update(prompt=prompt_version, evidence_mode="structured", system_sha256=hashlib.sha256(system.encode()).hexdigest())
     fingerprint = hashlib.sha256(_json(config).encode()).hexdigest()
     decision_steps = max_tool_steps-1 if focused else max_tool_steps
     with _discovery_directory_lock(directory):
@@ -277,7 +297,8 @@ def build_visual_answer(utterances, topics, duration_ms, question, output_dir, *
                     raise SegmentationError("INVALID_AGENT_CHECKPOINT", "The original focus request budget plan is missing")
                 remaining = focus_budget()
                 if remaining is None or remaining == 0:
-                    raise SegmentationError("FOCUS_MODEL_BUDGET_UNAVAILABLE" if remaining is None else "BUDGET_EXHAUSTED",
+                    unavailable = "EVIDENCE_MODEL_BUDGET_UNAVAILABLE" if structured else "FOCUS_MODEL_BUDGET_UNAVAILABLE"
+                    raise SegmentationError(unavailable if remaining is None else "BUDGET_EXHAUSTED",
                                             "The attached frame cannot be observed without a verified model request budget")
                 initial = {"window_index": 0, "attempt": 0, "remaining_calls": remaining, "payload_sha256": None,
                            "remaining_tool_steps": min(max_tool_steps-1, max(0, remaining-max_request_attempts))}
@@ -315,16 +336,18 @@ def build_visual_answer(utterances, topics, duration_ms, question, output_dir, *
                             central = None
                         guard()
                         remaining = min(remaining, central) if _int(central, 0, max_calls) else None
-                    if remaining == 0 or focused and remaining is None:
-                        raise SegmentationError("BUDGET_EXHAUSTED", "Visual model request limit reached")
+                    if remaining == 0 or (focused or structured) and remaining is None:
+                        code = "EVIDENCE_MODEL_BUDGET_UNAVAILABLE" if structured and remaining is None else "BUDGET_EXHAUSTED"
+                        raise SegmentationError(code, "Visual model request budget is unavailable or exhausted" if structured else "Visual model request limit reached")
                     plan = {"window_index": number, "attempt": repair, "remaining_calls": remaining, "payload_sha256": None,
                             "remaining_tool_steps": min(decision_steps-number, max(0, remaining-max_request_attempts) if remaining is not None else 0)}
                     plans["requests"].append(plan)
                     _save(plan_path, plans)
-                if focused and cached is None:
+                if (focused or structured) and cached is None:
                     remaining_now = focus_budget()
                     if remaining_now is None or remaining_now == 0:
-                        raise SegmentationError("FOCUS_MODEL_BUDGET_UNAVAILABLE" if remaining_now is None else "BUDGET_EXHAUSTED",
+                        code = ("EVIDENCE_MODEL_BUDGET_UNAVAILABLE" if structured else "FOCUS_MODEL_BUDGET_UNAVAILABLE") if remaining_now is None else "BUDGET_EXHAUSTED"
+                        raise SegmentationError(code,
                                                 "No new focused model request can be dispatched without verified remaining budget")
                 payload = {"video_question": question, "conversation": history, "observations": observations,
                            "video_info": {"duration_ms": duration_ms, "topic_count": len(safe_topics), "utterance_count": len(items)},
@@ -335,7 +358,8 @@ def build_visual_answer(utterances, topics, duration_ms, question, output_dir, *
                 content = [{"type": "text", "text": _json(payload)}, *store.images(delivered)]
                 messages = [{"role": "system", "content": system}, {"role": "user", "content": content}]
                 if repair_rule:
-                    messages.append({"role": "user", "content": _json({"repair": "仅一次结构修复，不改变证据", "validation_rule": repair_rule})})
+                    repair_text = "仅一次分项修复；可在剩余步骤与预算内改用合法只读工具补证，仍缺证据时回答INSUFFICIENT" if structured else "仅一次结构修复，不改变证据"
+                    messages.append({"role": "user", "content": _json({"repair": repair_text, "validation_rule": repair_rule})})
                 payload_hash = hashlib.sha256(_json(messages).encode()).hexdigest()
                 if plan["payload_sha256"] is None:
                     if cached:
@@ -350,7 +374,9 @@ def build_visual_answer(utterances, topics, duration_ms, question, output_dir, *
                 call["response_sha256"] = hashlib.sha256((directory / call["response_file"]).read_bytes()).hexdigest()
                 _save(state_path, state)
                 try:
-                    action = _decision(raw, by_id, visible, delivered, plan["remaining_tool_steps"], duration_ms)
+                    action = (_decision(raw, by_id, visible, delivered, plan["remaining_tool_steps"], duration_ms,
+                                        evidence_mode="structured", tool_calls=trace) if structured else
+                              _decision(raw, by_id, visible, delivered, plan["remaining_tool_steps"], duration_ms))
                     break
                 except AgentOutputError as error:
                     if repair:
@@ -366,6 +392,8 @@ def build_visual_answer(utterances, topics, duration_ms, question, output_dir, *
                           "provenance": {"text_model_id": model, "prompt_version": prompt_version, "retrieval_mode": mode}}
                 if focused:
                     result["focus_timestamp_ms"] = focus_timestamp_ms
+                if structured:
+                    result.update(schema_version="1.3", evidence_mode="structured", answer_blocks=action["answer_blocks"])
                 validate_visual_answer(result, items, expected={"focus_timestamp_ms": focus_timestamp_ms} if focused else None,
                                        expected_frames=delivered, duration_ms=duration_ms)
                 store.images(delivered)

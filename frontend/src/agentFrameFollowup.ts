@@ -31,7 +31,7 @@ export function agentFrameFollowupTarget(session: AgentSession | null, turnId: s
   if (!raw) invalid()
   let turn
   try { turn = parseAgentTurn(raw, session, turnId) } catch { invalid() }
-  if (turn.status !== 'SUCCEEDED' || !turn.result || !['1.1', '1.2'].includes(turn.result.schema_version)
+  if (turn.status !== 'SUCCEEDED' || !turn.result || !['1.1', '1.2', '1.3'].includes(turn.result.schema_version)
     || !turn.result.visual_citations?.some(citation => citation.frame_id === frameId)) invalid()
   const frame = turn.result.visual_evidence?.find(value => value.frame_id === frameId)
   if (!frame || !Number.isSafeInteger(frame.timestamp_ms) || frame.timestamp_ms < 0 || frame.timestamp_ms >= owner.duration_ms) invalid()

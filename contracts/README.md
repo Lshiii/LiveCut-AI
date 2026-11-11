@@ -14,6 +14,12 @@
 
 仅人工来源时增加manual_clip_plan_id，和非空clip_request_id互斥，人工确认修订至少1；旧非人工清单保持原字段形状。关联ID不能替代原人工确认、ASR范围与冻结导出的实际验证。
 
+## 分项证据回答 v1.3
+
+[agent-answer-evidence.schema.json](./agent-answer-evidence.schema.json)约束显式`evidence_mode=structured`的AGENT_EVIDENCE结果。SPEECH/FRAME/SAMPLED_CHANGE/INFERENCE/GENERAL/INSUFFICIENT分项分别绑定本轮原句、画面或明确缺口；正文和引用并集由程序生成，仍受24个原句/12个画面引用上限。前后样本须同一次inspect_clip且精确PTS有序，不能用单图或任意两图冒充操作过程。
+
+[普通分项示例](../fixtures/agent-evidence.synthetic.json)和[附加位置示例](../fixtures/agent-evidence-focus.synthetic.json)完全合成，JPEG/hash仅为格式占位，不表示真实模型效果。Schema不能证明引用语义蕴含，三端另核完整来源、已观察ID、精确时序、UTF-16长度/字符、正文和引用并集；旧1.0/1.1/1.2保留，详见[分项协议与验收](../docs/72-分项证据回答.md)。
+
 ## 视频对话历史元数据
 
 [agent-session-history.schema.json](./agent-session-history.schema.json) 定义VIDEO会话的只读分页摘要，只有首问、来源提示和轮数，不含完整回答或转写。摘要不能进入完整Session缓存或用于原提交认领；游标、微秒顺序、跨字段校验与旧服务兼容见[分页历史说明](../docs/68-轻量分页视频对话历史.md)。[示例](../fixtures/agent-session-history.synthetic.json)为合成元数据，不是模型结果。

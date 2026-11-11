@@ -1,0 +1,158 @@
+{
+  "data_kind": "synthetic_fixture",
+  "note": "Synthetic wire and validation fixture only. No real JPEG, model request, semantic entailment or accuracy claim.",
+  "duration_ms": 4000,
+  "utterances": [
+    {
+      "utterance_id": "u1",
+      "start_ms": 0,
+      "end_ms": 1500,
+      "text": "这里增加缓存层来承接重复读取。",
+      "source_chunk_id": "chunk0"
+    }
+  ],
+  "result": {
+    "schema_version": "1.3",
+    "session_id": "11111111-1111-4111-8111-111111111111",
+    "turn_id": "22222222-2222-4222-8222-222222222222",
+    "job_id": "33333333-3333-4333-8333-333333333333",
+    "video_id": "44444444-4444-4444-8444-444444444444",
+    "source_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "transcript_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "question": "合成示例：画面前后发生什么变化，讲者怎样说明？",
+    "answer": "【原句依据 b01】\n这里增加缓存层来承接重复读取。\n\n【画面观察 b02】\n前一张采样图中只有应用和数据库。\n\n【前后采样 b03】\n后一张采样图中新增缓存层；两张样本呈现不同状态。\n（仅比较已取样画面，不证明采样间隙或因果。）\n\n【推断 b04】\n缓存层可能承接重复访问，但这不是仅凭两帧能证明的因果。\n（属于推断，不能当作讲者原话或已观察事实。）\n\n【通用解释 b05】\n缓存通常用于减少重复读取开销。\n\n【证据不足 b06】\n采样不足以证明两帧间每个操作步骤。",
+    "answer_scope": "VIDEO",
+    "citations": [
+      {
+        "utterance_id": "u1",
+        "start_ms": 0,
+        "end_ms": 1500,
+        "text": "这里增加缓存层来承接重复读取。"
+      }
+    ],
+    "tool_calls": [
+      {
+        "step": 1,
+        "tool_name": "read_context",
+        "arguments": {
+          "utterance_id": "u1",
+          "before": 0,
+          "after": 0
+        },
+        "result_utterance_ids": [
+          "u1"
+        ],
+        "result_frame_ids": []
+      },
+      {
+        "step": 2,
+        "tool_name": "inspect_clip",
+        "arguments": {
+          "start_ms": 1000,
+          "end_ms": 2000
+        },
+        "result_utterance_ids": [],
+        "result_frame_ids": [
+          "f0001",
+          "f0002"
+        ]
+      }
+    ],
+    "provenance": {
+      "text_model_id": "synthetic-vl",
+      "prompt_version": "video-agent-evidence-v1",
+      "retrieval_mode": "none"
+    },
+    "suggested_clip_instruction": null,
+    "visual_evidence": [
+      {
+        "frame_id": "f0001",
+        "requested_ms": 1000,
+        "timestamp_ms": 1000,
+        "source_pts": 1000,
+        "source_time_base": "1/1000",
+        "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "bytes": 1234,
+        "width": 1280,
+        "height": 720
+      },
+      {
+        "frame_id": "f0002",
+        "requested_ms": 1500,
+        "timestamp_ms": 1500,
+        "source_pts": 1500,
+        "source_time_base": "1/1000",
+        "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "bytes": 1234,
+        "width": 1280,
+        "height": 720
+      }
+    ],
+    "visual_citations": [
+      {
+        "frame_id": "f0001",
+        "explanation": "关联分项：b02、b03"
+      },
+      {
+        "frame_id": "f0002",
+        "explanation": "关联分项：b03、b04"
+      }
+    ],
+    "evidence_mode": "structured",
+    "answer_blocks": [
+      {
+        "block_id": "b01",
+        "kind": "SPEECH",
+        "text": "这里增加缓存层来承接重复读取。",
+        "utterance_ids": [
+          "u1"
+        ],
+        "frame_ids": []
+      },
+      {
+        "block_id": "b02",
+        "kind": "FRAME",
+        "text": "前一张采样图中只有应用和数据库。",
+        "utterance_ids": [],
+        "frame_ids": [
+          "f0001"
+        ]
+      },
+      {
+        "block_id": "b03",
+        "kind": "SAMPLED_CHANGE",
+        "text": "后一张采样图中新增缓存层；两张样本呈现不同状态。",
+        "utterance_ids": [],
+        "frame_ids": [
+          "f0001",
+          "f0002"
+        ]
+      },
+      {
+        "block_id": "b04",
+        "kind": "INFERENCE",
+        "text": "缓存层可能承接重复访问，但这不是仅凭两帧能证明的因果。",
+        "utterance_ids": [
+          "u1"
+        ],
+        "frame_ids": [
+          "f0002"
+        ]
+      },
+      {
+        "block_id": "b05",
+        "kind": "GENERAL",
+        "text": "缓存通常用于减少重复读取开销。",
+        "utterance_ids": [],
+        "frame_ids": []
+      },
+      {
+        "block_id": "b06",
+        "kind": "INSUFFICIENT",
+        "text": "采样不足以证明两帧间每个操作步骤。",
+        "utterance_ids": [],
+        "frame_ids": []
+      }
+    ]
+  }
+}
