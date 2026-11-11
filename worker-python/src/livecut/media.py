@@ -16,6 +16,7 @@ import tempfile
 import time
 import wave
 from collections.abc import Callable
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from decimal import ROUND_CEILING, Decimal, InvalidOperation
 from fractions import Fraction
@@ -440,6 +441,9 @@ def export_clip(
     Millisecond bounds are accepted, while actual video boundaries remain
     constrained by source frames. Returned metadata describes the published
     output, whose duration is checked before replacing any previous output.
+    Rebase each retained stream to zero, as the composed-clip path does. An
+    input seek between frames can otherwise leave the encoded video one frame
+    after zero, making our own clip unusable by strict-timeline consumers.
     """
     if type(start_ms) is not int or type(end_ms) is not int or not 0 <= start_ms < end_ms:
         raise MediaError("INVALID_INTERVAL", "Expected integer milliseconds satisfying 0 <= start_ms < end_ms")
@@ -455,6 +459,8 @@ def export_clip(
             [str(ffmpeg_path), "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
              "-accurate_seek", "-ss", f"{start_ms / 1000:.3f}", "-i", str(info.path),
              "-t", f"{(end_ms - start_ms) / 1000:.3f}", "-map", "0:v:0", "-map", "0:a:0?",
+             "-vf", "setpts=PTS-STARTPTS",
+             *(["-af", "asetpts=PTS-STARTPTS"] if info.audio_codec is not None else []),
              "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-pix_fmt", "yuv420p",
              "-c:a", "aac", "-movflags", "+faststart", str(temporary)],
             timeout_seconds=timeout_seconds,
@@ -464,6 +470,7 @@ def export_clip(
         result = probe_media(temporary, ffprobe_path=ffprobe_path, timeout_seconds=timeout_seconds,
                              guard=guard)
         _check_duration(result.duration_ms, end_ms - start_ms, result.frame_rate)
+        _require_aligned_timeline(result)
         if (result.audio_codec is None) != (info.audio_codec is None):
             raise MediaError("OUTPUT_VALIDATION_FAILED", "Export unexpectedly changed audio stream presence")
         _publish(temporary, target, guard=guard)
@@ -545,6 +552,52 @@ def _portrait_blur_foreground_size(width: int, height: int) -> tuple[int, int]:
     return foreground_width, foreground_height
 
 
+def _caption_cwd_too_long(path: Path) -> bool:
+    # CreateProcess's current directory still has MAX_PATH restrictions even
+    # when absolute input/output files use the extended-length path prefix.
+    return os.name == "nt" and len(str(path).removeprefix("\\\\?\\")) + len("\\fonts\\font.otf") >= 260
+
+
+@contextmanager
+def _caption_execution_directory(working_dir: Path, execution_root: Path | None,
+                                 guard: Callable[[], None]):
+    if not _caption_cwd_too_long(working_dir):
+        yield working_dir
+        return
+    # The caller supplies its already-validated storage root, never an
+    # arbitrary global temporary directory or a renamed source artifact.
+    if execution_root is None:
+        raise MediaError("CAPTION_RENDER_WORKDIR_UNSUPPORTED", "A shorter execution root is required")
+    root = execution_root.resolve()
+    if not working_dir.resolve().is_relative_to(root) or not root.is_dir():
+        raise MediaError("CAPTION_RENDER_WORKDIR_UNSUPPORTED", "Execution root does not contain the render inputs")
+    if _caption_cwd_too_long(root / "caption-xxxxxxxx"):
+        raise MediaError("CAPTION_RENDER_WORKDIR_UNSUPPORTED", "Storage root is too long for caption execution")
+    guard()
+    with tempfile.TemporaryDirectory(prefix="caption-", dir=root) as temporary:
+        directory = Path(temporary)
+        if _caption_cwd_too_long(directory):
+            raise MediaError("CAPTION_RENDER_WORKDIR_UNSUPPORTED", "Caption execution directory is too long")
+        # Copy only the program-generated ASS and pinned, previously verified
+        # font. Keep the original attempt's immutable artifacts in place.
+        for relative, maximum in (("captions.ass", 16 * 1024 * 1024),
+                                  ("fonts/font.otf", 16437364)):
+            guard()
+            source = working_dir / relative
+            if source.is_symlink() or not source.is_file():
+                raise MediaError("CAPTION_RENDER_ARTIFACT_CHANGED", "Missing or unsafe caption execution input")
+            with source.open("rb") as stream:
+                data = stream.read(maximum + 1)
+            if not data or len(data) > maximum:
+                raise MediaError("CAPTION_RENDER_ARTIFACT_CHANGED", "Caption execution input exceeds its bound")
+            guard()
+            target = directory / relative
+            target.parent.mkdir(exist_ok=True)
+            target.write_bytes(data)
+        guard()
+        yield directory
+
+
 def burn_caption_clip(
     source: str | Path, output: str | Path, working_dir: Path, *,
     width: int, height: int, expected_duration_ms: int, has_audio: bool,
@@ -553,6 +606,7 @@ def burn_caption_clip(
     ffmpeg_path: str | Path = "ffmpeg", ffprobe_path: str | Path = "ffprobe",
     timeout_seconds: float = 300, guard: Callable[[], None],
     on_encoding: Callable[[int], None], on_phase: Callable[[str], None],
+    execution_root: Path | None = None,
 ) -> MediaInfo:
     """Burn only program-generated relative ASS; never seek or cut the clean clip."""
     if type(blur_background) is not bool or (blur_background and (source_frame or (width, height) != (720, 1280))):
@@ -562,10 +616,6 @@ def burn_caption_clip(
     if blur_background:
         foreground_width, foreground_height = _portrait_blur_foreground_size(info.width, info.height)
     target = _output_file(info.path, output, ".mp4")
-    progress_path = working_dir / "ffmpeg-progress.txt"
-    if progress_path.is_symlink():
-        raise MediaError("CAPTION_RENDER_ARTIFACT_CHANGED", "Unsafe progress path")
-    progress_path.unlink(missing_ok=True)
     temporary = _temporary_output(target)
     previous = -1
 
@@ -602,13 +652,18 @@ def burn_caption_clip(
     else:
         video_arguments = ["-map", "0:v:0", "-map", "0:a:0?", "-vf", filters]
     try:
-        _run_process([str(ffmpeg_path), "-hide_banner", "-loglevel", "warning", "-nostdin", "-y",
-            "-i", str(info.path), *video_arguments,
-            "-c:v", "libx264", "-threads", "2", "-preset", "veryfast", "-crf", "23",
-            "-pix_fmt", "yuv420p", "-c:a", "aac", "-movflags", "+faststart", "-nostats",
-            "-stats_period", "0.5", "-progress", "ffmpeg-progress.txt", str(temporary)],
-            timeout_seconds=timeout_seconds, failure_code="CAPTION_RENDER_ENCODE_FAILED",
-            guard=guard, cwd=working_dir, progress=progress)
+        with _caption_execution_directory(working_dir, execution_root, guard) as execution_dir:
+            progress_path = execution_dir / "ffmpeg-progress.txt"
+            if progress_path.is_symlink():
+                raise MediaError("CAPTION_RENDER_ARTIFACT_CHANGED", "Unsafe progress path")
+            progress_path.unlink(missing_ok=True)
+            _run_process([str(ffmpeg_path), "-hide_banner", "-loglevel", "warning", "-nostdin", "-y",
+                "-i", str(info.path), *video_arguments,
+                "-c:v", "libx264", "-threads", "2", "-preset", "veryfast", "-crf", "23",
+                "-pix_fmt", "yuv420p", "-c:a", "aac", "-movflags", "+faststart", "-nostats",
+                "-stats_period", "0.5", "-progress", "ffmpeg-progress.txt", str(temporary)],
+                timeout_seconds=timeout_seconds, failure_code="CAPTION_RENDER_ENCODE_FAILED",
+                guard=guard, cwd=execution_dir, progress=progress)
         on_phase("VALIDATING")
         result = probe_media(temporary, ffprobe_path=ffprobe_path,
                              timeout_seconds=timeout_seconds, guard=guard)

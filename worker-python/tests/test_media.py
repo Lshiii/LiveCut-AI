@@ -114,6 +114,7 @@ class MediaTests(unittest.TestCase):
         for changes in [
             {"format_start_time_seconds": None},
             {"audio_start_time_seconds": 0.021333},
+            {"video_start_time_seconds": 0.04},
             {"format_start_time_seconds": 1.0, "video_start_time_seconds": 1.0, "audio_start_time_seconds": 1.0},
         ]:
             with self.subTest(changes=changes):
@@ -180,6 +181,8 @@ class MediaTests(unittest.TestCase):
         self.assertIn("libx264", command)
         self.assertIn("aac", command)
         self.assertIn("+faststart", command)
+        self.assertEqual("setpts=PTS-STARTPTS", command[command.index("-vf") + 1])
+        self.assertEqual("asetpts=PTS-STARTPTS", command[command.index("-af") + 1])
         self.assertNotIn("copy", command)
         self.assertEqual(target.resolve(), result.path)
         self.assertEqual(b"complete encoded mp4", target.read_bytes())
@@ -194,6 +197,24 @@ class MediaTests(unittest.TestCase):
         run.return_value = subprocess.CompletedProcess([], 0, "", "")
         self.assert_error("OUTPUT_VALIDATION_FAILED", media.export_clip, self.source, target, 1000, 2000)
         self.assertEqual(b"previous", target.read_bytes())
+        self.assertEqual([], list(self.root.glob(".clip.*.mp4")))
+
+    @patch("livecut.media.probe_media")
+    @patch("livecut.media.subprocess.run")
+    def test_nonzero_output_timeline_does_not_publish_over_previous_export(self, run, probe):
+        target = self.root / "clip.mp4"
+        target.write_bytes(b"previous good export")
+        probe.side_effect = [self.info, replace(self.info, duration_ms=1000,
+                                               video_start_time_seconds=0.04)]
+
+        def encoded(command, **kwargs):
+            Path(command[-1]).write_bytes(b"encoded but misaligned")
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+        run.side_effect = encoded
+        self.assert_error("UNSUPPORTED_TIMELINE", media.export_clip,
+                          self.source, target, 1000, 2000)
+        self.assertEqual(b"previous good export", target.read_bytes())
         self.assertEqual([], list(self.root.glob(".clip.*.mp4")))
 
     @patch("livecut.media.probe_media")
@@ -279,6 +300,13 @@ class RealFfmpegTests(unittest.TestCase):
         self.assertEqual(output.resolve(), result.path)
         self.assertEqual(("h264", "aac"), (result.video_codec, result.audio_codec))
         self.assertLessEqual(abs(result.duration_ms - 1500), 100)
+        # 1.250s is between 25fps frames. The old accurate-seek-only command
+        # produced a positive first video PTS, which caption burning rejects.
+        self.assertEqual(0.0, result.format_start_time_seconds)
+        self.assertEqual(0.0, result.video_start_time_seconds)
+        self.assertEqual(0.0, result.audio_start_time_seconds)
+        media.extract_audio(output, self.root / "clip audio.wav",
+                            ffmpeg_path=FFMPEG, ffprobe_path=FFPROBE)
         decoded = subprocess.run(
             [FFMPEG, "-hide_banner", "-loglevel", "error", "-i", str(output), "-f", "null", "-"],
             capture_output=True, text=True, shell=False, timeout=30, check=False,
