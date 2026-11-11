@@ -17,6 +17,7 @@ Desktop.ini
 
 # Java
 target/
+target-workbench/
 *.class
 
 # Python

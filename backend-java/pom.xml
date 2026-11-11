@@ -63,4 +63,70 @@
 		</plugins>
 	</build>
 
+	<profiles>
+		<profile>
+			<id>workbench</id>
+			<properties>
+				<workbench.dist>${project.basedir}/../frontend/dist</workbench.dist>
+				<workbench.build.directory>${project.basedir}/target-workbench</workbench.build.directory>
+			</properties>
+			<build>
+				<directory>${workbench.build.directory}</directory>
+				<resources>
+					<resource>
+						<directory>${project.basedir}/src/main/resources</directory>
+						<filtering>false</filtering>
+					</resource>
+					<resource>
+						<directory>${workbench.dist}</directory>
+						<targetPath>static</targetPath>
+						<filtering>false</filtering>
+					</resource>
+				</resources>
+				<plugins>
+					<!-- Workbench builds require a fresh directory. A mispointed property must never make clean delete normal output or source. -->
+					<plugin>
+						<groupId>org.apache.maven.plugins</groupId>
+						<artifactId>maven-clean-plugin</artifactId>
+						<configuration><skip>true</skip></configuration>
+					</plugin>
+					<plugin>
+						<groupId>org.codehaus.mojo</groupId>
+						<artifactId>exec-maven-plugin</artifactId>
+						<version>3.6.2</version>
+						<executions>
+							<execution>
+								<id>validate-workbench-distribution</id>
+								<phase>validate</phase>
+								<goals><goal>exec</goal></goals>
+								<configuration>
+									<executable>${java.home}/bin/java</executable>
+									<timeout>30000</timeout>
+									<arguments>
+										<argument>${project.basedir}/tools/buildvalidate/WorkbenchDistValidator.java</argument>
+										<argument>${workbench.dist}</argument>
+										<argument>${project.build.directory}</argument>
+										<argument>${project.basedir}</argument>
+										<argument>${project.build.outputDirectory}</argument>
+										<argument>${project.build.testOutputDirectory}</argument>
+									</arguments>
+								</configuration>
+							</execution>
+						</executions>
+					</plugin>
+					<plugin>
+						<groupId>org.apache.maven.plugins</groupId>
+						<artifactId>maven-surefire-plugin</artifactId>
+						<configuration>
+							<systemPropertyVariables>
+								<workbench.packaged>true</workbench.packaged>
+								<workbench.dist>${workbench.dist}</workbench.dist>
+							</systemPropertyVariables>
+						</configuration>
+					</plugin>
+				</plugins>
+			</build>
+		</profile>
+	</profiles>
+
 </project>
