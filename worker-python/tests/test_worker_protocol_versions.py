@@ -21,6 +21,8 @@ def test_bootstrap_controls_exact_legacy_or_versioned_register_and_ready_wire(su
         seen.append(request)
         if request.url.path == "/api/agent-capabilities/speech-lookup":
             return httpx.Response(200, json={"speech_lookup_supported": True, "worker_protocol": 2}) if supported else httpx.Response(404, text="old server")
+        if request.url.path == "/api/agent-capabilities/cached-answer-replay":
+            return httpx.Response(404, text="old server")
         if request.url.path == "/internal/workers/register":
             return httpx.Response(200, json={"worker_id": worker_id, "session_id": session_id, "outcome": "REGISTERED",
                 "heartbeat_timeout_seconds": 35, "last_seen_at": "2026-11-11T00:00:00Z"})
@@ -34,14 +36,15 @@ def test_bootstrap_controls_exact_legacy_or_versioned_register_and_ready_wire(su
         client.ready(**({"worker_id": worker_id, "session_id": session_id} if supported else {}))
     finally:
         client.close()
-    registered = json.loads(seen[1].content)
+    registered = json.loads(next(r for r in seen if r.url.path == "/internal/workers/register").content)
+    ready = next(r for r in seen if r.url.path == "/internal/stages/ready")
     assert ("supported_protocol_versions" in registered) == supported
-    assert ("worker_id" in seen[2].url.params) == ("session_id" in seen[2].url.params) == supported
+    assert ("worker_id" in ready.url.params) == ("session_id" in ready.url.params) == supported
     if supported:
         assert registered["supported_protocol_versions"] == [1, 2]
     else:
         assert set(registered) == {"worker_id", "session_id", "stage_types", "slots"}
-        assert dict(seen[2].url.params) == {"limit": "10"}
+        assert dict(ready.url.params) == {"limit": "10"}
 
 
 @pytest.mark.parametrize("status,body", [(503, {}), (403, {"error_code": "NOT_FOUND"}),
@@ -62,7 +65,7 @@ def test_only_actual_http_404_can_select_old_protocol(status, body):
     assert requests == ["/api/agent-capabilities/speech-lookup"]
 
 
-@pytest.mark.parametrize("versions", [[], [True], [1, 1], [3], [None], "1,2"])
+@pytest.mark.parametrize("versions", [[], [True], [1, 1], [4], [None], "1,2"])
 def test_invalid_registration_versions_are_rejected_before_dispatch(versions):
     client = WorkerClient("http://localhost", "synthetic-key", transport=httpx.MockTransport(lambda _: pytest.fail("No register dispatch")))
     try:

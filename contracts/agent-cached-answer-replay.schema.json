@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://livecut.local/contracts/agent-cached-answer-replay.schema.json",
+  "title": "Receipt for zero-provider-request replay of a recorded first answer",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "data_kind", "turn_id", "source_turn_id", "source_stage_id", "source_attempt", "snapshot_hash", "source_request_id", "source_response_hash", "source_window_sha256", "decoder_profile", "rebound_fields", "provider_requests"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "data_kind": {"const": "cached_agent_answer_replay"},
+    "turn_id": {"$ref": "#/$defs/uuid"},
+    "source_turn_id": {"$ref": "#/$defs/uuid"},
+    "source_stage_id": {"$ref": "#/$defs/uuid"},
+    "source_attempt": {"const": 1},
+    "snapshot_hash": {"$ref": "#/$defs/hash"},
+    "source_request_id": {"$ref": "#/$defs/hash"},
+    "source_response_hash": {"$ref": "#/$defs/hash"},
+    "source_window_sha256": {"$ref": "#/$defs/hash"},
+    "decoder_profile": {"const": "speech-optional-hint-v1"},
+    "rebound_fields": {"const": ["turn_id"]},
+    "provider_requests": {"const": 0}
+  },
+  "$defs": {
+    "hash": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "uuid": {"type": "string", "pattern": "^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$"}
+  }
+}

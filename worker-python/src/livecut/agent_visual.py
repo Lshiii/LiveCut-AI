@@ -24,6 +24,7 @@ from .segmentation import (
     _discovery_directory_lock,
     _inputs,
     _json,
+    _provider_request_body,
     _request,
     _save,
 )
@@ -215,7 +216,7 @@ def build_visual_answer(utterances, topics, duration_ms, question, output_dir, *
                        source_hash, transcript_hash, model, api_key, base_url, max_calls=8, max_tool_steps=4, history=None,
                        client=None, timeout_seconds=300, dense_embedder=None, embedding_model_id=None, index_cache_dir=None,
                        guard=lambda: None, ffmpeg_path="ffmpeg", ffprobe_path="ffprobe", media_info=None, budget_remaining=None, max_request_attempts=1,
-                       focus_timestamp_ms=MISSING, evidence_mode=None, evidence_policy=None):
+                       focus_timestamp_ms=MISSING, evidence_mode=None, evidence_policy=None, cached_request_validator=None):
     if client is None:
         raise SegmentationError("DURABLE_BUDGET_REQUIRED", "Visual generation requires an injected budgeted transport")
     target = endpoint(base_url)
@@ -416,6 +417,8 @@ def build_visual_answer(utterances, topics, duration_ms, question, output_dir, *
                     _save(plan_path, plans)
                 elif plan["payload_sha256"] != payload_hash:
                     raise SegmentationError("INVALID_AGENT_CHECKPOINT", "Cached visual request media or evidence metadata changed")
+                if cached_request_validator is not None:
+                    cached_request_validator(target, _provider_request_body(target, model, messages))
                 raw = _request(client, endpoint=target, key=api_key, model=model, messages=messages, directory=directory,
                                state=state, window_index=number, attempt=repair, max_calls=max_calls)
                 call = next(c for c in state["calls"] if c["window_index"] == number and c["attempt"] == repair)

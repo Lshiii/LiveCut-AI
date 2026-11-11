@@ -176,7 +176,20 @@ class WorkerClient:
                 or capability["speech_lookup_supported"] is not True
                 or type(capability["worker_protocol"]) is not int or capability["worker_protocol"] != 2):
             raise WorkerClientError("INVALID_WORKER_PROTOCOL_CAPABILITY")
-        return (1, 2)
+        return (1, 2, 3) if self.cached_answer_replay_supported() else (1, 2)
+
+    def cached_answer_replay_supported(self) -> bool:
+        try:
+            capability = self._request("GET", "/api/agent-capabilities/cached-answer-replay")
+        except WorkerClientError as error:
+            if error.status_code == 404:
+                return False
+            raise
+        if (set(capability) != {"cached_answer_replay_supported", "worker_protocol"}
+                or capability["cached_answer_replay_supported"] is not True
+                or type(capability["worker_protocol"]) is not int or capability["worker_protocol"] != 3):
+            raise WorkerClientError("INVALID_WORKER_PROTOCOL_CAPABILITY")
+        return True
 
     def claim(self, stage_id: str, worker_id: str, claim_request_id: str,
               *, job_id: str | None = None, session_id: str | None = None) -> dict:
@@ -240,7 +253,7 @@ class WorkerClient:
                    "session_id": self._session_id(session_id), "stage_types": stage_types, "slots": 1}
         if supported_protocol_versions is not None:
             if (not isinstance(supported_protocol_versions, list) or not supported_protocol_versions
-                    or any(type(v) is not int or v not in {1, 2} for v in supported_protocol_versions)
+                    or any(type(v) is not int or v not in {1, 2, 3} for v in supported_protocol_versions)
                     or len(set(supported_protocol_versions)) != len(supported_protocol_versions)):
                 raise WorkerClientError("INVALID_WORKER_PROTOCOL_VERSIONS")
             payload["supported_protocol_versions"] = sorted(supported_protocol_versions)

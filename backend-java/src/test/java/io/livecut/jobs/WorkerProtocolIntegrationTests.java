@@ -78,7 +78,7 @@ class WorkerProtocolIntegrationTests {
     @Test void registrationPreservesMissingVersionOneAndRejectsMalformedExplicitLists()throws Exception{
         var old=identity();var body=JSON.createObjectNode().put("worker_id",old.id()).put("session_id",old.session()).put("slots",1);body.putArray("stage_types").add("MEDIA");
         assertEquals(200,send("POST","/internal/workers/register",JSON.writeValueAsString(body)).statusCode());assertEquals(JSON.readTree("[1]"),JSON.readTree(jdbc.queryForObject("SELECT supported_protocol_versions FROM worker_instance WHERE worker_id=?",String.class,old.id())));
-        for(String invalid:List.of("null","true","1","\"1\"","[]","[null]","[true]","[1.0]","[\"1\"]","[1,1]","[3]","[0]","[-1]","[1,2,3]")){
+        for(String invalid:List.of("null","true","1","\"1\"","[]","[null]","[true]","[1.0]","[\"1\"]","[1,1]","[4]","[0]","[-1]","[1,2,4]")){
             var worker=identity();body.put("worker_id",worker.id()).put("session_id",worker.session());body.set("supported_protocol_versions",JSON.readTree(invalid));
             assertEquals(400,send("POST","/internal/workers/register",JSON.writeValueAsString(body)).statusCode(),invalid);assertEquals(0,jdbc.queryForObject("SELECT COUNT(*) FROM worker_instance WHERE worker_id=?",Integer.class,worker.id()),invalid);
         }
@@ -118,7 +118,7 @@ class WorkerProtocolIntegrationTests {
         Fixture occupied=fixture("MEDIA",1),target=fixture("MEDIA",2);Worker old=worker(List.of("MEDIA"),List.of(1),null),latest=worker(List.of("MEDIA"),List.of(1,2),target.job());assertEquals("CLAIMED",claim(occupied,old,UUID.randomUUID().toString()).outcome());
         var filtered=workers.snapshot(target.job(),2);assertEquals(1,filtered.onlineWorkers());assertEquals(latest.id(),filtered.workers().getFirst().workerId());assertEquals(1,filtered.resources().stream().filter(resource->resource.name().equals("FFMPEG")).findFirst().orElseThrow().inUse());assertEquals("RESOURCE_BUSY",filtered.stages().stream().filter(stage->stage.stageType().equals("MEDIA")).findFirst().orElseThrow().reason());
         JsonNode before=JSON.readTree(send("GET","/api/executors",null).body()),after=JSON.readTree(send("GET","/api/executors?required_worker_protocol=2&job_id="+target.job(),null).body());assertEquals(before.propertyNames(),after.propertyNames());assertEquals(before.path("workers").get(0).propertyNames(),after.path("workers").get(0).propertyNames());assertFalse(after.toString().contains("session_id"));
-        assertEquals(400,send("GET","/api/executors?required_worker_protocol=3",null).statusCode());
+        assertEquals(400,send("GET","/api/executors?required_worker_protocol=4",null).statusCode());
     }
 
     @Test void capabilityAndLegacyWireShapesAreExact()throws Exception{
@@ -126,5 +126,11 @@ class WorkerProtocolIntegrationTests {
         assertEquals(JSON.readTree("{\"structured_evidence_supported\":true}"),JSON.readTree(send("GET","/api/agent-capabilities/evidence",null).body()));
         Fixture legacy=fixture("MEDIA",1);Worker worker=worker(List.of("MEDIA"),List.of(1,2),legacy.job());
         assertFalse(JSON.valueToTree(jobs.ready("MEDIA",1,legacy.job()).getFirst()).has("required_worker_protocol"));assertFalse(JSON.valueToTree(claim(legacy,worker,UUID.randomUUID().toString())).has("required_worker_protocol"));
+    }
+    @Test void protocolThreeIsExplicitOnReadyNewClaimsAndClaimReceiptReplay(){
+        Fixture recovery=fixture("MEDIA",3);Worker older=worker(List.of("MEDIA"),List.of(1,2),recovery.job()),current=worker(List.of("MEDIA"),List.of(3),recovery.job());String denied=UUID.randomUUID().toString();
+        assertTrue(jobs.ready("MEDIA",1,recovery.job()).isEmpty());assertTrue(jobs.ready("MEDIA",1,recovery.job(),older.id(),older.session()).isEmpty());assertEquals(3,jobs.ready("MEDIA",1,recovery.job(),current.id(),current.session()).getFirst().requiredWorkerProtocol());code("WORKER_PROTOCOL_MISMATCH",()->claim(recovery,older,denied));untouched(recovery,denied,older);
+        String key=UUID.randomUUID().toString();ClaimResult first=claim(recovery,current,key);assertEquals(3,first.requiredWorkerProtocol());assertEquals("ALREADY_CLAIMED",claim(recovery,current,key).outcome());
+        jdbc.update("UPDATE worker_instance SET supported_protocol_versions=JSON_ARRAY(1,2) WHERE worker_id=?",current.id());code("WORKER_PROTOCOL_MISMATCH",()->claim(recovery,current,key));assertEquals(first.runToken(),jdbc.queryForObject("SELECT run_token FROM job_stage WHERE id=?",String.class,recovery.stage()));assertEquals(1,jdbc.queryForObject("SELECT attempt FROM job_stage WHERE id=?",Integer.class,recovery.stage()));
     }
 }

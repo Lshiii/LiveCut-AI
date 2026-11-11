@@ -10,9 +10,13 @@ param(
     [double]$RegistrationWaitSeconds = 45,
     [ValidateScript({ -not [double]::IsNaN($_) -and -not [double]::IsInfinity($_) -and $_ -ge 0 -and $_ -le 3600 })]
     [double]$ReconnectWaitSeconds = 180,
-    [switch]$Once
+    [switch]$Once,
+    [switch]$CachedAnswerReplayOnly
 )
 $ErrorActionPreference = 'Stop'
+if ($CachedAnswerReplayOnly -and ($ReuseAsrJob -or ($StageType -and $StageType -ne 'AGENT_EVIDENCE'))) {
+    throw 'Cached answer replay only supports AGENT_EVIDENCE and cannot submit or reuse ASR.'
+}
 if ($ReuseAsrJob -and (-not $Once -or $StageType -ne 'ASR' -or -not $JobId)) {
     throw 'ASR reuse requires -JobId, -StageType ASR and -Once.'
 }
@@ -41,6 +45,7 @@ try {
     if ($JobId) { $launchArgs += @('--job-id', $JobId) }
     if ($ReuseAsrJob) { $launchArgs += @('--reuse-asr-job', $ReuseAsrJob) }
     if ($Once) { $launchArgs += '--once' }
+    if ($CachedAnswerReplayOnly) { $launchArgs += '--cached-answer-replay-only' }
     Push-Location $repoRoot
     try {
         & uv @launchArgs

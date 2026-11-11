@@ -29,6 +29,7 @@ public class AgentService {
     private final ArtifactVerifier artifacts;
     private final CaptionService captions;
     private final CaptionSourceResolver captionSources;
+    private final AgentResponseReplayVerifier replayVerifier;
     private final TransactionTemplate tx;
     @Value("${LIVECUT_TEXT_MODEL:}") private String preferredTextModel="";
     @Value("${LIVECUT_TEXT_FALLBACK_MODELS:}") private String configuredFallbackModels="";
@@ -36,7 +37,7 @@ public class AgentService {
     private record FrozenSource(String video,String hash,String transcriptKey,String transcriptHash,String analysisKey,
                                 String analysisHash,long duration,JsonNode utterances,JsonNode topics) {}
     public AgentService(JdbcTemplate jdbc,ArtifactVerifier artifacts,CaptionService captions,CaptionSourceResolver captionSources,PlatformTransactionManager manager){
-        this.jdbc=jdbc;this.artifacts=artifacts;this.captions=captions;this.captionSources=captionSources;tx=new TransactionTemplate(manager);tx.setIsolationLevel(TransactionDefinition.ISOLATION_READ_COMMITTED);
+        this.jdbc=jdbc;this.artifacts=artifacts;this.captions=captions;this.captionSources=captionSources;this.replayVerifier=new AgentResponseReplayVerifier(artifacts);tx=new TransactionTemplate(manager);tx.setIsolationLevel(TransactionDefinition.ISOLATION_READ_COMMITTED);
     }
     public Session createSession(String jobId,JsonNode input,String key){
         String parent=uuid(jobId);key(key);if(input==null||!input.isObject()||!input.isEmpty())throw bad("INVALID_AGENT_SESSION","Session input must be empty");
@@ -79,6 +80,7 @@ public class AgentService {
             var manifest=artifacts.verifyAgentAnswerManifest(String.valueOf(stage.get("manifest_key")),String.valueOf(stage.get("manifest_hash")),identity);
             var ref=manifest.artifacts().stream().filter(a->a.kind().equals("agent_answer")).findFirst().orElseThrow(()->conflict("AGENT_RESULT_INVALID","The answer artifact is unavailable"));
             if(!canonical(answer).equals(canonical(artifacts.readJsonArtifact(ref,identity))))throw conflict("AGENT_RESULT_INVALID","Stored answer no longer matches its artifact");
+            validateReplayManifest(owner,manifest);if(AgentResponseReplayData.isReplay(owner))verifyReplayResult(owner,String.valueOf(stage.get("input_hash")),answer,manifest,identity);
             Map<String,byte[]> images=new LinkedHashMap<>();
             if("frames".equals(visualMode(owner))){
                 var verified=AgentVisualArtifacts.verify(jdbc,artifacts,job,owner,answer,manifest,identity);
@@ -90,7 +92,7 @@ public class AgentService {
             String filename=jdbc.queryForObject("SELECT original_filename FROM video_asset WHERE id=?",String.class,owner.get("video_id"));
             return new AgentNoteModels.Snapshot(String.valueOf(owner.get("id")),String.valueOf(owner.get("session_id")),String.valueOf(owner.get("job_id")),
                 String.valueOf(owner.get("video_id")),String.valueOf(owner.get("source_hash")),String.valueOf(owner.get("transcript_hash")),resultHash,
-                filename,((Number)owner.get("duration_ms")).longValue(),answer,images);
+                 filename,((Number)owner.get("duration_ms")).longValue(),answer,images,(String)owner.get("replay_source_turn_id"),(String)owner.get("replay_snapshot_hash"));
         });
     }
     public Capabilities capabilities(){String model=configuredVisualModel.trim();boolean configured=validModel(model);return new Capabilities(configured?"frames":null,configured?model:null,32,12000,500);}
@@ -108,6 +110,7 @@ public class AgentService {
             var manifest=artifacts.verifyAgentAnswerManifest(String.valueOf(stage.get("manifest_key")),String.valueOf(stage.get("manifest_hash")),identity);
             var ref=manifest.artifacts().stream().filter(a->a.kind().equals("agent_answer")).findFirst().orElseThrow();
             if(!canonical(answer).equals(canonical(artifacts.readJsonArtifact(ref,identity))))throw conflict("AGENT_RESULT_INVALID","Stored answer no longer matches its artifact");
+            validateReplayManifest(owner,manifest);if(AgentResponseReplayData.isReplay(owner))verifyReplayResult(owner,String.valueOf(stage.get("input_hash")),answer,manifest,identity);
             byte[] bytes=AgentVisualArtifacts.verify(jdbc,artifacts,job,owner,answer,manifest,identity).get(frameId);
             if(bytes==null)throw missing("AGENT_VISUAL_FRAME_NOT_FOUND");return bytes;
         });
@@ -136,6 +139,7 @@ public class AgentService {
             if(!id.equals(found.get("session_id"))||!parent.equals(found.get("job_id")))throw conflict("IDEMPOTENCY_CONFLICT","Submission belongs to a different conversation owner");
             var owner=lockOwner(String.valueOf(found.get("id")),parent);requireKind(owner,false);
             String question=String.valueOf(owner.get("question"));int limit=((Number)owner.get("max_text_calls")).intValue();
+            if(AgentResponseReplayData.isReplay(owner)){AgentResponseReplayData.descriptor(owner);return turnSnapshot(owner);}
             if(question.isBlank()||question.length()>2000||limit<1||limit>24||AgentSpeechLookup.enabled(owner)&&!AgentSpeechLookup.validQuestion(question)||!turnFingerprint(id,question,limit,visualMode(owner),AgentFocus.value(owner),AgentEvidence.structured(owner),AgentSpeechLookup.enabled(owner)).equals(owner.get("request_hash")))throw invalidSubmission();
             return turnSnapshot(owner);
         });
@@ -212,6 +216,7 @@ public class AgentService {
         if(AgentFocus.value(owner)!=null)turn.put("focus_timestamp_ms",AgentFocus.value(owner));
         if(AgentEvidence.structured(owner))turn.put("evidence_mode","structured");
         if(AgentSpeechLookup.enabled(owner))turn.put("evidence_policy",AgentSpeechLookup.POLICY);
+        if(AgentResponseReplayData.isReplay(owner)){var prepared=verifyReplay(owner,stage.inputHash());turn.put("replay_source_turn_id",owner.get("replay_source_turn_id"));turn.put("replay_snapshot_hash",owner.get("replay_snapshot_hash"));turn.put("cache_replay",prepared.descriptor());}
         for(String field:List.of("session_id","question","duration_ms"))turn.put(field,owner.get(field));
         turn.put("turn_id",stage.ownerId());turn.put("source_job_id",stage.jobId());turn.put("source_transcript_key",owner.get("transcript_key"));turn.put("source_transcript_hash",owner.get("transcript_hash"));
         turn.put("source_analysis_key",owner.get("analysis_key"));turn.put("source_analysis_hash",owner.get("analysis_hash"));turn.put("max_tool_steps",isCaption(owner)?Math.min(4,((Number)owner.get("max_text_calls")).intValue()-1):4);
@@ -233,10 +238,12 @@ public class AgentService {
         jdbc.update("UPDATE agent_turn SET result_json=?,result_hash=? WHERE id=?",serialized,sha(serialized),stage.ownerId());
     }
     private JsonNode validateAnswer(StageRow stage,Map<String,Object> job,Map<String,Object> owner,JsonNode result,ArtifactVerifier.VerifiedManifest manifest,ArtifactVerifier.ManifestIdentity identity){
+        validateReplayManifest(owner,manifest);
         if(stage.requiredWorkerProtocol()!=AgentSpeechLookup.requiredProtocol(owner))throw conflict("AGENT_STAGE_UNAVAILABLE","Answer protocol no longer matches the frozen policy");
         verifySpeechStage(stage,owner);
         if(!AgentFocus.stage(owner).equals(stage.stageType()))throw conflict("AGENT_STAGE_UNAVAILABLE","Answer stage does not match frozen mode");
         AgentAnswerValidator.validate(result,owner);
+        if(AgentResponseReplayData.isReplay(owner))verifyReplayResult(owner,stage.inputHash(),result,manifest,identity);
         if("frames".equals(visualMode(owner))){sameSource(owner,source(job));AgentVisualArtifacts.verify(jdbc,artifacts,job,owner,result,manifest,identity);}
         return result;
     }
@@ -258,18 +265,21 @@ public class AgentService {
         if(((Number)s.get("required_worker_protocol")).intValue()!=AgentSpeechLookup.requiredProtocol(owner))throw conflict("AGENT_STAGE_UNAVAILABLE","Stage protocol no longer matches the frozen policy");
         verifySpeechRequest(owner);
         Stage stage=new Stage(String.valueOf(s.get("id")),String.valueOf(s.get("stage_type")),String.valueOf(s.get("status")),((Number)s.get("attempt")).intValue(),(String)s.get("error_code"),
-            StageDiagnostics.read((String)s.get("diagnostic_json"),(String)s.get("error_code"),((Number)s.get("attempt")).intValue()),TextExecutionPolicy.readProgress(s.get("text_progress_json")));
+            StageDiagnostics.read((String)s.get("diagnostic_json"),(String)s.get("error_code"),((Number)s.get("attempt")).intValue()),TextExecutionPolicy.readProgress(s.get("text_progress_json")),AgentResponseReplayData.isReplay(owner)?3:null);
         JsonNode result="SUCCEEDED".equals(owner.get("status"))&&owner.get("result_json")!=null?AgentAnswerValidator.JSON.readTree(String.valueOf(owner.get("result_json"))):null;
         return new Turn(id,String.valueOf(owner.get("session_id")),String.valueOf(owner.get("job_id")),String.valueOf(owner.get("question")),((Number)owner.get("sequence_number")).intValue(),
             String.valueOf(owner.get("status")),((Number)owner.get("state_version")).longValue(),instant(owner.get("created_at")),instant(owner.get("updated_at")),
-            new Budget(((Number)owner.get("max_text_calls")).intValue(),((Number)owner.get("text_calls_reserved")).intValue()),stage,result,visualMode(owner),AgentFocus.value(owner),AgentEvidence.publicMode(owner),AgentSpeechLookup.publicPolicy(owner));
+            new Budget(((Number)owner.get("max_text_calls")).intValue(),((Number)owner.get("text_calls_reserved")).intValue()),stage,result,visualMode(owner),AgentFocus.value(owner),AgentEvidence.publicMode(owner),AgentSpeechLookup.publicPolicy(owner),(String)owner.get("replay_source_turn_id"),(String)owner.get("replay_snapshot_hash"));
     }
     private FrozenSource source(Map<String,Object> job){
+        return source(job,true);
+    }
+    private FrozenSource source(Map<String,Object> job,boolean locked){
         if(!"REVIEW_READY".equals(job.get("status"))||!"topics".equals(AgentAnswerValidator.JSON.readTree(String.valueOf(job.get("config_json"))).path("analysis_mode").asText()))throw conflict("AGENT_SOURCE_NOT_READY","A completed topics analysis is required");
         String parent=String.valueOf(job.get("id")),video=String.valueOf(job.get("video_id")),hash=jdbc.queryForObject("SELECT content_hash FROM video_asset WHERE id=?",String.class,video);
-        var asr=completedStage(parent,"ASR");var asrIdentity=identity(asr,job,hash);var asrManifest=artifacts.verifyManifest(String.valueOf(asr.get("manifest_key")),String.valueOf(asr.get("manifest_hash")),asrIdentity);
+        var asr=completedStage(parent,"ASR",locked);var asrIdentity=identity(asr,job,hash);var asrManifest=artifacts.verifyManifest(String.valueOf(asr.get("manifest_key")),String.valueOf(asr.get("manifest_hash")),asrIdentity);
         var transcript=asrManifest.artifacts().stream().filter(a->a.kind().equals("transcript")).findFirst().orElseThrow();var utterances=artifacts.readJsonArtifact(transcript,asrIdentity);
-        var timeline=completedStage(parent,"TIMELINE");var timelineIdentity=identity(timeline,job,hash);var timelineManifest=artifacts.verifyManifest(String.valueOf(timeline.get("manifest_key")),String.valueOf(timeline.get("manifest_hash")),timelineIdentity);
+        var timeline=completedStage(parent,"TIMELINE",locked);var timelineIdentity=identity(timeline,job,hash);var timelineManifest=artifacts.verifyManifest(String.valueOf(timeline.get("manifest_key")),String.valueOf(timeline.get("manifest_hash")),timelineIdentity);
         var analysis=timelineManifest.artifacts().stream().filter(a->a.kind().equals("analysis_result")).findFirst().orElseThrow();var result=artifacts.readJsonArtifact(analysis,timelineIdentity);
         if(!"topics".equals(result.path("analysis_mode").asText())||!parent.equals(result.path("job_id").asText())||!video.equals(result.path("video_id").asText())
             ||!result.path("analysis_generation").isIntegralNumber()||result.path("analysis_generation").longValue()!=((Number)job.get("generation")).longValue())throw conflict("AGENT_SOURCE_INVALID","Published analysis identity does not match this source");
@@ -285,6 +295,71 @@ public class AgentService {
         if(!current.video().equals(session.get("video_id"))||!current.hash().equals(session.get("source_hash"))||!current.transcriptKey().equals(session.get("transcript_key"))
             ||!current.transcriptHash().equals(session.get("transcript_hash"))||!current.analysisKey().equals(session.get("analysis_key"))||!current.analysisHash().equals(session.get("analysis_hash"))
             ||current.duration()!=((Number)session.get("duration_ms")).longValue()||!frozen.path("utterances").equals(current.utterances())||!frozen.path("topics").equals(current.topics()))throw conflict("AGENT_SOURCE_CHANGED","Published evidence no longer matches this session");
+    }
+    private record ReplaySource(Map<String,Object> owner,Map<String,Object> stage,List<Map<String,Object>> calls,String identity) {}
+    private ReplaySource replaySource(String source,boolean locked){
+        if(locked)lockPublicOwner(source);
+        var rows=jdbc.queryForList("SELECT t.*,s.kind,s.video_id,s.source_hash,s.transcript_hash,s.transcript_key,s.analysis_key,s.analysis_hash,s.source_json,s.duration_ms,j.status AS parent_status,j.generation AS source_generation,j.config_hash AS parent_config_hash,v.content_hash AS current_video_hash FROM agent_turn t JOIN agent_session s ON s.id=t.session_id AND s.job_id=t.job_id JOIN analysis_job j ON j.id=t.job_id AND j.video_id=s.video_id JOIN video_asset v ON v.id=s.video_id WHERE t.id=?",source);
+        if(rows.size()!=1)throw missing("AGENT_TURN_NOT_FOUND");var owner=rows.getFirst();
+        var stages=jdbc.queryForList("SELECT * FROM job_stage WHERE owner_type='AGENT_TURN' AND owner_id=? AND job_id=?"+(locked?" FOR UPDATE":""),source,owner.get("job_id"));
+        if(stages.size()!=1)throw AgentResponseReplayVerifier.unavailable("SOURCE_UNAVAILABLE");var stage=stages.getFirst();
+        var calls=jdbc.queryForList("SELECT request_id,job_id,stage_id,owner_type,owner_id,operation_key,input_hash,model_id,kind,status,origin_attempt,origin_token_hash,dispatch_attempt,dispatch_token_hash,response_key,response_hash FROM model_call WHERE owner_type='AGENT_TURN' AND owner_id=? ORDER BY request_id"+(locked?" FOR UPDATE":""),source);
+        var identity=new TreeMap<String,Object>();for(String field:List.of("id","session_id","job_id","question","request_hash","text_model_id","text_fallback_models_json","max_text_calls","text_calls_reserved","history_json","status","result_json","result_hash","visual_mode","focus_timestamp_ms","evidence_mode","evidence_policy","replay_source_turn_id","kind","video_id","source_hash","transcript_hash","transcript_key","analysis_key","analysis_hash","source_json","duration_ms","parent_status","source_generation","parent_config_hash","current_video_hash"))identity.put(field,owner.get(field));
+        identity.put("published_stages",jdbc.queryForList("SELECT id,job_id,owner_type,stage_type,status,attempt,run_token,input_hash,manifest_key,manifest_hash FROM job_stage WHERE job_id=? AND owner_type='ANALYSIS' AND stage_type IN ('ASR','TIMELINE') ORDER BY stage_type,id",owner.get("job_id")));
+        var stageIdentity=new TreeMap<String,Object>();for(String field:List.of("id","job_id","owner_type","owner_id","stage_type","status","attempt","input_hash","error_code","required_worker_protocol"))stageIdentity.put(field,stage.get(field));identity.put("stage",stageIdentity);identity.put("calls",calls);
+        return new ReplaySource(owner,stage,calls,canonical(AgentAnswerValidator.JSON.valueToTree(identity)));
+    }
+    private String replayBlock(ReplaySource source,boolean sessionChecks){
+        var o=source.owner();var s=source.stage();
+        if(AgentResponseReplayData.isReplay(o)||!"VIDEO".equals(o.get("kind"))||!"FAILED".equals(o.get("status"))||!"FAILED".equals(s.get("status"))||!"INVALID_AGENT_OUTPUT".equals(s.get("error_code"))||((Number)s.get("attempt")).intValue()!=1||((Number)s.get("required_worker_protocol")).intValue()!=2||!AgentEvidence.STAGE.equals(s.get("stage_type"))||!AgentSpeechLookup.enabled(o))return "INELIGIBLE_SOURCE";
+        if(!"REVIEW_READY".equals(o.get("parent_status"))||!o.get("source_hash").equals(o.get("current_video_hash"))||o.get("result_json")!=null||o.get("result_hash")!=null)return "SOURCE_UNAVAILABLE";
+        if(source.calls().isEmpty()||source.calls().size()!=((Number)o.get("text_calls_reserved")).intValue()||source.calls().stream().anyMatch(c->!"SUCCEEDED".equals(c.get("status"))||!"TEXT".equals(c.get("kind"))||c.get("response_key")==null||c.get("response_hash")==null))return "CALLS_NOT_REPLAYABLE";
+        if(sessionChecks){if(jdbc.queryForObject("SELECT COUNT(*) FROM agent_turn WHERE session_id=? AND status IN ('QUEUED','RUNNING')",Integer.class,o.get("session_id"))>0)return "SESSION_BUSY";if(jdbc.queryForObject("SELECT COUNT(*) FROM agent_turn WHERE session_id=?",Integer.class,o.get("session_id"))>=100)return "SESSION_LIMIT";}
+        return null;
+    }
+    private Turn existingReplay(String source,String key,String snapshot){
+        var rows=jdbc.queryForList("SELECT * FROM agent_turn WHERE idempotency_key=?",key);if(rows.isEmpty())return null;var owner=rows.getFirst();
+        if(!source.equals(owner.get("replay_source_turn_id"))||snapshot!=null&&!snapshot.equals(owner.get("replay_snapshot_hash")))throw conflict("IDEMPOTENCY_CONFLICT","Replay key belongs to another immutable action");AgentResponseReplayData.descriptor(owner);return turnSnapshot(owner);
+    }
+    public AgentResponseReplayModels.Preview responseReplayPreview(String value){
+        String id=uuid(value);var source=replaySource(id,false);var budget=new Budget(((Number)source.owner().get("max_text_calls")).intValue(),((Number)source.owner().get("text_calls_reserved")).intValue());
+        var existing=jdbc.queryForList("SELECT * FROM agent_turn WHERE replay_source_turn_id=?",id);if(!existing.isEmpty())return new AgentResponseReplayModels.Preview(1,id,false,"ALREADY_EXISTS",null,budget,turnSnapshot(existing.getFirst()));
+        String reason=replayBlock(source,true);if(reason!=null)return new AgentResponseReplayModels.Preview(1,id,false,reason,null,budget,null);
+        try{replayPublishedSource(source);var prepared=replayVerifier.prepare(source.owner(),source.stage(),source.calls());var after=replaySource(id,false);if(!source.identity().equals(after.identity()))return new AgentResponseReplayModels.Preview(1,id,false,"SOURCE_UNAVAILABLE",null,budget,null);return new AgentResponseReplayModels.Preview(1,id,true,null,prepared.hash(),budget,null);}
+        catch(JobException failure){String block=failure.getCode().equals("AGENT_RESPONSE_REPLAY_UNAVAILABLE")?failure.getMessage():"CACHE_UNAVAILABLE";return new AgentResponseReplayModels.Preview(1,id,false,block,null,budget,null);}
+    }
+    public Turn findResponseReplaySubmission(String value,String key){String source=uuid(value);key(key);return tx.execute(status->{lockPublicOwner(source);Turn found=existingReplay(source,key,null);if(found==null)throw missing("AGENT_RESPONSE_REPLAY_SUBMISSION_NOT_FOUND");return found;});}
+    public Turn createResponseReplay(String value,JsonNode input,String key){
+        String sourceId=uuid(value);key(key);if(input==null||!input.isObject()||!input.propertyNames().equals(Set.of("snapshot_hash"))||!input.path("snapshot_hash").isString()||!input.path("snapshot_hash").asText().matches("[a-f0-9]{64}"))throw bad("INVALID_AGENT_RESPONSE_REPLAY","A verified replay snapshot is required");String snapshot=input.path("snapshot_hash").asText();
+        Turn replay=tx.execute(status->{lockPublicOwner(sourceId);return existingReplay(sourceId,key,snapshot);});if(replay!=null)return replay;
+        if(jdbc.queryForObject("SELECT COUNT(*) FROM agent_turn WHERE replay_source_turn_id=?",Integer.class,sourceId)!=0)throw conflict("AGENT_RESPONSE_REPLAY_ALREADY_EXISTS","The original turn already has a recovery");
+        ReplaySource before=replaySource(sourceId,false);String blocked=replayBlock(before,true);if(blocked!=null)throw replayRejected(blocked);replayPublishedSource(before);var prepared=replayVerifier.prepare(before.owner(),before.stage(),before.calls());if(!prepared.hash().equals(snapshot))throw conflict("AGENT_RESPONSE_REPLAY_SOURCE_CHANGED","The replay snapshot changed");
+        try{return tx.execute(status->{var current=replaySource(sourceId,true);Turn found=existingReplay(sourceId,key,snapshot);if(found!=null)return found;
+            if(!before.identity().equals(current.identity()))throw conflict("AGENT_RESPONSE_REPLAY_SOURCE_CHANGED","The original failed execution changed");
+            if(jdbc.queryForObject("SELECT COUNT(*) FROM agent_turn WHERE replay_source_turn_id=?",Integer.class,sourceId)!=0)throw conflict("AGENT_RESPONSE_REPLAY_ALREADY_EXISTS","The original turn already has a recovery");
+            String reason=replayBlock(current,true);if(reason!=null)throw replayRejected(reason);
+            var o=current.owner();String id=UUID.randomUUID().toString(),stage=UUID.randomUUID().toString(),request=AgentResponseReplayData.requestHash(sourceId,snapshot);int sequence=jdbc.queryForObject("SELECT COUNT(*)+1 FROM agent_turn WHERE session_id=?",Integer.class,o.get("session_id"));
+            jdbc.update("INSERT INTO agent_turn (id,session_id,job_id,sequence_number,question,idempotency_key,request_hash,text_model_id,text_fallback_models_json,max_text_calls,history_json,visual_mode,focus_timestamp_ms,evidence_mode,evidence_policy,replay_source_turn_id,replay_snapshot_hash,replay_descriptor_json) VALUES (?,?,?,?,?,?,?,?,?,0,?,?,?,?,?,?,?,?)",id,o.get("session_id"),o.get("job_id"),sequence,o.get("question"),key,request,o.get("text_model_id"),o.get("text_fallback_models_json"),o.get("history_json"),o.get("visual_mode"),o.get("focus_timestamp_ms"),o.get("evidence_mode"),o.get("evidence_policy"),sourceId,snapshot,canonical(prepared.descriptor()));
+            jdbc.update("INSERT INTO job_stage (id,job_id,owner_type,owner_id,stage_type,shard_key,status,input_hash,required_worker_protocol) VALUES (?,?,'AGENT_TURN',?,'AGENT_EVIDENCE',?,'READY',?,3)",stage,o.get("job_id"),id,"agent-"+id,AgentResponseReplayData.inputHash(id,request,snapshot));return turnSnapshot(lockOwner(id,String.valueOf(o.get("job_id"))));
+        });}catch(DuplicateKeyException duplicate){return tx.execute(status->{lockPublicOwner(sourceId);Turn found=existingReplay(sourceId,key,snapshot);if(found!=null)return found;throw conflict("AGENT_RESPONSE_REPLAY_ALREADY_EXISTS","The original turn already has a recovery");});}
+    }
+    private static JobException replayRejected(String reason){return switch(reason){case "SESSION_BUSY"->conflict("AGENT_SESSION_BUSY","Wait for the active session turn");case "SESSION_LIMIT"->conflict("AGENT_SESSION_LIMIT","This session reached its turn limit");default->AgentResponseReplayVerifier.unavailable(reason);};}
+    private AgentResponseReplayVerifier.Prepared verifyReplay(Map<String,Object> child,String inputHash){
+        verifySpeechInputHash(inputHash,child);JsonNode stored=AgentResponseReplayData.descriptor(child);var source=replaySource(String.valueOf(child.get("replay_source_turn_id")),true);String reason=replayBlock(source,false);if(reason!=null)throw AgentResponseReplayVerifier.unavailable(reason);
+        for(String field:List.of("session_id","job_id","question","text_model_id","text_fallback_models_json","history_json","visual_mode","focus_timestamp_ms","evidence_mode","evidence_policy"))if(!Objects.equals(child.get(field),source.owner().get(field)))throw conflict("AGENT_SUBMISSION_INVALID","Replay changed its original frozen input");
+        replayPublishedSource(source);var prepared=replayVerifier.prepare(source.owner(),source.stage(),source.calls());if(!prepared.hash().equals(child.get("replay_snapshot_hash"))||!canonical(stored).equals(canonical(prepared.descriptor())))throw conflict("AGENT_RESPONSE_REPLAY_SOURCE_CHANGED","Original replay evidence changed");return prepared;
+    }
+    private void replayPublishedSource(ReplaySource source){try{verifySpeechInputHash(String.valueOf(source.stage().get("input_hash")),source.owner());var rows=jdbc.queryForList("SELECT * FROM analysis_job WHERE id=?",source.owner().get("job_id"));if(rows.size()!=1)throw AgentResponseReplayVerifier.unavailable("SOURCE_UNAVAILABLE");sameSource(source.owner(),source(rows.getFirst(),false));}catch(JobException failure){throw AgentResponseReplayVerifier.unavailable("SOURCE_UNAVAILABLE");}}
+    private void verifyReplayResult(Map<String,Object> owner,String inputHash,JsonNode result,ArtifactVerifier.VerifiedManifest manifest,ArtifactVerifier.ManifestIdentity identity){
+        var prepared=verifyReplay(owner,inputHash);var expected=(tools.jackson.databind.node.ObjectNode)prepared.answer().deepCopy();expected.put("turn_id",String.valueOf(owner.get("id")));
+        if(!canonical(expected).equals(canonical(result)))throw conflict("AGENT_REPLAY_RESULT_MISMATCH","Recovery must retain the exact received answer");
+        var receipt=manifest.artifacts().stream().filter(file->file.kind().equals("agent_cached_answer_replay")).findFirst().orElseThrow(()->conflict("AGENT_REPLAY_RESULT_MISMATCH","Recovery provenance is missing"));
+        if(!canonical(AgentResponseReplayVerifier.proof(owner,prepared.descriptor())).equals(canonical(artifacts.readJsonArtifact(receipt,identity))))throw conflict("AGENT_REPLAY_RESULT_MISMATCH","Recovery provenance changed");
+    }
+    private static void validateReplayManifest(Map<String,Object> owner,ArtifactVerifier.VerifiedManifest manifest){
+        long proofs=manifest.artifacts().stream().filter(file->file.kind().equals("agent_cached_answer_replay")).count();
+        if(AgentResponseReplayData.isReplay(owner)){if(proofs!=1||manifest.artifacts().stream().anyMatch(file->!Set.of("agent_answer","agent_visual_frame","agent_cached_answer_replay").contains(file.kind())))throw conflict("AGENT_REPLAY_RESULT_MISMATCH","Recovery manifest must contain exactly its answer, frames and provenance");}
+        else if(proofs!=0)throw conflict("AGENT_REPLAY_RESULT_MISMATCH","Ordinary answers cannot acquire recovery provenance");
     }
     public CaptionProofreadModels.Session createCaptionSession(String exportValue,String clipValue,JsonNode input,String key){
         String export=uuid(exportValue),clip=uuid(clipValue);key(key);captionFields(input,Set.of("caption_revision","caption_content_hash"),Set.of("caption_revision","caption_content_hash"));
@@ -421,6 +496,7 @@ public class AgentService {
     private static String turnFingerprint(String id,String question,int limit,String mode,Long focus,boolean structured){return sha("agent-turn\n"+id+"\n"+question+"\n"+limit+("frames".equals(mode)?"\nvisual_mode=frames":"")+(focus==null?"":"\nfocus_timestamp_ms="+focus)+(structured?"\nevidence_mode=structured":""));}
     private static String turnFingerprint(String id,String question,int limit,String mode,Long focus,boolean structured,boolean speech){return speech?sha("agent-turn\n"+id+"\n"+question+"\n"+limit+("frames".equals(mode)?"\nvisual_mode=frames":"")+(focus==null?"":"\nfocus_timestamp_ms="+focus)+(structured?"\nevidence_mode=structured":"")+"\nevidence_policy="+AgentSpeechLookup.POLICY):turnFingerprint(id,question,limit,mode,focus,structured);}
     private static void verifySpeechRequest(Map<String,Object> owner){
+        if(AgentResponseReplayData.isReplay(owner)){AgentResponseReplayData.descriptor(owner);return;}
         if(!AgentSpeechLookup.enabled(owner))return;
         String question=String.valueOf(owner.get("question"));int budget=((Number)owner.get("max_text_calls")).intValue();
         if(!AgentSpeechLookup.validQuestion(question)||budget<1||budget>24||!turnFingerprint(String.valueOf(owner.get("session_id")),question,budget,visualMode(owner),AgentFocus.value(owner),true,true).equals(owner.get("request_hash")))throw invalidSubmission();
@@ -433,12 +509,14 @@ public class AgentService {
         verifySpeechInputHash(String.valueOf(stage.get("input_hash")),owner);
     }
     private static void verifySpeechInputHash(String inputHash,Map<String,Object> owner){
+        if(AgentResponseReplayData.isReplay(owner)){AgentResponseReplayData.descriptor(owner);if(!AgentResponseReplayData.inputHash(String.valueOf(owner.get("id")),String.valueOf(owner.get("request_hash")),String.valueOf(owner.get("replay_snapshot_hash"))).equals(inputHash))throw conflict("AGENT_STAGE_UNAVAILABLE","Replay input no longer matches its immutable source");return;}
         if(!AgentSpeechLookup.enabled(owner))return;verifySpeechRequest(owner);
         String history=canonical(AgentAnswerValidator.JSON.readTree(String.valueOf(owner.get("history_json")))),fallbacks=TextExecutionPolicy.serialize(TextExecutionPolicy.storedFallbacks(owner.get("text_fallback_models_json")));
         String expected=sha(owner.get("request_hash")+"\n"+owner.get("source_hash")+"\n"+owner.get("transcript_hash")+"\n"+owner.get("analysis_hash")+"\n"+owner.get("text_model_id")+"\n"+fallbacks+"\n"+history);
         if(!expected.equals(inputHash))throw conflict("AGENT_STAGE_UNAVAILABLE","Speech lookup stage input no longer matches its frozen source");
     }
-    private Map<String,Object> completedStage(String parent,String type){var rows=jdbc.queryForList("SELECT * FROM job_stage WHERE job_id=? AND owner_type='ANALYSIS' AND stage_type=? AND status='SUCCEEDED' FOR UPDATE",parent,type);if(rows.size()!=1)throw conflict("AGENT_SOURCE_UNAVAILABLE","Published source is unavailable");return rows.getFirst();}
+    private Map<String,Object> completedStage(String parent,String type){return completedStage(parent,type,true);}
+    private Map<String,Object> completedStage(String parent,String type,boolean locked){var rows=jdbc.queryForList("SELECT * FROM job_stage WHERE job_id=? AND owner_type='ANALYSIS' AND stage_type=? AND status='SUCCEEDED'"+(locked?" FOR UPDATE":""),parent,type);if(rows.size()!=1)throw conflict("AGENT_SOURCE_UNAVAILABLE","Published source is unavailable");return rows.getFirst();}
     private Map<String,Object> lockAnalysis(String id){var rows=jdbc.queryForList("SELECT * FROM analysis_job WHERE id=? FOR UPDATE",id);if(rows.isEmpty())throw missing("JOB_NOT_FOUND");return rows.getFirst();}
     private ArtifactVerifier.ManifestIdentity identity(Map<String,Object> stage,Map<String,Object> job,String hash){return new ArtifactVerifier.ManifestIdentity(String.valueOf(job.get("id")),String.valueOf(job.get("video_id")),((Number)job.get("generation")).intValue(),String.valueOf(stage.get("id")),String.valueOf(stage.get("stage_type")),((Number)stage.get("attempt")).intValue(),String.valueOf(stage.get("run_token")),hash);}
     private ArtifactVerifier.ManifestIdentity identity(StageRow stage,Map<String,Object> job,String hash){return new ArtifactVerifier.ManifestIdentity(stage.jobId(),String.valueOf(job.get("video_id")),((Number)job.get("generation")).intValue(),stage.id(),stage.stageType(),stage.attempt(),stage.runToken(),hash);}

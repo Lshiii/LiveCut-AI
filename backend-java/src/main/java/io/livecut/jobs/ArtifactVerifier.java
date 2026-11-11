@@ -116,6 +116,13 @@ public class ArtifactVerifier {
         if(expected==null||!Set.of("AGENT_VISUAL","AGENT_VISUAL_FOCUS","AGENT_EVIDENCE").contains(expected.stageType())||!"agent_visual_frame".equals(artifact.kind()))throw invalidReference();
         return verifiedBytes(artifact.key(),artifact.sha256(),expected.attemptPrefix()+"visual-frames/",1024*1024);
     }
+    /** Bounded read-only recovery admission; caller binds prefix to an original succeeded ledger response. */
+    public byte[] readReplayFile(String key,String prefix,int maximum){
+        if(maximum<1||maximum>MAX_RESPONSE_BYTES)throw invalidReference();
+        Path path=confinedFile(key,prefix);try(java.io.InputStream input=Files.newInputStream(path,LinkOption.NOFOLLOW_LINKS)){
+            if(Files.size(path)>maximum)throw tooLarge();byte[] bytes=input.readNBytes(maximum+1);if(bytes.length>maximum)throw tooLarge();if(!path.equals(confinedFile(key,prefix)))throw unsafeReference();return bytes;
+        }catch(NoSuchFileException failure){throw notFound();}catch(IOException failure){throw unreadable();}
+    }
 
     public VerifiedManifest verifyExportManifest(String key, String expectedHash, ManifestIdentity expected,
                                                   ExportIdentity export) {

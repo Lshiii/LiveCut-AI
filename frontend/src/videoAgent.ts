@@ -30,7 +30,8 @@ export interface AgentTurn {
   evidence_mode?: 'structured'
   evidence_policy?: 'speech_lookup_v1'
   focus_timestamp_ms?: number
-  stage: { id: string; stage_type: 'SEGMENT' | 'AGENT_VISUAL' | 'AGENT_VISUAL_FOCUS' | 'AGENT_EVIDENCE'; status: string; attempt: number; error_code: string | null; diagnostic?: StageDiagnostic; text_progress?: TextProgress }
+  replay_source_turn_id?: string; replay_snapshot_hash?: string
+  stage: { id: string; stage_type: 'SEGMENT' | 'AGENT_VISUAL' | 'AGENT_VISUAL_FOCUS' | 'AGENT_EVIDENCE'; status: string; attempt: number; error_code: string | null; diagnostic?: StageDiagnostic; text_progress?: TextProgress; required_worker_protocol?: 3 }
   result: AgentResult | null
 }
 export interface AgentSession { id: string; job_id: string; video_id: string; created_at: string; source: AgentSource; turns: AgentTurn[] }
@@ -168,23 +169,27 @@ function result(raw: unknown, turn: AgentTurn, session: AgentSessionIdentity, ev
   return { ...raw, tool_calls: calls, citations, ...(visual ? { visual_evidence: frames, visual_citations: visualCitations } : {}) } as unknown as AgentResult
 }
 export function parseAgentTurn(raw: unknown, session: AgentSessionIdentity, turnId?: string): AgentTurn {
+  const replay = row(raw) && (Object.hasOwn(raw, 'replay_source_turn_id') || Object.hasOwn(raw, 'replay_snapshot_hash') || row(raw.stage) && Object.hasOwn(raw.stage, 'required_worker_protocol'))
   if (!row(raw) || !uuid(raw.id) || (turnId !== undefined && raw.id !== turnId) || raw.session_id !== session.id
     || raw.job_id !== session.job_id || !text(raw.question, 2000) || !integer(raw.sequence, 1, 100)
     || !['QUEUED', 'RUNNING', 'SUCCEEDED', 'FAILED', 'CANCELLED'].includes(raw.status as string)
     || !integer(raw.state_version, 1) || !date(raw.created_at) || !date(raw.updated_at)
-    || !row(raw.budget) || !integer(raw.budget.max_text_calls, 1, 24) || !integer(raw.budget.text_calls_reserved, 0, raw.budget.max_text_calls)
+    || !row(raw.budget) || (replay ? raw.budget.max_text_calls !== 0 || raw.budget.text_calls_reserved !== 0 : !integer(raw.budget.max_text_calls, 1, 24) || !integer(raw.budget.text_calls_reserved, 0, raw.budget.max_text_calls))
     || !(raw.visual_mode === undefined || raw.visual_mode === 'none' || raw.visual_mode === 'frames')
     || Object.hasOwn(raw, 'evidence_mode') && (raw.evidence_mode !== 'structured' || raw.visual_mode !== 'frames')
     || Object.hasOwn(raw, 'evidence_policy') && (raw.evidence_policy !== 'speech_lookup_v1' || raw.visual_mode !== 'frames' || raw.evidence_mode !== 'structured' || !evidenceTextValid(raw.question, 2000))
     || Object.hasOwn(raw, 'focus_timestamp_ms') && (raw.visual_mode !== 'frames' || !integer(raw.focus_timestamp_ms, 0, session.source.duration_ms - 1))
     || !row(raw.stage) || !uuid(raw.stage.id) || raw.stage.stage_type !== (raw.evidence_mode === 'structured' ? 'AGENT_EVIDENCE' : Object.hasOwn(raw, 'focus_timestamp_ms') ? 'AGENT_VISUAL_FOCUS' : raw.visual_mode === 'frames' ? 'AGENT_VISUAL' : 'SEGMENT') || !STAGES.has(raw.stage.status as string)
     || !integer(raw.stage.attempt) || !(raw.stage.error_code === null || (typeof raw.stage.error_code === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(raw.stage.error_code)))) invalid()
+  if (replay && (!uuid(raw.replay_source_turn_id) || raw.replay_source_turn_id === raw.id || !hash(raw.replay_snapshot_hash)
+    || raw.evidence_policy !== 'speech_lookup_v1' || raw.stage.required_worker_protocol !== 3)) invalid()
   const { diagnostic: rawDiagnostic, text_progress: rawProgress, ...stage } = raw.stage
   const diagnostic = parseDiagnostic(rawDiagnostic, raw.stage.attempt, raw.stage.error_code)
   const progress = parseTextProgress(rawProgress)
   const turn = { ...raw, stage: { ...stage, ...(diagnostic ? { diagnostic } : {}), ...(progress ? { text_progress: progress } : {}) }, result: null } as unknown as AgentTurn
   if (raw.status === 'SUCCEEDED') turn.result = result(raw.result, turn, session)
   else if (raw.result !== null) invalid()
+  if (replay && turn.result && (turn.result.tool_calls.length !== (turn.focus_timestamp_ms === undefined ? 1 : 2) || turn.result.tool_calls.some(call => call.origin === 'MODEL'))) invalid()
   return turn
 }
 export function parseAgentSession(raw: unknown, jobId: string, videoId: string, videoHash: string, sessionId?: string): AgentSession {
@@ -200,6 +205,13 @@ export function parseAgentSession(raw: unknown, jobId: string, videoId: string, 
     if (ids.has(turn.id) || turn.sequence <= previous) invalid()
     ids.add(turn.id); previous = turn.sequence; if (agentTurnActive(turn)) active++
   }
+  const replayedSources = new Set<string>()
+  for (const turn of turns.filter(turn => turn.replay_source_turn_id)) {
+    const source = turns.find(source => source.id === turn.replay_source_turn_id)
+    if (replayedSources.has(turn.replay_source_turn_id!) || !source || source.status !== 'FAILED' || source.stage.error_code !== 'INVALID_AGENT_OUTPUT' || source.stage.attempt !== 1 || source.replay_source_turn_id
+      || source.evidence_policy !== 'speech_lookup_v1' || source.sequence >= turn.sequence || source.question !== turn.question || source.focus_timestamp_ms !== turn.focus_timestamp_ms) invalid()
+    replayedSources.add(turn.replay_source_turn_id!)
+  }
   if (active > 1) invalid()
   return { ...raw, source, turns } as unknown as AgentSession
 }
@@ -208,6 +220,7 @@ export function newestAgentTurn(known: AgentTurn | undefined, incoming: AgentTur
   if (known.id !== incoming.id || known.session_id !== incoming.session_id || known.job_id !== incoming.job_id
     || known.sequence !== incoming.sequence || known.question !== incoming.question || known.created_at !== incoming.created_at
     || known.stage.id !== incoming.stage.id || known.stage.stage_type !== incoming.stage.stage_type || known.focus_timestamp_ms !== incoming.focus_timestamp_ms
+    || known.replay_source_turn_id !== incoming.replay_source_turn_id || known.replay_snapshot_hash !== incoming.replay_snapshot_hash || known.stage.required_worker_protocol !== incoming.stage.required_worker_protocol
     || (known.visual_mode ?? 'none') !== (incoming.visual_mode ?? 'none') || known.budget.max_text_calls !== incoming.budget.max_text_calls) invalid()
   if (known.evidence_mode !== incoming.evidence_mode || known.evidence_policy !== incoming.evidence_policy) invalid()
   if (incoming.state_version < known.state_version || (!agentTurnActive(known) && incoming.status !== known.status)
