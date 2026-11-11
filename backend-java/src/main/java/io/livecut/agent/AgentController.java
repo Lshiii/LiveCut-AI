@@ -36,6 +36,10 @@ public class AgentController {
     public AgentModels.SpeechLookupCapability speechLookupCapability(){return new AgentModels.SpeechLookupCapability(true,2);}
     @GetMapping("/api/agent-capabilities/cached-answer-replay")
     public AgentModels.CachedAnswerReplayCapability cachedAnswerReplayCapability(){return new AgentModels.CachedAnswerReplayCapability(true,3);}
+    @GetMapping("/api/agent-capabilities/screen-search")
+    public AgentModels.ScreenSearchCapability screenSearchCapability(){return new AgentModels.ScreenSearchCapability(true,4);}
+    @GetMapping("/api/jobs/{jobId}/agent-screen-source")
+    public ResponseEntity<java.util.Map<String,JsonNode>> screenSource(@PathVariable String jobId){return ResponseEntity.ok().cacheControl(CacheControl.noStore()).body(agents.screenSource(jobId));}
     @GetMapping("/api/agent-turns/{id}/response-replay")
     public ResponseEntity<AgentResponseReplayModels.Preview> responseReplay(@PathVariable String id){return ResponseEntity.ok().cacheControl(CacheControl.noStore()).body(agents.responseReplayPreview(id));}
     @PostMapping("/api/agent-turns/{id}/response-replay")

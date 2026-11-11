@@ -5,6 +5,7 @@ import * as videoAgent from '../videoAgent.ts'
 import * as evidence from '../agentEvidenceAnswer.ts'
 import * as review from '../agentEvidenceReview.ts'
 import * as speech from '../agentSpeechLookup.ts'
+import * as screenSearch from '../agentScreenSearch.ts'
 import * as executors from '../executors.ts'
 import * as visual from '../agentVisualEvidence.ts'
 import * as focus from '../agentFocus.ts'
@@ -18,6 +19,7 @@ import * as answerReplayStorage from '../agentAnswerReplayStorage.ts'
 import * as history from '../agentSessionHistory.ts'
 import * as refresh from '../agentRefresh.ts'
 import { evidenceSample, cloneEvidence } from './support/agentEvidenceFixture.ts'
+import { screenSample } from './support/agentScreenSearchFixture.ts'
 import { speechSample } from './support/agentSpeechLookupFixture.ts'
 import { MemoryStorage } from './support/agentSubmissionFixture.ts'
 import { allHostNodes, compileHostComponent, flushHost, hostNode, hostRenderer, hostText } from './support/vueHost.ts'
@@ -36,6 +38,9 @@ async function mount(active = true) {
     if (path === '/api/agent-capabilities') return { visual_mode: 'frames', visual_model_id: 'synthetic-vl', max_frames: 32, max_clip_duration_ms: 12000, clip_sample_interval_ms: 500 }
     if (path === '/api/agent-capabilities/focus') return { visual_focus_supported: true }
     if (path === '/api/agent-capabilities/evidence') return { structured_evidence_supported: true }
+    if (path === '/api/agent-capabilities/screen-search') return { screen_search_supported: true, worker_protocol: 4 }
+    // Synthetic short-video metadata follows the actual 45s producer: one sample.
+    if (path === `/api/jobs/${session.job_id}/agent-screen-source`) return { screen_source: { ...screenSample().turn.screen_source!, duration_ms: session.source.duration_ms, frame_count: 1, text_frame_count: 1 } }
     if (path === '/api/agent-capabilities/speech-lookup') return { speech_lookup_supported: true, worker_protocol: 2 }
     if (path.startsWith('/api/executors')) return executorSnapshot()
     if (path.includes('/agent-session-history')) return { schema_version: '1.0', job_id: session.job_id, items: [], limit: 20, next_cursor: null, active_count: 0 }
@@ -48,18 +53,19 @@ async function mount(active = true) {
       if (body.visual_mode !== 'frames') { delete turn.visual_mode; delete turn.evidence_mode; turn.stage.stage_type = 'SEGMENT' }
       else if (body.evidence_mode !== 'structured') { delete turn.evidence_mode; turn.stage.stage_type = 'AGENT_VISUAL' }
       if (body.evidence_policy === 'speech_lookup_v1') turn.evidence_policy = 'speech_lookup_v1'
+      if (body.evidence_policy === 'screen_search_v1') { turn.evidence_policy = 'screen_search_v1'; turn.screen_source = { ...screenSample().turn.screen_source!, duration_ms: session.source.duration_ms, frame_count: 1, text_frame_count: 1 }; turn.stage.required_worker_protocol = 4 }
       submitted = turn; session.turns = [turn]; return cloneEvidence(turn)
     }
     throw Error(`Unexpected ${init.method ?? 'GET'} ${path}`)
   }
   let handle = defaultHandle
   const api = (path: string, init: any = {}) => { calls.push({ path, init, stored: init.headers?.['Idempotency-Key'] ? [...storage.values.values()].find(value => JSON.parse(value).key === init.headers['Idempotency-Key']) : undefined }); return handle(path, init) }
-  const nullComponent = { render: () => null }, cards = compileHostComponent(new URL('../AgentEvidenceAnswer.vue', import.meta.url), { './agentEvidenceAnswer': evidence, './agentEvidenceReview': review, './agentSpeechLookup': speech, './agentVisualEvidence': visual, './topics': topics })
+  const nullComponent = { render: () => null }, cards = compileHostComponent(new URL('../AgentEvidenceAnswer.vue', import.meta.url), { './agentEvidenceAnswer': evidence, './agentEvidenceReview': review, './agentSpeechLookup': speech, './agentScreenSearch': screenSearch, './agentVisualEvidence': visual, './topics': topics })
   const replayPanel = compileHostComponent(new URL('../AgentAnswerReplayPanel.vue', import.meta.url), { './api': { api }, './videoAgent': videoAgent, './agentAnswerReplay': answerReplay, './agentAnswerReplayStorage': answerReplayStorage })
   const component = compileHostComponent(new URL('../VideoAgentPanel.vue', import.meta.url), { './api': { api, ApiError: HttpError, post: (path: string, body?: unknown, headers: any = {}) => api(path, { method: 'POST', headers: { 'Content-Type': 'application/json', ...headers }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) }) },
     './AgentAnswerReplayPanel.vue': replayPanel, './FailureDiagnostic.vue': nullComponent, './TextRequestProgress.vue': nullComponent, './AgentAnswer.vue': nullComponent, './AgentEvidenceAnswer.vue': cards, './AgentVisualEvidence.vue': nullComponent, './AgentNotePanel.vue': nullComponent,
     './agentRefresh': refresh, './agentSessionHistory': history, './agentVisualEvidence': visual, './agentFocus': focus, './agentFrameFollowup': followup, './sequencePreview': sequence, './answerClip': anchors, './topics': topics,
-    './videoAgent': videoAgent, './agentSubmissionRecovery': recovery, './agentEvidenceAnswer': evidence, './agentSpeechLookup': speech, './executors': executors })
+    './videoAgent': videoAgent, './agentSubmissionRecovery': recovery, './agentEvidenceAnswer': evidence, './agentSpeechLookup': speech, './agentScreenSearch': screenSearch, './executors': executors })
   const exposed = ref<any>(null), root = hostNode('root'), props = { jobId: session.job_id, videoId: session.video_id, videoHash: session.source.video_sha256, videoUrl: '/original.mp4', active }
   const wrapper = { setup(_props: unknown, { attrs }: any) { return () => h(component, { ...attrs, ref: exposed }) } }, render = async () => { hostRenderer.render(h(wrapper, { ...props }), root); await flushHost() }
   await render(); await flushHost()
@@ -70,7 +76,8 @@ async function mount(active = true) {
     setVisual: async (value: 'frames' | 'none') => { nodes().find(node => node.type === 'input' && node.props['true-value'] === 'frames')!.props['onUpdate:modelValue'](value); await flushHost() },
     setEvidence: async (value: boolean) => { nodes().find(node => node.type === 'input' && !node.props['true-value'] && node.props.type === 'checkbox')!.props['onUpdate:modelValue'](value); await flushHost() },
     evidenceCheckbox: () => nodes().find(node => node.type === 'input' && !node.props['true-value'] && node.props.type === 'checkbox'),
-    setLookup: async (value: boolean) => { nodes().find(node => node.props['aria-label'] === '回答前核对讲者原句')!.props['onUpdate:modelValue'](value); await flushHost() },
+    setLookup: async (value: boolean) => { nodes().find(node => node.props['aria-label'] === '回答前核对讲者原句')!.props['onUpdate:modelValue'](value ? 'speech_lookup_v1' : 'none'); await flushHost() },
+    setScreen: async () => { nodes().find(node => node.props['aria-label'] === '搜索画面文字并看图')!.props['onUpdate:modelValue']('screen_search_v1'); await flushHost() },
     lookupCheckbox: () => nodes().find(node => node.props['aria-label'] === '回答前核对讲者原句'),
     click: async (name: string) => { const node = button(name); assert.equal(!!node.props.disabled, false, name); node.props.onClick({}); await flushHost() },
     submit: async () => { nodes().find(node => node.type === 'form')!.props.onSubmit({ preventDefault() {} }); await flushHost() },
@@ -279,5 +286,94 @@ test('actual parent exposes unresolved recovery as protected work without cleari
     assert.equal(ui.question().value, '保留新的问题和模式')
     assert.equal(ui.calls.some(call => call.init.method === 'POST'), false)
     assert.match(hostText(ui.root), /原恢复提交结果待核对/)
+  } finally { ui.close() }
+})
+
+test('screen radio is explicit, preserves outer-off selection and fresh source is checked before any durable entry or write', async () => {
+  const ui = await mount()
+  try {
+    await ui.setVisual('frames'); await ui.setEvidence(true)
+    assert.equal(ui.nodes().find(node => node.props['aria-label'] === '按需查证')!.checked, true)
+    await ui.setScreen(); await ui.fill('找出 Redis 出现的画面'); assert.equal(ui.exposed.value.dirty, true)
+    await ui.setEvidence(false); await ui.submit(); assert.match(hostText(ui.root), /画面文字定位选择保留/)
+    assert.equal(ui.calls.filter(call => call.init.method === 'POST').length, 0)
+    await ui.setEvidence(true); await ui.setVisual('none'); await ui.submit()
+    assert.equal(ui.nodes().find(node => node.props['aria-label'] === '搜索画面文字并看图')!.checked, true)
+    await ui.setVisual('frames'); await ui.submit(); await settle(() => !ui.exposed.value.pending)
+    const source = ui.calls.findIndex(call => call.path.endsWith('/agent-screen-source')), firstWrite = ui.calls.findIndex(call => call.init.method === 'POST')
+    assert.ok(source >= 0 && source < firstWrite)
+    assert.ok(ui.calls.slice(0, firstWrite).some(call => call.path.includes('required_worker_protocol=4')))
+    const post = ui.calls.find(call => call.path.endsWith('/turns') && call.init.method === 'POST')!
+    assert.equal(JSON.parse(post.init.body).evidence_policy, 'screen_search_v1'); assert.equal(JSON.parse(post.stored!).input, post.init.body)
+    assert.equal(ui.storage.length, 0); assert.equal(ui.question().value, '')
+  } finally { ui.close() }
+})
+
+test('screen missing OCR, old source route, malformed source and unverifiable v4 queue leave zero entries and zero POST', async () => {
+  for (const failure of ['no-ocr', 'route404', 'invalid-source', 'no-v4', 'cap503', 'bad-cap']) {
+    const ui = await mount()
+    try {
+      await ui.setVisual('frames'); await ui.setEvidence(true); await ui.setScreen(); await ui.fill('保留画面查找')
+      ui.setHandle(async (path, init) => {
+        if (path.endsWith('/agent-screen-source')) {
+          assert.equal(ui.storage.length, 0)
+          if (failure === 'no-ocr') throw new HttpError('AGENT_SCREEN_SOURCE_UNAVAILABLE', undefined, 409)
+          if (failure === 'route404') throw new HttpError('HTTP_404', undefined, 404)
+          if (failure === 'invalid-source') return { screen_source: { ...screenSample().turn.screen_source, secret_path: '/private' } }
+        }
+        if (path.includes('required_worker_protocol=4') && failure === 'no-v4') return executorSnapshot(false)
+        if (path === '/api/agent-capabilities/screen-search') {
+          if (failure === 'cap503') throw new HttpError('HTTP_503', undefined, 503)
+          if (failure === 'bad-cap') return { screen_search_supported: true, worker_protocol: 3 }
+        }
+        return ui.defaultHandle(path, init)
+      })
+      await ui.submit(); await settle(() => !ui.exposed.value.pending)
+      assert.equal(ui.storage.length, 0); assert.equal(ui.calls.filter(call => call.init.method === 'POST').length, 0)
+      assert.equal(ui.question().value, '保留画面查找'); assert.equal(ui.nodes().find(node => node.props['aria-label'] === '搜索画面文字并看图')!.checked, true)
+      if (failure === 'no-ocr') assert.match(hostText(ui.root), /不会自动解析或 OCR/)
+      if (failure === 'route404') assert.match(hostText(ui.root), /升级后重试/)
+    } finally { ui.close() }
+  }
+})
+
+test('hidden late screen source cannot create entry or write; returning performs a fresh source GET', async () => {
+  const ui = await mount()
+  try {
+    await ui.setVisual('frames'); await ui.setEvidence(true); await ui.setScreen(); await ui.fill('原问题')
+    const late = deferred<unknown>()
+    ui.setHandle((path, init) => path.endsWith('/agent-screen-source') ? late.promise : ui.defaultHandle(path, init))
+    await ui.submit(); await settle(() => ui.calls.some(call => call.path.endsWith('/agent-screen-source')))
+    ui.props.active = false; await ui.render(); await ui.fill('隐藏后的新问题')
+    late.resolve({ screen_source: screenSample().turn.screen_source }); await flushHost()
+    assert.equal(ui.storage.length, 0); assert.equal(ui.calls.filter(call => call.init.method === 'POST').length, 0); assert.equal(ui.question().value, '隐藏后的新问题')
+    ui.setHandle(ui.defaultHandle); ui.props.active = true; await ui.render(); await ui.submit(); await settle(() => !ui.exposed.value.pending)
+    assert.equal(ui.calls.filter(call => call.path.endsWith('/agent-screen-source')).length, 2)
+  } finally { ui.close() }
+})
+
+test('unknown screen submission recovers original raw body by GET despite unavailable new policy, preserving changed draft strategy', async () => {
+  const ui = await mount()
+  try {
+    await ui.setVisual('frames'); await ui.setEvidence(true); await ui.setScreen(); await ui.fill('原画面问题')
+    ui.setHandle(async (path, init) => { const value = await ui.defaultHandle(path, init); if (path.endsWith('/turns') && init.method === 'POST') throw new HttpError('NETWORK_UNAVAILABLE'); return value })
+    await ui.submit(); await settle(() => !ui.exposed.value.pending); assert.equal(ui.storage.length, 1)
+    await ui.setLookup(true); await ui.fill('新原句问题')
+    ui.setHandle(async (path, init) => { if (path.includes('capabilities') || path.includes('/executors') || path.endsWith('/agent-screen-source')) throw new HttpError('HTTP_503', undefined, 503); return ui.defaultHandle(path, init) })
+    const before = ui.calls.length; await ui.click('核对原提交'); await settle(() => !ui.exposed.value.pending && ui.storage.length === 0)
+    assert.equal(ui.question().value, '新原句问题'); assert.equal(ui.lookupCheckbox()!.checked, true)
+    assert.ok(!ui.calls.slice(before).some(call => call.init.method === 'POST' || call.path.includes('capabilities') || call.path.includes('/executors') || call.path.endsWith('/agent-screen-source')))
+  } finally { ui.close() }
+})
+
+test('actual screen answer card shows OCR locators and bounded no-hit status without duplicating the answer or requesting images', async () => {
+  const ui = await mount()
+  try {
+    const packet = screenSample().session
+    ui.setHandle((path, init) => init.method === 'POST' && path.endsWith('/agent-sessions') ? Promise.resolve(cloneEvidence(packet)) : ui.defaultHandle(path, init))
+    await ui.click('＋ 新对话'); await settle(() => hostText(ui.root).includes('OCR 线索与实际截图分开核对'))
+    assert.match(hostText(ui.root), /文字仅用于定位/); assert.match(hostText(ui.root), /实际查看/); assert.match(hostText(ui.root), /OCR 定位文字/)
+    assert.match(hostText(ui.root), /模型选择/); assert.equal(ui.nodes().filter(node => node.type === 'img').length, 0)
+    assert.ok(!ui.calls.some(call => call.path.includes('visual-evidence')))
   } finally { ui.close() }
 })

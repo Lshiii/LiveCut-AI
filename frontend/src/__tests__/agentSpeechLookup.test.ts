@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { h } from 'vue'
 import * as speech from '../agentSpeechLookup.ts'
+import * as screenSearch from '../agentScreenSearch.ts'
 import { parseAgentSpeechLookupCapability, speechLookupQuery, speechAnchorDistance, agentToolOriginLabel } from '../agentSpeechLookup.ts'
 import * as evidence from '../agentEvidenceAnswer.ts'
 import * as review from '../agentEvidenceReview.ts'
@@ -92,7 +93,7 @@ test('policy applies strict text validation before pending turns can be acknowle
   turn.budget = { max_text_calls: 1, text_calls_reserved: 0 }; assert.equal(parseAgentTurn(turn, session).budget.max_text_calls, 1)
 })
 test('production card presents program scope/query truncation/record status separately from SPEECH without new requests', async () => {
-  const component = compileHostComponent(new URL('../AgentEvidenceAnswer.vue', import.meta.url), { './agentEvidenceAnswer': evidence, './agentEvidenceReview': review, './agentSpeechLookup': speech, './agentVisualEvidence': visual, './topics': topics }), root = hostNode('root')
+  const component = compileHostComponent(new URL('../AgentEvidenceAnswer.vue', import.meta.url), { './agentEvidenceAnswer': evidence, './agentEvidenceReview': review, './agentSpeechLookup': speech, './agentScreenSearch': screenSearch, './agentVisualEvidence': visual, './topics': topics }), root = hostNode('root')
   try {
     for (const id of ['long_query_prefix_is_explicit', 'context_limit_keeps_anchor_before_neighbors', 'empty_search_is_not_full_video_absence']) {
       const { session, turn } = speechSample(id), parsed = parseAgentTurn(turn, session), before = JSON.stringify(parsed)

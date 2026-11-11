@@ -1,0 +1,1604 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://livecut.local/contracts/agent-answer-evidence-screen.schema.json",
+  "title": "Opt-in structured answer with published screen text search and actual observed frames",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "session_id",
+    "turn_id",
+    "job_id",
+    "video_id",
+    "source_hash",
+    "transcript_hash",
+    "question",
+    "answer",
+    "answer_scope",
+    "citations",
+    "tool_calls",
+    "provenance",
+    "suggested_clip_instruction",
+    "visual_evidence",
+    "visual_citations",
+    "evidence_mode",
+    "answer_blocks",
+    "evidence_policy",
+    "screen_source",
+    "screen_searches"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.5"
+    },
+    "session_id": {
+      "$ref": "#/$defs/id"
+    },
+    "turn_id": {
+      "$ref": "#/$defs/id"
+    },
+    "job_id": {
+      "$ref": "#/$defs/id"
+    },
+    "video_id": {
+      "$ref": "#/$defs/id"
+    },
+    "source_hash": {
+      "$ref": "#/$defs/hash"
+    },
+    "transcript_hash": {
+      "$ref": "#/$defs/hash"
+    },
+    "question": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2000,
+      "pattern": "\\S"
+    },
+    "answer": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 6000,
+      "pattern": "\\S",
+      "x-max-utf16-units": 6000
+    },
+    "answer_scope": {
+      "enum": [
+        "VIDEO",
+        "GENERAL",
+        "INSUFFICIENT"
+      ]
+    },
+    "suggested_clip_instruction": {
+      "anyOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000,
+          "pattern": "\\S"
+        }
+      ]
+    },
+    "citations": {
+      "type": "array",
+      "maxItems": 24,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "utterance_id",
+          "start_ms",
+          "end_ms",
+          "text"
+        ],
+        "properties": {
+          "utterance_id": {
+            "$ref": "#/$defs/id"
+          },
+          "start_ms": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "end_ms": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "text": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100000,
+            "pattern": "\\S"
+          }
+        }
+      }
+    },
+    "tool_calls": {
+      "type": "array",
+      "maxItems": 4
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "text_model_id",
+        "prompt_version",
+        "retrieval_mode"
+      ],
+      "properties": {
+        "text_model_id": {
+          "$ref": "#/$defs/id"
+        },
+        "prompt_version": {
+          "const": "video-agent-evidence-screen-v1"
+        },
+        "retrieval_mode": {
+          "enum": [
+            "none",
+            "bm25",
+            "bm25_dense_rrf"
+          ]
+        }
+      }
+    },
+    "visual_evidence": {
+      "type": "array",
+      "maxItems": 32,
+      "items": {
+        "$ref": "#/$defs/frame"
+      }
+    },
+    "visual_citations": {
+      "type": "array",
+      "maxItems": 12,
+      "items": {
+        "$ref": "#/$defs/visualCitation"
+      }
+    },
+    "evidence_mode": {
+      "const": "structured"
+    },
+    "focus_timestamp_ms": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "answer_blocks": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 8,
+      "items": {
+        "$ref": "#/$defs/answerBlock"
+      }
+    },
+    "evidence_policy": {
+      "const": "screen_search_v1"
+    },
+    "screen_source": {
+      "$ref": "#/$defs/screenSource"
+    },
+    "screen_searches": {
+      "type": "array",
+      "maxItems": 4,
+      "items": {
+        "$ref": "#/$defs/screenSearch"
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "answer_scope": {
+            "const": "VIDEO"
+          }
+        }
+      },
+      "then": {
+        "anyOf": [
+          {
+            "properties": {
+              "citations": {
+                "minItems": 1
+              }
+            }
+          },
+          {
+            "properties": {
+              "visual_citations": {
+                "minItems": 1
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "tool_calls": {
+            "contains": {
+              "properties": {
+                "tool_name": {
+                  "const": "search_transcript"
+                }
+              },
+              "required": [
+                "tool_name"
+              ]
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "provenance": {
+            "properties": {
+              "retrieval_mode": {
+                "const": "bm25"
+              }
+            }
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "provenance": {
+            "properties": {
+              "retrieval_mode": {
+                "const": "none"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "focus_timestamp_ms"
+        ]
+      },
+      "then": {
+        "properties": {
+          "tool_calls": {
+            "minItems": 1,
+            "items": {
+              "$ref": "#/$defs/focusToolCall"
+            }
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "tool_calls": {
+            "items": {
+              "$ref": "#/$defs/toolCall"
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "answer_scope": {
+            "const": "VIDEO"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "answer_blocks": {
+            "contains": {
+              "properties": {
+                "kind": {
+                  "enum": [
+                    "SPEECH",
+                    "FRAME",
+                    "SAMPLED_CHANGE"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "answer_scope": {
+            "const": "GENERAL"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "answer_blocks": {
+            "items": {
+              "properties": {
+                "kind": {
+                  "const": "GENERAL"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "answer_scope": {
+            "const": "INSUFFICIENT"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "answer_blocks": {
+            "items": {
+              "properties": {
+                "kind": {
+                  "const": "INSUFFICIENT"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$"
+    },
+    "hash": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "searchArguments": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "query",
+        "top_k"
+      ],
+      "properties": {
+        "query": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 300,
+          "pattern": "\\S"
+        },
+        "top_k": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 8
+        }
+      }
+    },
+    "contextArguments": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "utterance_id",
+        "before",
+        "after"
+      ],
+      "properties": {
+        "utterance_id": {
+          "$ref": "#/$defs/id"
+        },
+        "before": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 3
+        },
+        "after": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 3
+        }
+      }
+    },
+    "topicsArguments": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "offset",
+        "limit"
+      ],
+      "properties": {
+        "offset": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 20000
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 12
+        }
+      }
+    },
+    "toolCall": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "step",
+        "tool_name",
+        "arguments",
+        "result_utterance_ids",
+        "result_frame_ids",
+        "origin"
+      ],
+      "properties": {
+        "step": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4
+        },
+        "tool_name": {
+          "enum": [
+            "search_transcript",
+            "read_context",
+            "list_topics",
+            "inspect_frames",
+            "inspect_clip",
+            "search_screen_text"
+          ]
+        },
+        "arguments": {
+          "type": "object"
+        },
+        "result_utterance_ids": {
+          "type": "array",
+          "maxItems": 200,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/id"
+          }
+        },
+        "result_frame_ids": {
+          "type": "array",
+          "maxItems": 24,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/frameId"
+          }
+        },
+        "origin": {
+          "enum": [
+            "MODEL"
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "tool_name": {
+                "const": "search_transcript"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "arguments": {
+                "$ref": "#/$defs/searchArguments"
+              },
+              "result_frame_ids": {
+                "maxItems": 0
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "tool_name": {
+                "const": "read_context"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "arguments": {
+                "$ref": "#/$defs/contextArguments"
+              },
+              "result_frame_ids": {
+                "maxItems": 0
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "tool_name": {
+                "const": "list_topics"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "arguments": {
+                "$ref": "#/$defs/topicsArguments"
+              },
+              "result_frame_ids": {
+                "maxItems": 0
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "tool_name": {
+                "const": "inspect_frames"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "arguments": {
+                "$ref": "#/$defs/frameArguments"
+              },
+              "result_utterance_ids": {
+                "maxItems": 0
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "tool_name": {
+                "const": "inspect_clip"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "arguments": {
+                "$ref": "#/$defs/clipArguments"
+              },
+              "result_utterance_ids": {
+                "maxItems": 0
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "tool_name": {
+                "const": "search_screen_text"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "arguments": {
+                "$ref": "#/$defs/screenArguments"
+              },
+              "origin": {
+                "const": "MODEL"
+              },
+              "result_utterance_ids": {
+                "maxItems": 0
+              },
+              "result_frame_ids": {
+                "maxItems": 3
+              }
+            }
+          }
+        }
+      ]
+    },
+    "frameId": {
+      "type": "string",
+      "pattern": "^f00(?:0[1-9]|[12][0-9]|3[0-2])$"
+    },
+    "frame": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "frame_id",
+        "requested_ms",
+        "timestamp_ms",
+        "source_pts",
+        "source_time_base",
+        "sha256",
+        "bytes",
+        "width",
+        "height"
+      ],
+      "properties": {
+        "frame_id": {
+          "$ref": "#/$defs/frameId"
+        },
+        "requested_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "timestamp_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "source_pts": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "source_time_base": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]{0,9}/[1-9][0-9]{0,9}$"
+        },
+        "sha256": {
+          "$ref": "#/$defs/hash"
+        },
+        "bytes": {
+          "type": "integer",
+          "minimum": 4,
+          "maximum": 1048576
+        },
+        "width": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1280
+        },
+        "height": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1280
+        }
+      }
+    },
+    "visualCitation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "frame_id",
+        "explanation"
+      ],
+      "properties": {
+        "frame_id": {
+          "$ref": "#/$defs/frameId"
+        },
+        "explanation": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1000,
+          "pattern": "\\S"
+        }
+      }
+    },
+    "frameArguments": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "timestamps_ms"
+      ],
+      "properties": {
+        "timestamps_ms": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 4,
+          "uniqueItems": true,
+          "items": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          }
+        }
+      }
+    },
+    "clipArguments": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "start_ms",
+        "end_ms"
+      ],
+      "properties": {
+        "start_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "end_ms": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        }
+      }
+    },
+    "focusToolCall": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "step",
+        "tool_name",
+        "arguments",
+        "result_utterance_ids",
+        "result_frame_ids",
+        "origin"
+      ],
+      "properties": {
+        "step": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4
+        },
+        "tool_name": {
+          "enum": [
+            "search_transcript",
+            "read_context",
+            "list_topics",
+            "inspect_frames",
+            "inspect_clip",
+            "search_screen_text"
+          ]
+        },
+        "arguments": {
+          "type": "object"
+        },
+        "result_utterance_ids": {
+          "type": "array",
+          "maxItems": 200,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/id"
+          }
+        },
+        "result_frame_ids": {
+          "type": "array",
+          "maxItems": 24,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/frameId"
+          }
+        },
+        "origin": {
+          "enum": [
+            "MODEL",
+            "USER_FOCUS"
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "tool_name": {
+                "const": "search_transcript"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "arguments": {
+                "$ref": "#/$defs/searchArguments"
+              },
+              "result_frame_ids": {
+                "maxItems": 0
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "tool_name": {
+                "const": "read_context"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "arguments": {
+                "$ref": "#/$defs/contextArguments"
+              },
+              "result_frame_ids": {
+                "maxItems": 0
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "tool_name": {
+                "const": "list_topics"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "arguments": {
+                "$ref": "#/$defs/topicsArguments"
+              },
+              "result_frame_ids": {
+                "maxItems": 0
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "tool_name": {
+                "const": "inspect_frames"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "arguments": {
+                "$ref": "#/$defs/frameArguments"
+              },
+              "result_utterance_ids": {
+                "maxItems": 0
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "tool_name": {
+                "const": "inspect_clip"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "arguments": {
+                "$ref": "#/$defs/clipArguments"
+              },
+              "result_utterance_ids": {
+                "maxItems": 0
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "tool_name": {
+                "const": "search_screen_text"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "arguments": {
+                "$ref": "#/$defs/screenArguments"
+              },
+              "origin": {
+                "const": "MODEL"
+              },
+              "result_utterance_ids": {
+                "maxItems": 0
+              },
+              "result_frame_ids": {
+                "maxItems": 3
+              }
+            }
+          }
+        }
+      ]
+    },
+    "answerBlock": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "block_id",
+        "kind",
+        "text",
+        "utterance_ids",
+        "frame_ids"
+      ],
+      "properties": {
+        "block_id": {
+          "type": "string",
+          "pattern": "^b0[1-8]$"
+        },
+        "kind": {
+          "enum": [
+            "SPEECH",
+            "FRAME",
+            "SAMPLED_CHANGE",
+            "INFERENCE",
+            "GENERAL",
+            "INSUFFICIENT"
+          ]
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1000,
+          "pattern": "\\S",
+          "x-max-utf16-units": 1000,
+          "not": {
+            "pattern": "[\\u0000-\\u0008\\u000b\\u000c\\u000e-\\u001f\\u007f-\\u009f]"
+          }
+        },
+        "utterance_ids": {
+          "type": "array",
+          "maxItems": 8,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/id"
+          }
+        },
+        "frame_ids": {
+          "type": "array",
+          "maxItems": 4,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/frameId"
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "SPEECH"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "utterance_ids": {
+                "minItems": 1
+              },
+              "frame_ids": {
+                "maxItems": 0
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "FRAME"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "utterance_ids": {
+                "maxItems": 0
+              },
+              "frame_ids": {
+                "minItems": 1
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "SAMPLED_CHANGE"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "utterance_ids": {
+                "maxItems": 0
+              },
+              "frame_ids": {
+                "minItems": 2,
+                "maxItems": 2
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "INFERENCE"
+              }
+            }
+          },
+          "then": {
+            "anyOf": [
+              {
+                "properties": {
+                  "utterance_ids": {
+                    "minItems": 1
+                  }
+                }
+              },
+              {
+                "properties": {
+                  "frame_ids": {
+                    "minItems": 1
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "GENERAL"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "utterance_ids": {
+                "maxItems": 0
+              },
+              "frame_ids": {
+                "maxItems": 0
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "INSUFFICIENT"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "utterance_ids": {
+                "maxItems": 0
+              },
+              "frame_ids": {
+                "maxItems": 0
+              }
+            }
+          }
+        }
+      ]
+    },
+    "screenArguments": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "query",
+        "top_k"
+      ],
+      "properties": {
+        "query": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "top_k": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 3
+        }
+      }
+    },
+    "screenSource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "segment_stage_id",
+        "segment_manifest_hash",
+        "frames_hash",
+        "observations_hash",
+        "index_version",
+        "index_hash",
+        "duration_ms",
+        "sampling_policy",
+        "interval_ms",
+        "frame_count",
+        "text_frame_count",
+        "coverage_truncated"
+      ],
+      "properties": {
+        "segment_stage_id": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$"
+        },
+        "segment_manifest_hash": {
+          "$ref": "#/$defs/hash"
+        },
+        "frames_hash": {
+          "$ref": "#/$defs/hash"
+        },
+        "observations_hash": {
+          "$ref": "#/$defs/hash"
+        },
+        "index_version": {
+          "const": "screen-text-literal-v1"
+        },
+        "index_hash": {
+          "$ref": "#/$defs/hash"
+        },
+        "duration_ms": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "sampling_policy": {
+          "enum": [
+            "prefix",
+            "uniform"
+          ]
+        },
+        "interval_ms": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "frame_count": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 120
+        },
+        "text_frame_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 120
+        },
+        "coverage_truncated": {
+          "type": "boolean"
+        }
+      }
+    },
+    "screenRow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ocr_frame_id",
+        "requested_ms",
+        "ocr_timestamp_ms",
+        "source_pts",
+        "source_time_base",
+        "observed_text",
+        "ocr_sha256"
+      ],
+      "properties": {
+        "ocr_frame_id": {
+          "type": "string",
+          "pattern": "^ocr_[0-9]{6}$"
+        },
+        "requested_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "ocr_timestamp_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "source_pts": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "source_time_base": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]{0,9}/[1-9][0-9]{0,9}$"
+        },
+        "observed_text": {
+          "type": "string",
+          "maxLength": 2000
+        },
+        "ocr_sha256": {
+          "$ref": "#/$defs/hash"
+        }
+      }
+    },
+    "screenHashRow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ocr_frame_id",
+        "requested_ms",
+        "ocr_timestamp_ms",
+        "source_pts",
+        "source_time_base",
+        "ocr_sha256",
+        "observed_text_sha256"
+      ],
+      "properties": {
+        "ocr_frame_id": {
+          "type": "string",
+          "pattern": "^ocr_[0-9]{6}$"
+        },
+        "requested_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "ocr_timestamp_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "source_pts": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "source_time_base": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]{0,9}/[1-9][0-9]{0,9}$"
+        },
+        "ocr_sha256": {
+          "$ref": "#/$defs/hash"
+        },
+        "observed_text_sha256": {
+          "$ref": "#/$defs/hash"
+        }
+      }
+    },
+    "screenIndexHashPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "index_version",
+        "source_hash",
+        "duration_ms",
+        "segment_manifest_hash",
+        "frames_hash",
+        "observations_hash",
+        "rows"
+      ],
+      "properties": {
+        "index_version": {
+          "const": "screen-text-literal-v1"
+        },
+        "source_hash": {
+          "$ref": "#/$defs/hash"
+        },
+        "duration_ms": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "segment_manifest_hash": {
+          "$ref": "#/$defs/hash"
+        },
+        "frames_hash": {
+          "$ref": "#/$defs/hash"
+        },
+        "observations_hash": {
+          "$ref": "#/$defs/hash"
+        },
+        "rows": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 120,
+          "items": {
+            "$ref": "#/$defs/screenHashRow"
+          }
+        }
+      }
+    },
+    "screenHit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ocr_frame_id",
+        "requested_ms",
+        "ocr_timestamp_ms",
+        "source_pts",
+        "source_time_base",
+        "observed_text",
+        "frame_id"
+      ],
+      "properties": {
+        "ocr_frame_id": {
+          "type": "string",
+          "pattern": "^ocr_[0-9]{6}$"
+        },
+        "requested_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "ocr_timestamp_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "source_pts": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "source_time_base": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]{0,9}/[1-9][0-9]{0,9}$"
+        },
+        "observed_text": {
+          "type": "string",
+          "maxLength": 2000,
+          "minLength": 1
+        },
+        "frame_id": {
+          "$ref": "#/$defs/frameId"
+        }
+      }
+    },
+    "screenSearch": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "tool_step",
+        "status",
+        "error_code",
+        "total_match_count",
+        "hits"
+      ],
+      "properties": {
+        "tool_step": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4
+        },
+        "status": {
+          "enum": [
+            "OBSERVED",
+            "EMPTY",
+            "NO_MATCH",
+            "TOOL_ERROR"
+          ]
+        },
+        "error_code": {
+          "enum": [
+            null,
+            "CONTEXT_LIMIT",
+            "FRAME_UNAVAILABLE",
+            "FRAME_POSITION_MISMATCH",
+            "DUPLICATE_TOOL_CALL"
+          ]
+        },
+        "total_match_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 120
+        },
+        "hits": {
+          "type": "array",
+          "maxItems": 3,
+          "items": {
+            "$ref": "#/$defs/screenHit"
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "OBSERVED"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "error_code": {
+                "const": null
+              },
+              "total_match_count": {
+                "minimum": 1
+              },
+              "hits": {
+                "minItems": 1
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "enum": [
+                  "EMPTY",
+                  "NO_MATCH"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "error_code": {
+                "const": null
+              },
+              "total_match_count": {
+                "const": 0
+              },
+              "hits": {
+                "maxItems": 0
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "TOOL_ERROR"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "error_code": {
+                "enum": [
+                  "CONTEXT_LIMIT",
+                  "FRAME_UNAVAILABLE",
+                  "FRAME_POSITION_MISMATCH",
+                  "DUPLICATE_TOOL_CALL"
+                ]
+              },
+              "hits": {
+                "maxItems": 0
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "error_code": {
+                "enum": [
+                  "FRAME_UNAVAILABLE",
+                  "FRAME_POSITION_MISMATCH"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "total_match_count": {
+                "minimum": 1
+              }
+            }
+          }
+        }
+      ]
+    },
+    "screenContext": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "segment",
+        "analysis",
+        "ocr_config",
+        "screen_source"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "segment": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "job_id",
+            "video_id",
+            "analysis_generation",
+            "stage_id",
+            "stage_type",
+            "attempt",
+            "run_token",
+            "input_sha256",
+            "manifest_key",
+            "manifest_hash"
+          ],
+          "properties": {
+            "job_id": {
+              "$ref": "#/$defs/id"
+            },
+            "video_id": {
+              "$ref": "#/$defs/id"
+            },
+            "analysis_generation": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 2147483647
+            },
+            "stage_id": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$"
+            },
+            "stage_type": {
+              "const": "SEGMENT"
+            },
+            "attempt": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 2147483647
+            },
+            "run_token": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_-]{16,64}$"
+            },
+            "input_sha256": {
+              "$ref": "#/$defs/hash"
+            },
+            "manifest_key": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 1024
+            },
+            "manifest_hash": {
+              "$ref": "#/$defs/hash"
+            }
+          }
+        },
+        "analysis": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "key",
+            "sha256"
+          ],
+          "properties": {
+            "key": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 1024
+            },
+            "sha256": {
+              "$ref": "#/$defs/hash"
+            }
+          }
+        },
+        "ocr_config": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "sampling_policy",
+            "max_frames",
+            "interval_ms"
+          ],
+          "properties": {
+            "sampling_policy": {
+              "enum": [
+                "prefix",
+                "uniform"
+              ]
+            },
+            "max_frames": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 120
+            },
+            "interval_ms": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            }
+          }
+        },
+        "screen_source": {
+          "$ref": "#/$defs/screenSource"
+        }
+      }
+    }
+  }
+}

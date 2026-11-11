@@ -122,3 +122,7 @@ uv run pytest worker-python/tests/test_contracts.py worker-python/tests/test_inp
 ## 回答前原句预查 v1.4
 
 [agent-answer-evidence-speech.schema.json](./agent-answer-evidence-speech.schema.json) 定义显式 `speech_lookup_v1` 的分项回答：首个模型请求前执行一次本地预查，记录真实 `EVIDENCE_POLICY` 步、有限范围、完整原句 ID 与裁剪状态。它使用执行协议 2，原 [1.3](./agent-answer-evidence.schema.json) 保持不变。Schema 之外还须核对 owner / source / 预查参数、最近原句与半开时间距离、UTF-16 限额、实际入模与引用并集；不能把合法引用当作语义支持或完整回答证明。接口、版本隔离和恢复规则见[回答前原句预查](../docs/74-回答前原句预查.md)；[共享夹具](../fixtures/agent-speech-lookup.synthetic.json) 为明确的合成协议数据，不包含真实模型效果。
+
+## 按画面文字定位 v1.5
+
+[agent-answer-evidence-screen.schema.json](./agent-answer-evidence-screen.schema.json) 定义独立 `screen_search_v1` / 协议 4：本轮公开 OCR 来源、MODEL 复合工具及 `screen_searches` 回执。私有 claim 描述放在 `$defs.screenContext`，公开响应不包含路径或 run token。Schema 检查结构，三端另核验 UTF-16、确定性 AND 查询、来源、实际 PTS、工具步、帧映射与分项并集；前端不假称重算完整 OCR 索引。协议与验收状态见[功能说明](../docs/78-Agent画面文字定位.md)。[共享夹具](../fixtures/agent-screen-search.synthetic.json) 明确为合成索引与协议样例，不能当作真实图像、回答效果或完整来源验收。

@@ -5,6 +5,8 @@ on:
     paths:
       - 'backend-java/**'
       - 'fixtures/ocr-segment-artifact-capacity.synthetic.json'
+      - 'fixtures/agent-screen-search.synthetic.json'
+      - 'contracts/agent-answer-evidence-screen.schema.json'
       - '.github/workflows/java.yml'
       - 'scripts/install-caption-font.py'
       - 'contracts/caption-render-spec.schema.json'
@@ -12,6 +14,8 @@ on:
     paths:
       - 'backend-java/**'
       - 'fixtures/ocr-segment-artifact-capacity.synthetic.json'
+      - 'fixtures/agent-screen-search.synthetic.json'
+      - 'contracts/agent-answer-evidence-screen.schema.json'
       - '.github/workflows/java.yml'
       - 'scripts/install-caption-font.py'
       - 'contracts/caption-render-spec.schema.json'

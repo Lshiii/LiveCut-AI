@@ -27,7 +27,7 @@ const hash = (raw: unknown): raw is string => typeof raw === 'string' && HASH.te
 const sameSource = (a: AgentSession['source'], b: AgentSession['source']) => a.video_sha256 === b.video_sha256 && a.transcript_hash === b.transcript_hash && a.duration_ms === b.duration_ms
 function fail(code?: string): never { throw new AgentSubmissionError(code) }
 function sameOwner(entry: AgentSubmissionOwner, owner: AgentSubmissionOwner) { return entry.job_id === owner.job_id && entry.video_id === owner.video_id && entry.video_sha256 === owner.video_sha256 }
-export interface AgentTurnSubmissionInput { question: string; max_text_calls: number; visual_mode?: 'none' | 'frames'; focus_timestamp_ms?: number; evidence_mode?: 'none' | 'structured'; evidence_policy?: 'speech_lookup_v1' }
+export interface AgentTurnSubmissionInput { question: string; max_text_calls: number; visual_mode?: 'none' | 'frames'; focus_timestamp_ms?: number; evidence_mode?: 'none' | 'structured'; evidence_policy?: 'speech_lookup_v1' | 'screen_search_v1' }
 export function agentSubmissionInput(kind: AgentSubmissionEntry['kind'], raw: unknown): {} | AgentTurnSubmissionInput | null {
   if (kind === 'SESSION') return exact(raw, []) ? {} : null
   if (!row(raw) || !Object.hasOwn(raw, 'question') || !Object.hasOwn(raw, 'max_text_calls')
@@ -36,11 +36,11 @@ export function agentSubmissionInput(kind: AgentSubmissionEntry['kind'], raw: un
     || raw.question.length > 2000 || !integer(raw.max_text_calls, 1, 24)
     || Object.hasOwn(raw, 'focus_timestamp_ms') && (raw.visual_mode !== 'frames' || !integer(raw.focus_timestamp_ms))
     || Object.hasOwn(raw, 'evidence_mode') && (raw.evidence_mode !== 'none' && raw.evidence_mode !== 'structured' || raw.evidence_mode === 'structured' && raw.visual_mode !== 'frames')
-    || Object.hasOwn(raw, 'evidence_policy') && (raw.evidence_policy !== 'speech_lookup_v1' || raw.visual_mode !== 'frames' || raw.evidence_mode !== 'structured' || !evidenceTextValid(raw.question, 2000))) return null
+    || Object.hasOwn(raw, 'evidence_policy') && (!['speech_lookup_v1', 'screen_search_v1'].includes(String(raw.evidence_policy)) || raw.visual_mode !== 'frames' || raw.evidence_mode !== 'structured' || !evidenceTextValid(raw.question, 2000))) return null
   return { question: raw.question, max_text_calls: raw.max_text_calls, ...(Object.hasOwn(raw, 'visual_mode') ? { visual_mode: raw.visual_mode as 'none' | 'frames' } : {}),
     ...(Object.hasOwn(raw, 'focus_timestamp_ms') ? { focus_timestamp_ms: raw.focus_timestamp_ms as number } : {}),
     ...(Object.hasOwn(raw, 'evidence_mode') ? { evidence_mode: raw.evidence_mode as 'none' | 'structured' } : {}),
-    ...(Object.hasOwn(raw, 'evidence_policy') ? { evidence_policy: 'speech_lookup_v1' as const } : {}) }
+    ...(Object.hasOwn(raw, 'evidence_policy') ? { evidence_policy: raw.evidence_policy as 'speech_lookup_v1' | 'screen_search_v1' } : {}) }
 }
 export function parseAgentSubmissionEntry(raw: unknown): AgentSubmissionEntry | null {
   if (!exact(raw, ['schema_version', 'kind', 'key', 'job_id', 'video_id', 'video_sha256', 'session_id', 'source', 'input'])
@@ -269,7 +269,7 @@ export async function resolveAgentSubmission(entry: AgentSubmissionEntry, io: {
   return io.current() ? result : null
 }
 /** Only completed acknowledgement in the original session may clear the still-identical submitted draft. */
-export interface AgentSubmissionDraft { session_id: string; question: string; budget: number; visual_mode?: 'none' | 'frames'; focus_timestamp_ms?: number; evidence_mode?: 'none' | 'structured'; evidence_policy?: 'speech_lookup_v1' }
+export interface AgentSubmissionDraft { session_id: string; question: string; budget: number; visual_mode?: 'none' | 'frames'; focus_timestamp_ms?: number; evidence_mode?: 'none' | 'structured'; evidence_policy?: 'speech_lookup_v1' | 'screen_search_v1' }
 export function agentDraftMatchesSubmission(entry: AgentSubmissionEntry, draft: AgentSubmissionDraft): boolean {
   if (entry.kind !== 'TURN' || draft.session_id !== entry.session_id) return false
   const input = agentSubmissionInput('TURN', JSON.parse(entry.input)) as AgentTurnSubmissionInput

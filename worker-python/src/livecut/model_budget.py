@@ -130,9 +130,16 @@ class BudgetTransport(httpx.BaseTransport):
                 return None
             if evidence and (("evidence_policy" in turn) != ("evidence_policy" in config)
                              or turn.get("evidence_policy") != config.get("evidence_policy")
-                             or "evidence_policy" in config and (config["evidence_policy"] != "speech_lookup_v1"
-                                                                 or lease.required_worker_protocol != 2)):
+                             or "evidence_policy" in config and not (
+                                 config["evidence_policy"] == "speech_lookup_v1" and lease.required_worker_protocol == 2
+                                 or config["evidence_policy"] == "screen_search_v1" and lease.required_worker_protocol == 4)):
                 return None
+            if evidence and config.get("evidence_policy") == "screen_search_v1":
+                screen_context = config.get("screen_context")
+                if (not isinstance(screen_context, dict) or not isinstance(screen_context.get("screen_source"), dict)
+                        or not isinstance(turn.get("screen_source"), dict)
+                        or json.dumps(turn["screen_source"], sort_keys=True, allow_nan=False) != json.dumps(screen_context["screen_source"], sort_keys=True, allow_nan=False)):
+                    return None
             if (lease.stage_type == "AGENT_VISUAL_FOCUS" or evidence and "focus_timestamp_ms" in config) and (type(config.get("focus_timestamp_ms")) is not int
                     or type(turn.get("focus_timestamp_ms")) is not int
                     or turn["focus_timestamp_ms"] != config["focus_timestamp_ms"]):

@@ -162,8 +162,10 @@ class FrameStore:
         self.guard()
         return data
 
-    def inspect(self, name: str, arguments: dict) -> list[dict]:
+    def inspect(self, name: str, arguments: dict, *, expected_positions=None) -> list[dict]:
         times = requested_times(name, arguments)
+        if expected_positions is not None and set(expected_positions) != set(times):
+            raise SegmentationError("INVALID_SCREEN_FRAME_REQUEST", "Screen frame positions do not match their sampling request")
         known = {frame["requested_ms"]: frame for frame in self.frames}
         if len(set(known) | set(times)) > 32:
             raise VisionError("VISUAL_FRAME_LIMIT", "The turn's unique requested-frame cap was reached")
@@ -173,7 +175,12 @@ class FrameStore:
                 self.guard()
                 if requested in known:
                     frame = known[requested]
-                    self.read(frame)
+                    try:
+                        self.read(frame)
+                    except (OSError, ValueError):
+                        if expected_positions is not None:
+                            raise SegmentationError("INVALID_VISUAL_CACHE", "Previously observed screen image bytes changed") from None
+                        raise
                 else:
                     with tempfile.NamedTemporaryFile(dir=self.root, suffix=".jpg", delete=False) as handle:
                         target = Path(handle.name)
@@ -189,6 +196,8 @@ class FrameStore:
                     if any(actual_position(other) == actual_position(frame) for other in [*self.frames, *(f for f, _ in created)]):
                         raise VisionError("DUPLICATE_VISUAL_PTS", "Different requested positions resolved to the same source frame")
                     created.append((frame, target))
+                if expected_positions is not None and actual_position(frame) != expected_positions[requested]:
+                    raise VisionError("SCREEN_FRAME_POSITION_MISMATCH", "The observed source position differs from the published OCR locator")
                 if name == "inspect_clip" and not arguments["start_ms"] <= actual_position(frame)*1000 < arguments["end_ms"]:
                     raise VisionError("VISUAL_FRAME_OUTSIDE_CLIP", "An actual frame falls outside the sampled interval")
             if sum(frame["bytes"] for frame in self.frames) + sum(frame["bytes"] for frame, _ in created) > 16*1024*1024:

@@ -185,12 +185,15 @@ class Lease:
         turn = value["config"].get("agent_turn", {})
         policy = turn.get("evidence_policy") if isinstance(turn, dict) else None
         replay = isinstance(turn, dict) and "cache_replay" in turn
-        if (type(protocol) is not int or protocol not in {1, 2, 3}
-                or "required_worker_protocol" in value and protocol not in {2, 3}
+        if (type(protocol) is not int or protocol not in {1, 2, 3, 4}
+                or "required_worker_protocol" in value and protocol not in {2, 3, 4}
                 or protocol == 2 and (value["stage_type"] != "AGENT_EVIDENCE" or policy != "speech_lookup_v1")
                 or protocol == 3 and (value["stage_type"] != "AGENT_EVIDENCE" or policy != "speech_lookup_v1" or not replay
                                      or type(value["config"].get("max_text_calls")) is not int or value["config"]["max_text_calls"] != 0)
-                or replay and protocol != 3 or policy is not None and protocol not in {2, 3}):
+                or protocol == 4 and (value["stage_type"] != "AGENT_EVIDENCE" or policy != "screen_search_v1" or not isinstance(turn.get("screen_context"), dict))
+                or replay and protocol != 3 or policy == "speech_lookup_v1" and protocol not in {2, 3}
+                or policy == "screen_search_v1" and protocol != 4
+                or policy is not None and policy not in {"speech_lookup_v1", "screen_search_v1"}):
             raise WorkerError("INVALID_WORKER_PROTOCOL")
         lease = cls(**{field: value[field] for field in cls.__dataclass_fields__ if field in value})
         if validate_export and lease.stage_type == "EXPORT_CLIP":
@@ -678,7 +681,7 @@ class StageWorker:
                         yield False
                         return
                     raise
-                if not isinstance(protocols, tuple) or protocols not in {(1,), (1, 2), (1, 2, 3), (3,)} or any(type(v) is not int for v in protocols):
+                if not isinstance(protocols, tuple) or protocols not in {(1,), (1, 2), (1, 2, 3), (1, 2, 4), (1, 2, 3, 4), (3,)} or any(type(v) is not int for v in protocols):
                     raise WorkerClientError("INVALID_WORKER_PROTOCOL_CAPABILITY")
                 self._evidence_protocol_versions = tuple(protocols)
             self._protocol_versions = self._evidence_protocol_versions
@@ -890,7 +893,7 @@ class StageWorker:
                         _identifier(row.get("id"))
                         protocol = row.get("required_worker_protocol", 1)
                         if (type(protocol) is not int or protocol not in (self._protocol_versions or (1,))
-                                or "required_worker_protocol" in row and protocol not in {2, 3}):
+                                or "required_worker_protocol" in row and protocol not in {2, 3, 4}):
                             raise WorkerError("INVALID_WORKER_PROTOCOL")
                         if self.target_job_id is not None and row.get("job_id") != self.target_job_id:
                             raise WorkerError("CLAIM_TARGET_CHANGED")
@@ -909,7 +912,7 @@ class StageWorker:
                     raise WorkerError("CLAIM_STAGE_TYPE_CHANGED")
                 pending = {"stage_id": _identifier(item.get("id")),
                            "worker_id": self.worker_id, "claim_request_id": str(uuid4()), **target}
-                if item.get("required_worker_protocol") in {2, 3}:
+                if item.get("required_worker_protocol") in {2, 3, 4}:
                     pending["required_worker_protocol"] = item["required_worker_protocol"]
                 _write(claim_path, pending)
             if pending.get("worker_id") != self.worker_id:
@@ -1232,10 +1235,15 @@ class AnalysisStageExecutor:
             raise WorkerError("INVALID_AGENT_EVIDENCE_INPUT")
         if "cache_replay" in config or "replay_source_turn_id" in config or "replay_snapshot_hash" in config:
             raise WorkerError("INVALID_CACHED_REPLAY_SOURCE")
-        speech = "evidence_policy" in config
-        if (speech and (not evidence or config["evidence_policy"] != "speech_lookup_v1" or lease.required_worker_protocol != 2)
+        speech = config.get("evidence_policy") == "speech_lookup_v1"
+        screen = config.get("evidence_policy") == "screen_search_v1"
+        if ("evidence_policy" in config and not (speech or screen)
+                or speech and (not evidence or lease.required_worker_protocol != 2)
                 or lease.required_worker_protocol == 2 and not speech):
             raise WorkerError("INVALID_AGENT_SPEECH_INPUT")
+        if (screen and (not evidence or lease.required_worker_protocol != 4 or not isinstance(config.get("screen_context"), dict))
+                or lease.required_worker_protocol == 4 and not screen or not screen and "screen_context" in config):
+            raise WorkerError("INVALID_AGENT_SCREEN_INPUT")
         focus |= evidence and "focus_timestamp_ms" in config
         if caption:
             if config.get("kind") != "CAPTION" or not isinstance(config.get("caption_context"), dict) or config["history"] != []:
@@ -1274,10 +1282,19 @@ class AnalysisStageExecutor:
             raise WorkerError("INVALID_AGENT_INPUT")
         if caption:
             validate_caption_context(config["caption_context"], transcript, config["duration_ms"], config["source_transcript_hash"])
+        screen_index = None
+        if screen:
+            from .agent_screen import load_screen_context
+
+            if config["screen_context"].get("analysis") != {"key": config["source_analysis_key"], "sha256": config["source_analysis_hash"]}:
+                raise WorkerError("AGENT_SCREEN_SOURCE_INVALID")
+            screen_index = load_screen_context(context.storage_root, config["screen_context"], job_id=lease.job_id,
+                video_id=lease.video_id, generation=lease.generation, source_hash=lease.source_hash,
+                duration_ms=config["duration_ms"], analysis=analysis, predecessors=lease.artifacts, guard=context.guard.check)
         if self.transport_factory is None:
             raise WorkerError("DURABLE_BUDGET_REQUIRED")
         embedder = None
-        if not speech and os.environ.get("LIVECUT_INTENT_EMBEDDING_DIR"):
+        if not (speech or screen) and os.environ.get("LIVECUT_INTENT_EMBEDDING_DIR"):
             from .intent_embedding import LocalIntentEmbedder
 
             context.guard.check()
@@ -1320,6 +1337,8 @@ class AnalysisStageExecutor:
                     options["evidence_mode"] = "structured"
                 if speech:
                     options["evidence_policy"] = "speech_lookup_v1"
+                if screen:
+                    options.update(evidence_policy="screen_search_v1", screen_index=screen_index)
                 options["budget_remaining"] = getattr(text_transport, "visual_text_budget", lambda: None)
                 options["max_request_attempts"] = text_transport.policy.max_attempts if isinstance(text_transport, ResilientTextTransport) else 1
                 build_visual_answer(transcript, analysis["segments"], config["duration_ms"], config["question"],

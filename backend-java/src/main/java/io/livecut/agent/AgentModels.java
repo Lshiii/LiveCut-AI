@@ -30,7 +30,9 @@ public final class AgentModels {
                        @JsonProperty("evidence_mode") @JsonInclude(JsonInclude.Include.NON_NULL) String evidenceMode,
                        @JsonProperty("evidence_policy") @JsonInclude(JsonInclude.Include.NON_NULL) String evidencePolicy,
                        @JsonProperty("replay_source_turn_id") @JsonInclude(JsonInclude.Include.NON_NULL) String replaySourceTurnId,
-                       @JsonProperty("replay_snapshot_hash") @JsonInclude(JsonInclude.Include.NON_NULL) String replaySnapshotHash) {}
+                       @JsonProperty("replay_snapshot_hash") @JsonInclude(JsonInclude.Include.NON_NULL) String replaySnapshotHash,
+                       @JsonProperty("screen_source") @JsonInclude(JsonInclude.Include.NON_NULL) JsonNode screenSource) {}
+    public record ScreenSearchCapability(@JsonProperty("screen_search_supported") boolean screenSearchSupported,@JsonProperty("worker_protocol") int workerProtocol) {}
     public record FocusCapability(@JsonProperty("focus_timestamp_supported") boolean focusTimestampSupported) {}
     public record EvidenceCapability(@JsonProperty("structured_evidence_supported") boolean structuredEvidenceSupported) {}
     public record SpeechLookupCapability(@JsonProperty("speech_lookup_supported") boolean speechLookupSupported,
