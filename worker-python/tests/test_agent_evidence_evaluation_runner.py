@@ -451,3 +451,40 @@ def test_output_inside_shared_storage_is_refused_without_touching_frozen_inputs(
     assert not _native_path(output).exists()
     assert all(sha256(path) == digest for path, digest in before.items())
     assert len(actual_bundle["seen"]) == 2
+
+
+@pytest.mark.parametrize("changed", ["source", "jpeg", "manifest", "answer", "reference", "transcript", "trace", "replay"])
+def test_input_changed_after_render_is_refused_at_final_publication_gate(actual_bundle, tmp_path, monkeypatch, changed):
+    import livecut.agent_evidence_evaluation_runner as runner
+
+    bundle = actual_bundle
+    if changed == "jpeg":
+        target = bundle["frames"][0]
+    elif changed == "trace":
+        target = write(bundle["ctx"].directory / "text-execution-trace.json", {"schema_version": 1, "events": []})
+        manifest = read(bundle["manifest"])
+        manifest["artifacts"].append({"kind": "text_execution_trace",
+            "key": target.relative_to(bundle["root"]).as_posix(), "sha256": sha256(target)})
+        write(bundle["manifest"], manifest)
+    elif changed == "replay":
+        target, _ = add_replay_receipt(bundle)
+    else:
+        target = bundle[changed]
+    original = _native_path(target).read_bytes()
+    changed_bytes = original + b"\nchanged-after-initial-validation"
+    original_render = runner._render
+    mutations = []
+    def render_then_change(report):
+        content = original_render(report)
+        _native_path(target).write_bytes(changed_bytes)
+        mutations.append(target)
+        return content
+    monkeypatch.setattr(runner, "_render", render_then_change)
+    output = tmp_path / "changed-before-publication"
+    with pytest.raises(EvidenceEvaluationError, match="^AGENT_EVIDENCE_INPUT_CHANGED$"):
+        evaluate_actual(bundle, output)
+    assert mutations == [target]
+    assert _native_path(target).read_bytes() == changed_bytes
+    assert not output.exists()
+    assert not list(tmp_path.glob(".agent-evaluation-*"))
+    assert len(bundle["seen"]) == 2

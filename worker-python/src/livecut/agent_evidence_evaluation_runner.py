@@ -101,6 +101,20 @@ def _source(path, ffprobe_path):
     return before, info
 
 
+def _recheck_inputs(inputs):
+    """Recheck consumed file versions immediately before report publication.
+
+    This is a final stability gate, not a filesystem lock against external writers.
+    """
+    try:
+        for path, expected_hash, maximum in inputs:
+            actual_hash = _file_hash(path) if maximum is None else _digest(_read(path, maximum))
+            if actual_hash != expected_hash:
+                _fail("AGENT_EVIDENCE_INPUT_CHANGED")
+    except Exception:
+        _fail("AGENT_EVIDENCE_INPUT_CHANGED")
+
+
 def _confined(root, key):
     if (not isinstance(key, str) or not key or len(key) > 512 or "\\" in key
             or any(not re.fullmatch(r"[A-Za-z0-9_.-]+", part) or part in {".", ".."}
@@ -131,7 +145,7 @@ def _replay_receipt(receipt, answer):
             _fail("INVALID_AGENT_EVIDENCE_MANIFEST")
 
 
-def _manifest(answer, answer_path, manifest_path, root, source_hash, info, answer_hash):
+def _manifest(answer, answer_path, manifest_path, root, source_hash, info, answer_hash, *, verified_inputs=None):
     root = _no_links(root)
     manifest, manifest_hash = _document(manifest_path, MIB)
     required = {"schema_version", "job_id", "video_id", "analysis_generation", "stage_id", "stage_type",
@@ -174,6 +188,8 @@ def _manifest(answer, answer_path, manifest_path, root, source_hash, info, answe
         raw = _read(path, maximum)
         if _digest(raw) != artifact["sha256"]:
             _fail("AGENT_EVIDENCE_ARTIFACT_MISMATCH")
+        if verified_inputs is not None:
+            verified_inputs.append((path, artifact["sha256"], maximum))
         if kind == "agent_answer":
             if path.resolve() != _no_links(answer_path).resolve() or artifact["sha256"] != answer_hash:
                 _fail("AGENT_EVIDENCE_ARTIFACT_MISMATCH")
@@ -196,6 +212,8 @@ def _manifest(answer, answer_path, manifest_path, root, source_hash, info, answe
         seen.add(key)
     if seen != set(expected) | ({prefix + "text-execution-trace.json"} if trace else set()) | ({prefix + "cached-answer-replay.json"} if replay else set()) or trace and replay:
         _fail("INVALID_AGENT_EVIDENCE_MANIFEST")
+    if verified_inputs is not None:
+        verified_inputs.append((manifest_path, manifest_hash, MIB))
     return {"manifest_sha256": manifest_hash, "stage_id": manifest["stage_id"],
             "analysis_generation": manifest["analysis_generation"], "attempt": manifest["attempt"],
             "verified_artifact_count": len(artifacts), "verified_jpeg_count": len(frames), "cached_answer_replay": replay}
@@ -261,6 +279,8 @@ def evaluate_agent_evidence_files(answer_path, reference_path, *, transcript_pat
         answer, answer_hash = _document(answer_path)
         reference, reference_hash = _document(reference_path)
         transcript, transcript_hash = _document(transcript_path, allow_list=True)
+        verified_inputs = [(answer_path, answer_hash, 8*MIB), (reference_path, reference_hash, 8*MIB),
+                           (transcript_path, transcript_hash, 8*MIB)]
         validate_agent_evidence_reference(reference)
         if transcript_hash != reference["source"]["transcript_sha256"]:
             _fail("AGENT_EVIDENCE_SOURCE_MISMATCH")
@@ -276,11 +296,9 @@ def evaluate_agent_evidence_files(answer_path, reference_path, *, transcript_pat
             actual_hash, info = _source(source, ffprobe_path)
             if actual_hash != reference["source"]["source_sha256"] or info.duration_ms != duration:
                 _fail("AGENT_EVIDENCE_SOURCE_MISMATCH")
-            binding.update(_manifest(answer, answer_path, answer_manifest, storage_root, actual_hash, info, answer_hash))
-        # Recheck the exact byte identities consumed, before any output creation.
-        for path, digest in ((answer_path, answer_hash), (reference_path, reference_hash), (transcript_path, transcript_hash)):
-            if _digest(_read(path)) != digest:
-                _fail("AGENT_EVIDENCE_INPUT_CHANGED")
+            verified_inputs.append((source, actual_hash, None))
+            binding.update(_manifest(answer, answer_path, answer_manifest, storage_root, actual_hash, info, answer_hash,
+                                     verified_inputs=verified_inputs))
         report = {"schema_version": "1.0", "report_kind": "agent_evidence_coverage",
                   "evaluation_version": "required-evidence-groups-v1", "data_scope": _scope(reference, fixture),
                   "binding": binding, "reference": {"reference_id": reference["reference_id"],
@@ -289,8 +307,9 @@ def evaluate_agent_evidence_files(answer_path, reference_path, *, transcript_pat
                   "result": result, "limitations": result["limitations"] + [
                       "Only listed requirement groups are scored; unlisted content is not a negative reference.",
                       "Manifest fields are local declarations; online Java publication and provider transmission or billing are not verified.",
-                      "Public screen metadata is not a complete OCR index; no full-index ranking is recomputed."]}
-        _publish(output_dir, report)
+                      "Public screen metadata is not a complete OCR index; no full-index ranking is recomputed.",
+                      "The final publication check verifies observed file versions; it does not lock external writers or provide a filesystem snapshot."]}
+        _publish(output_dir, report, validate_inputs=lambda: _recheck_inputs(verified_inputs))
         return report
     except EvidenceEvaluationError:
         raise
@@ -351,7 +370,7 @@ def _render(report):
             f"<details><summary>展开输入摘要与完整边界</summary><pre>{meta}</pre><ul>{warnings}</ul></details><p><a href='report.json'>下载 JSON 报告</a></p></section></main></html>")
 
 
-def _publish(directory, report):
+def _publish(directory, report, *, validate_inputs=None):
     directory = _native_path(Path(directory).absolute())
     if directory.exists() or directory.is_symlink():
         _fail("AGENT_EVIDENCE_OUTPUT_EXISTS")
@@ -365,6 +384,8 @@ def _publish(directory, report):
                 stream.write(content + "\n")
                 stream.flush()
                 os.fsync(stream.fileno())
+        if validate_inputs is not None:
+            validate_inputs()
         try:
             directory.mkdir()
         except FileExistsError:
