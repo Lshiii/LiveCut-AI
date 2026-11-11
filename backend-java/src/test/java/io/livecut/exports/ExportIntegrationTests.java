@@ -2,6 +2,7 @@ package io.livecut.exports;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+import java.io.ByteArrayInputStream;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -15,14 +16,18 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HexFormat;
 import java.util.List;
+import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.zip.ZipInputStream;
 
 import io.livecut.LivecutBackendApplication;
 import io.livecut.jobs.JobService;
+import io.livecut.jobs.JobException;
 import io.livecut.video.VideoService;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
@@ -493,6 +498,117 @@ class ExportIntegrationTests {
         ok(send("POST", "/api/jobs/" + fixture.jobId() + "/retry", null));
         assertEquals("FAILED", jdbc.queryForObject("SELECT status FROM job_stage WHERE id=?", String.class, exportStage));
         assertEquals("READY", jdbc.queryForObject("SELECT status FROM job_stage WHERE job_id=? AND owner_type='ANALYSIS'", String.class, fixture.jobId()));
+    }
+
+    @Test void videoPackageRejectsInvalidSelectionAndHeadBeforeLoadingAnyExport() throws Exception {
+        String absent="/api/exports/"+UUID.randomUUID()+"/video-package";
+        assertEquals(405,send("HEAD",absent,null).statusCode());
+        for(String suffix:List.of("","?clips=","?clips=bad","?clips="+UUID.randomUUID()+",","?clips="+UUID.randomUUID()+",,"+UUID.randomUUID())){
+            error(send("GET",absent+suffix,null),400,"INVALID_VIDEO_PACKAGE");
+        }
+        Fixture fixture=fixture(true);JsonNode batch=create(fixture,0,List.of(FIRST));String id=batch.path("clips").get(0).path("id").asText();
+        String path="/api/exports/"+batch.path("id").asText()+"/video-package?clips=";
+        error(send("GET",path+id+","+id,null),400,"INVALID_VIDEO_PACKAGE");
+        String excessive=String.join(",",java.util.stream.IntStream.range(0,101).mapToObj(i->UUID.randomUUID().toString()).toList());
+        error(send("GET",path+excessive,null),400,"INVALID_VIDEO_PACKAGE");
+        error(send("GET",path+UUID.randomUUID(),null),404,"EXPORT_CLIP_NOT_FOUND");
+        JsonNode other=create(fixture,0,List.of(SECOND));
+        error(send("GET",path+other.path("clips").get(0).path("id").asText(),null),404,"EXPORT_CLIP_NOT_FOUND");
+    }
+
+    @Test void videoPackageAllowsExplicitCompletedSubsetWithoutCaptionOrAsrPrerequisites() throws Exception {
+        Fixture fixture=fixture(true);JsonNode batch=create(fixture,0,List.of(FIRST,SECOND));String export=batch.path("id").asText();
+        JsonNode first=batch.path("clips").get(0),second=batch.path("clips").get(1);JsonNode lease=claim(first);
+        ok(worker("POST",action(lease,"complete"),completion(lease)));
+        String selected="/api/exports/"+export+"/video-package?clips="+first.path("id").asText();
+        var response=send("GET",selected,null);assertVideoPackage(response,batch,List.of(first));
+        error(send("GET",selected+","+second.path("id").asText(),null),409,"EXPORT_CONTENT_NOT_READY");
+        JsonNode failed=claim(second);ok(worker("POST",action(failed,"fail"),with(failed,"error_code","SYNTHETIC_BAD_CLIP","retryable",false)));
+        assertVideoPackage(send("GET",selected,null),batch,List.of(first));
+        // No ASR stage exists in this fixture. Video delivery cannot require or initialize one.
+        assertEquals(0,jdbc.queryForObject("SELECT COUNT(*) FROM caption_document WHERE export_id=?",Integer.class,export));
+        assertEquals(0,jdbc.queryForObject("SELECT COUNT(*) FROM job_stage WHERE job_id=? AND stage_type='ASR'",Integer.class,fixture.jobId()));
+        assertEquals(0,jdbc.queryForObject("SELECT COUNT(*) FROM model_call WHERE job_id=?",Integer.class,fixture.jobId()));
+        assertEquals(fixture.rawHash(),sha(Files.readAllBytes(fixture.rawPath())));
+    }
+
+    @Test void videoPackageKeepsBatchOrderAndRejectsOnlySelectedCorruptOrMissingMedia() throws Exception {
+        Fixture fixture=fixture(true);JsonNode batch=create(fixture,0,List.of(FIRST,SECOND));String export=batch.path("id").asText();
+        List<JsonNode> leases=new ArrayList<>();for(JsonNode clip:batch.path("clips")){JsonNode lease=claim(clip);leases.add(lease);ok(worker("POST",action(lease,"complete"),completion(lease)));}
+        String first=batch.path("clips").get(0).path("id").asText(),second=batch.path("clips").get(1).path("id").asText();
+        String path="/api/exports/"+export+"/video-package?clips=";
+        assertVideoPackage(send("GET",path+second+","+first,null),batch,List.of(batch.path("clips").get(0),batch.path("clips").get(1)));
+        Path broken=root.resolve(prefix(leases.get(1))+"clip.mp4");byte[] changed=CLIP_BYTES.clone();changed[0]^=1;Files.write(broken,changed);
+        assertVideoPackage(send("GET",path+first,null),batch,List.of(batch.path("clips").get(0)));
+        error(send("GET",path+first+","+second,null),409,"ARTIFACT_HASH_MISMATCH");
+        Files.delete(broken);error(send("GET",path+second,null),409,"ARTIFACT_NOT_FOUND");
+        // A bad unselected metadata/manifest reference also has no place in this package.
+        jdbc.update("UPDATE job_stage SET manifest_key='invalid',input_hash=? WHERE id=?","0".repeat(64),leases.get(1).path("stage_id").asText());
+        jdbc.update("UPDATE export_clip SET product_name='corrupt-unselected' WHERE id=?",second);
+        assertVideoPackage(send("GET",path+first,null),batch,List.of(batch.path("clips").get(0)));
+        // Receiving the final HTTP bytes can precede the streaming task's finally by one scheduling turn.
+        long cleanupDeadline=System.nanoTime()+TimeUnit.SECONDS.toNanos(5);
+        while(true){
+            long remaining;try(var files=Files.list(root.resolve("delivery-tmp"))){remaining=files.count();}
+            if(remaining==0)break;
+            if(System.nanoTime()>=cleanupDeadline){fail("Completed downloads must release all temporary archives");}
+            Thread.sleep(10);
+        }
+        try(var reused=context.getBean(ExportVideoDeliveryService.class).bundle(export,List.of(first))){assertTrue(Files.isRegularFile(reused.path()));}
+        try(var files=Files.list(root.resolve("delivery-tmp"))){assertEquals(0,files.count());}
+    }
+
+    @Test void videoPackageIndependentlyVerifiesCleanFrozenSourceAndAdmittedExecution() throws Exception {
+        Fixture fixture=fixture(true);JsonNode batch=create(fixture,0,List.of(FIRST));String export=batch.path("id").asText(),clip=batch.path("clips").get(0).path("id").asText();
+        JsonNode lease=claim(batch.path("clips").get(0));ok(worker("POST",action(lease,"complete"),completion(lease)));
+        String path="/api/exports/"+export+"/video-package?clips="+clip;
+        assertVideoPackage(send("GET",path,null),batch,List.of(batch.path("clips").get(0)));
+        jdbc.update("UPDATE export_job SET render_mode='CAPTIONED' WHERE id=?",export);
+        error(send("GET",path,null),409,"EXPORT_SNAPSHOT_INVALID");jdbc.update("UPDATE export_job SET render_mode='CLEAN' WHERE id=?",export);
+        String frozen=jdbc.queryForObject("SELECT frozen_json FROM export_job WHERE id=?",String.class,export);
+        ObjectNode mutatedFrozen=(ObjectNode)JSON.readTree(frozen);mutatedFrozen.put("approved_revision",1);
+        jdbc.update("UPDATE export_job SET frozen_json=? WHERE id=?",JSON.writeValueAsString(mutatedFrozen),export);
+        error(send("GET",path,null),409,"EXPORT_SNAPSHOT_INVALID");jdbc.update("UPDATE export_job SET frozen_json=? WHERE id=?",frozen,export);
+        jdbc.update("UPDATE export_clip SET start_ms=start_ms+1 WHERE id=?",clip);error(send("GET",path,null),409,"EXPORT_SNAPSHOT_INVALID");
+        jdbc.update("UPDATE export_clip SET start_ms=start_ms-1 WHERE id=?",clip);
+        ExportService service=context.getBean(ExportService.class);var plan=service.videoPackagePlan(export,List.of(clip));
+        jdbc.update("UPDATE job_stage SET attempt=attempt+1 WHERE id=?",lease.path("stage_id").asText());
+        assertEquals("EXPORT_SNAPSHOT_INVALID",assertThrows(JobException.class,()->service.videoPackageContent(plan,plan.clips().getFirst())).getCode());
+        jdbc.update("UPDATE job_stage SET attempt=attempt-1 WHERE id=?",lease.path("stage_id").asText());
+        String input=jdbc.queryForObject("SELECT input_hash FROM job_stage WHERE id=?",String.class,lease.path("stage_id").asText());
+        jdbc.update("UPDATE job_stage SET input_hash=? WHERE id=?","0".repeat(64),lease.path("stage_id").asText());
+        error(send("GET",path,null),409,"EXPORT_SNAPSHOT_INVALID");jdbc.update("UPDATE job_stage SET input_hash=? WHERE id=?",input,lease.path("stage_id").asText());
+        jdbc.update("UPDATE job_stage SET run_token=NULL WHERE id=?",lease.path("stage_id").asText());
+        error(send("GET",path,null),409,"EXPORT_SNAPSHOT_INVALID");jdbc.update("UPDATE job_stage SET run_token=? WHERE id=?",lease.path("run_token").asText(),lease.path("stage_id").asText());
+        String source=jdbc.queryForObject("SELECT content_hash FROM video_asset WHERE id=?",String.class,fixture.videoId());
+        jdbc.update("UPDATE video_asset SET content_hash=? WHERE id=?","0".repeat(64),fixture.videoId());
+        error(send("GET",path,null),409,"EXPORT_SNAPSHOT_INVALID");jdbc.update("UPDATE video_asset SET content_hash=? WHERE id=?",source,fixture.videoId());
+        assertVideoPackage(send("GET",path,null),batch,List.of(batch.path("clips").get(0)));
+    }
+
+    private static void assertVideoPackage(HttpResponse<byte[]> response,JsonNode batch,List<JsonNode> expected)throws Exception{
+        assertEquals(200,response.statusCode(),new String(response.body(),StandardCharsets.UTF_8));
+        String export=batch.path("id").asText();assertTrue(response.headers().firstValue("Content-Type").orElse("").startsWith("application/zip"));
+        assertEquals("attachment; filename=\"export-"+export+"-videos.zip\"",response.headers().firstValue("Content-Disposition").orElseThrow());
+        assertEquals(response.body().length,response.headers().firstValueAsLong("Content-Length").orElseThrow());
+        assertEquals("\""+sha(response.body())+"\"",response.headers().firstValue("ETag").orElseThrow());
+        assertEquals("no-store",response.headers().firstValue("Cache-Control").orElseThrow());
+        Map<String,byte[]> entries=new LinkedHashMap<>();try(ZipInputStream zip=new ZipInputStream(new ByteArrayInputStream(response.body()),StandardCharsets.UTF_8)){
+            for(var entry=zip.getNextEntry();entry!=null;entry=zip.getNextEntry()){assertNull(entries.put(entry.getName(),zip.readAllBytes()));}
+        }
+        assertEquals(expected.size()+2,entries.size());JsonNode manifest=JSON.readTree(entries.get("manifest.json"));
+        assertEquals("export_video_package",manifest.path("data_kind").asText());assertEquals(export,manifest.path("export_id").asText());
+        assertEquals(batch.path("job_id"),manifest.path("job_id"));assertEquals(batch.path("video_id"),manifest.path("video_id"));
+        assertEquals(batch.path("approved_revision"),manifest.path("approved_revision"));assertEquals(batch.path("snapshot_hash"),manifest.path("snapshot_hash"));
+        assertEquals("h264-aac-v1",manifest.path("profile").asText());assertEquals("CLEAN",manifest.path("render_mode").asText());assertTrue(manifest.path("clip_request_id").isNull());
+        assertEquals(expected.size(),manifest.path("clips").size());assertEquals(expected.size()+1,manifest.path("files").size());
+        for(int index=0;index<expected.size();index++){JsonNode selected=expected.get(index),item=manifest.path("clips").get(index);String id=selected.path("id").asText();
+            assertEquals(id,item.path("clip_id").asText());assertEquals(selected.path("segment_id"),item.path("segment_id"));
+            assertEquals(selected.path("start_ms"),item.path("start_ms"));assertEquals(selected.path("end_ms"),item.path("end_ms"));assertEquals(1,item.path("parts").size());
+            String entry="clips/"+String.format(java.util.Locale.ROOT,"%03d",index+1)+"-"+id+".mp4";assertEquals(entry,item.path("file").path("path").asText());assertArrayEquals(CLIP_BYTES,entries.get(entry));
+        }
+        for(JsonNode file:manifest.path("files")){byte[] actual=entries.get(file.path("path").asText());assertNotNull(actual);assertEquals(actual.length,file.path("size_bytes").asLong());assertEquals(sha(actual),file.path("sha256").asText());}
+        String text=new String(entries.get("manifest.json"),StandardCharsets.UTF_8);for(String secret:List.of("caption_revision","run_token","stage_id","manifest_key",KEY,root.toAbsolutePath().toString()))assertFalse(text.contains(secret));
     }
 
     private Fixture fixture(boolean confirmed) throws Exception {

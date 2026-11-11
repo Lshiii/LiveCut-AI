@@ -8,6 +8,7 @@ import java.security.NoSuchAlgorithmException;
 import java.sql.Timestamp;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.HexFormat;
@@ -241,14 +242,112 @@ public class ExportService {
         return transaction.execute(status -> contentLocked(lockPublicOwner(id), clipId));
     }
 
+    /** Admission metadata only, with existing manual-proof source checks; no captions or sibling media. */
+    public ExportVideoModels.Plan videoPackagePlan(String value,List<String> selection){
+        String id=uuid(value,"INVALID_EXPORT_ID");
+        if(selection==null||selection.isEmpty()||selection.size()>100||new HashSet<>(selection).size()!=selection.size()
+            ||selection.stream().anyMatch(item->item==null||!item.matches("[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}")))throw bad("INVALID_VIDEO_PACKAGE","Select 1..100 unique clip IDs");
+        return transaction.execute(status->{
+            var owner=lockPublicOwner(id);requireCleanVideoPackage(owner);
+            List<Object> parameters=new ArrayList<>();parameters.add(owner.get("job_id"));parameters.add(id);parameters.addAll(selection);
+            String placeholders=String.join(",",Collections.nCopies(selection.size(),"?"));
+            var rows=jdbc.queryForList("SELECT c.*,s.status,s.attempt,s.run_token,s.input_hash,s.manifest_key,s.manifest_hash FROM export_clip c JOIN job_stage s ON s.id=c.stage_id AND s.owner_type='EXPORT' AND s.owner_id=c.export_id AND s.shard_key=c.id AND s.job_id=? AND s.stage_type='EXPORT_CLIP' WHERE c.export_id=? AND c.id IN ("+placeholders+") ORDER BY c.start_ms,c.id",parameters.toArray());
+            if(rows.size()!=selection.size())throw missing("EXPORT_CLIP_NOT_FOUND","A selected clip does not belong to this export");
+            verifyVideoPackageFrozen(owner,Set.copyOf(selection));
+            var clips=rows.stream().map(this::videoPackageClip).toList();
+            return new ExportVideoModels.Plan(id,String.valueOf(owner.get("job_id")),String.valueOf(owner.get("video_id")),String.valueOf(owner.get("source_hash")),String.valueOf(owner.get("snapshot_hash")),
+                ((Number)owner.get("approved_revision")).longValue(),String.valueOf(owner.get("encoding_profile")),(String)owner.get("clip_request_id"),clips);
+        });
+    }
+
+    /** One short owner transaction per admitted file; archive copying occurs after it returns. */
+    public Content videoPackageContent(ExportVideoModels.Plan plan,ExportVideoModels.Clip admitted){
+        return transaction.execute(status->{
+            var owner=lockPublicOwner(plan.exportId());requireCleanVideoPackage(owner);
+            if(!Objects.equals(plan.jobId(),owner.get("job_id"))||!Objects.equals(plan.videoId(),owner.get("video_id"))
+                ||!Objects.equals(plan.sourceVideoHash(),owner.get("source_hash"))||!Objects.equals(plan.snapshotHash(),owner.get("snapshot_hash"))
+                ||plan.approvedRevision()!=((Number)owner.get("approved_revision")).longValue()||!Objects.equals(plan.profile(),owner.get("encoding_profile"))
+                ||!Objects.equals(plan.clipRequestId(),owner.get("clip_request_id")))throw conflict("EXPORT_SNAPSHOT_INVALID","The admitted export source changed");
+            if(!admitted.equals(videoPackageClip(clip(plan.exportId(),admitted.clipId(),true))))throw conflict("EXPORT_SNAPSHOT_INVALID","A selected clip changed after package admission");
+            Content content=contentLocked(owner,admitted.clipId(),true);
+            if(content.sizeBytes()!=admitted.sizeBytes()||!content.hash().equals(admitted.contentHash()))throw conflict("EXPORT_CONTENT_INTEGRITY_ERROR","Selected video bytes changed after package admission");
+            return content;
+        });
+    }
+    private static void requireCleanVideoPackage(Map<String,Object> owner){
+        if(!"CLEAN".equals(owner.get("render_mode")))throw conflict("EXPORT_SNAPSHOT_INVALID","Video-only packages require original CLEAN exports");
+        for(String field:List.of("source_hash","snapshot_hash"))if(!(owner.get(field) instanceof String hash)||!hash.matches("[a-f0-9]{64}"))throw conflict("EXPORT_SNAPSHOT_INVALID","Invalid export source summary");
+        Object revision=owner.get("approved_revision");if(!(revision instanceof Number)||((Number)revision).longValue()<0||((Number)revision).longValue()>9007199254740991L
+            ||!(owner.get("encoding_profile") instanceof String profile)||profile.isBlank()||profile.length()>128)throw conflict("EXPORT_SNAPSHOT_INVALID","Invalid export revision or encoding profile");
+    }
+    private ExportVideoModels.Clip videoPackageClip(Map<String,Object> row){
+        if(!"SUCCEEDED".equals(row.get("status"))||!(row.get("size_bytes") instanceof Number size)||size.longValue()<1)throw conflict("EXPORT_CONTENT_NOT_READY","Every selected clip must have completed successfully");
+        if(!(row.get("content_hash") instanceof String hash)||!hash.matches("[a-f0-9]{64}"))throw conflict("EXPORT_CONTENT_INTEGRITY_ERROR","A selected clip has an invalid content reference");
+        long start=((Number)row.get("start_ms")).longValue(),end=((Number)row.get("end_ms")).longValue(),duration=0;
+        List<ArtifactVerifier.SourcePart> parts=row.get("source_parts_json")==null?List.of(new ArtifactVerifier.SourcePart(start,end)):parseParts(String.valueOf(row.get("source_parts_json")));
+        if(start<0||end<=start||end>9007199254740991L||parts.getFirst().startMs()!=start||parts.getLast().endMs()!=end)throw conflict("EXPORT_SNAPSHOT_INVALID","Selected source intervals are invalid");
+        for(var part:parts){duration=Math.addExact(duration,part.endMs()-part.startMs());}if(duration<1||duration>9007199254740991L)throw conflict("EXPORT_SNAPSHOT_INVALID","Selected logical duration is invalid");
+        String title=(String)(row.get("topic_title")!=null?row.get("topic_title"):row.get("product_name"));
+        String segment=String.valueOf(row.get("segment_id"));if(segment.isBlank()||segment.length()>128||title!=null&&(title.isBlank()||title.length()>2000))throw conflict("EXPORT_SNAPSHOT_INVALID","Selected clip metadata is invalid");
+        var execution=new ExportVideoModels.Execution(String.valueOf(row.get("stage_id")),((Number)row.get("attempt")).intValue(),
+                (String)row.get("run_token"),(String)row.get("input_hash"),(String)row.get("manifest_key"),(String)row.get("manifest_hash"));
+        if(execution.attempt()<1||execution.runToken()==null||!execution.runToken().matches("[A-Za-z0-9_-]{16,64}")
+            ||execution.inputHash()==null||!execution.inputHash().matches("[a-f0-9]{64}")
+            ||execution.manifestKey()==null||execution.manifestKey().isBlank()||execution.manifestHash()==null||!execution.manifestHash().matches("[a-f0-9]{64}"))
+            throw conflict("EXPORT_SNAPSHOT_INVALID","Selected successful execution identity is invalid");
+        return new ExportVideoModels.Clip(String.valueOf(row.get("id")),segment,title,start,end,duration,parts,size.longValue(),hash,execution);
+    }
+
+    /** Recheck frozen provenance and only the selected persisted clip identities, never sibling files. */
+    private void verifyVideoPackageFrozen(Map<String,Object> owner,Set<String> selected){
+        try{
+            var analysis=jdbc.queryForMap("SELECT video_id,generation FROM analysis_job WHERE id=?",owner.get("job_id"));
+            String sourceHash=jdbc.queryForObject("SELECT content_hash FROM video_asset WHERE id=?",String.class,owner.get("video_id"));
+            JsonNode frozen=JSON.readTree(String.valueOf(owner.get("frozen_json")));
+            String digest=sha256(ClipRequestService.canonicalJson(frozen));
+            if(!frozen.isObject()||!digest.equals(owner.get("snapshot_hash"))||!digest.equals(owner.get("fingerprint"))
+                ||!Objects.equals(owner.get("video_id"),analysis.get("video_id"))||!Objects.equals(sourceHash,owner.get("source_hash"))
+                ||!Objects.equals(owner.get("job_id"),frozen.path("job_id").asText())||!Objects.equals(owner.get("video_id"),frozen.path("video_id").asText())
+                ||!Objects.equals(sourceHash,frozen.path("source_hash").asText())||!frozen.path("generation").isIntegralNumber()
+                ||!frozen.path("generation").canConvertToInt()||frozen.path("generation").intValue()!=((Number)analysis.get("generation")).intValue()
+                ||!frozen.path("approved_revision").isIntegralNumber()||!frozen.path("approved_revision").canConvertToLong()
+                ||frozen.path("approved_revision").longValue()!=((Number)owner.get("approved_revision")).longValue()
+                ||!PROFILE.equals(owner.get("encoding_profile"))||!PROFILE.equals(frozen.path("encoding_profile").asText())
+                ||frozen.has("render_mode")&&!"CLEAN".equals(frozen.path("render_mode").asText()))throw new IllegalArgumentException();
+            if(owner.get("clip_request_id")!=null){verifyClipRequestFrozen(owner,selected);return;}
+            JsonNode frozenClips=frozen.path("clips");if(!frozenClips.isArray()||frozenClips.isEmpty()||frozenClips.size()>100)throw new IllegalArgumentException();
+            for(String id:selected){
+                var row=clip(String.valueOf(owner.get("id")),id,false);JsonNode matching=null;
+                for(JsonNode candidate:frozenClips)if(Objects.equals(row.get("segment_id"),candidate.path("segment_id").asText())){
+                    if(matching!=null)throw new IllegalArgumentException();matching=candidate;
+                }
+                if(matching==null||row.get("source_parts_json")!=null
+                    ||!Objects.equals(row.get("product_id"),matching.path("product_id").isMissingNode()?null:matching.path("product_id").asText())
+                    ||!Objects.equals(row.get("product_name"),matching.path("product_name").isMissingNode()?null:matching.path("product_name").asText())
+                    ||!Objects.equals(row.get("topic_title"),matching.path("title").isMissingNode()?null:matching.path("title").asText())
+                    ||!matching.path("start_ms").isIntegralNumber()||!matching.path("end_ms").isIntegralNumber()
+                    ||matching.path("start_ms").longValue()!=((Number)row.get("start_ms")).longValue()
+                    ||matching.path("end_ms").longValue()!=((Number)row.get("end_ms")).longValue())throw new IllegalArgumentException();
+                StageRow stage=stageRow(String.valueOf(row.get("stage_id")));
+                if(!Objects.equals(owner.get("job_id"),stage.jobId())||!"EXPORT_CLIP".equals(stage.stageType())
+                    ||!sha256(digest+"\n"+ClipRequestService.canonicalJson(matching)+"\n"+id).equals(stage.inputHash()))throw new IllegalArgumentException();
+            }
+        }catch(JobException invalid){throw invalid;}
+        catch(RuntimeException invalid){throw conflict("EXPORT_SNAPSHOT_INVALID","Selected export failed frozen source verification");}
+    }
+
     /** Caller holds analysis then export owner; never reacquire another parent. */
     private Content contentLocked(Map<String, Object> owner, String clipId) {
+        return contentLocked(owner,clipId,false);
+    }
+    private Content contentLocked(Map<String, Object> owner, String clipId,boolean videoPackage) {
         Map<String, Object> clip = clip(String.valueOf(owner.get("id")), clipId, true);
         if (!"SUCCEEDED".equals(clip.get("status"))) { throw conflict("EXPORT_CONTENT_NOT_READY", "This clip has not completed successfully"); }
         Map<String, Object> analysis = jdbc.queryForMap("SELECT * FROM analysis_job WHERE id=?", owner.get("job_id"));
         StageRow stage = stageRow(String.valueOf(clip.get("stage_id")));
         ArtifactVerifier.ManifestIdentity identity = manifestIdentity(stage, analysis);
-        var manifest = verifier.verifyExportManifest(stage.manifestKey(), stage.manifestHash(), identity, exportIdentity(stage));
+        if(videoPackage)verifyVideoPackageFrozen(owner,Set.of(clipId));
+        var manifest = verifier.verifyExportManifest(stage.manifestKey(), stage.manifestHash(), identity, exportIdentity(stage,videoPackage));
         var file = manifest.artifacts().stream().filter(item -> "clip".equals(item.kind())).findFirst().orElseThrow();
         if (!file.sha256().equals(clip.get("content_hash")) || file.sizeBytes() != ((Number) clip.get("size_bytes")).longValue()) {
             throw conflict("EXPORT_CONTENT_INTEGRITY_ERROR", "Export bytes no longer match their registered reference");
@@ -278,8 +377,11 @@ public class ExportService {
     }
 
     public Map<String, Object> claimConfig(StageRow stage) {
+        return claimConfig(stage,false);
+    }
+    private Map<String,Object> claimConfig(StageRow stage,boolean selectedOnly) {
         Map<String, Object> owner = jdbc.queryForMap("SELECT * FROM export_job WHERE id=?", stage.ownerId());
-        if(owner.get("clip_request_id")!=null)verifyClipRequestFrozen(owner);
+        if(owner.get("clip_request_id")!=null)verifyClipRequestFrozen(owner,selectedOnly?Set.of(stage.shardKey()):null);
         Map<String, Object> row = clip(stage.ownerId(), stage.shardKey(), false);
         Map<String, Object> export = new TreeMap<>();
         export.put("export_id", stage.ownerId()); export.put("clip_id", row.get("id"));
@@ -314,8 +416,11 @@ public class ExportService {
     }
 
     private ArtifactVerifier.ExportIdentity exportIdentity(StageRow stage) {
+        return exportIdentity(stage,false);
+    }
+    private ArtifactVerifier.ExportIdentity exportIdentity(StageRow stage,boolean selectedOnly) {
         @SuppressWarnings("unchecked")
-        Map<String, Object> export = (Map<String, Object>) claimConfig(stage).get("export");
+        Map<String, Object> export = (Map<String, Object>) claimConfig(stage,selectedOnly).get("export");
         return new ArtifactVerifier.ExportIdentity(stage.ownerId(), String.valueOf(export.get("clip_id")),
                 ((Number) export.get("approved_revision")).longValue(), String.valueOf(export.get("snapshot_hash")),
                 String.valueOf(export.get("segment_id")), ((Number) export.get("start_ms")).longValue(),
@@ -368,6 +473,9 @@ public class ExportService {
 
     /** Shared by public reads, claims, completion manifests and caption sources. No worker fields are added. */
     public JsonNode verifyClipRequestFrozen(Map<String,Object> owner){
+        return verifyClipRequestFrozen(owner,null);
+    }
+    private JsonNode verifyClipRequestFrozen(Map<String,Object> owner,Set<String> selected){
         try{
             JsonNode frozen=JSON.readTree(String.valueOf(owner.get("frozen_json")));
             String digest=sha256(ClipRequestService.canonicalJson(frozen));
@@ -380,8 +488,9 @@ public class ExportService {
             var clips=deliveryClips(selection);JsonNode expected=JSON.valueToTree(deliveryFrozen(request,analysis,revision,planHash,selection,clips));
             if(clips.isEmpty()||!ClipRequestService.canonicalJson(expected).equals(ClipRequestService.canonicalJson(frozen))||!Objects.equals(owner.get("video_id"),request.get("video_id"))
                 ||!Objects.equals(owner.get("source_hash"),request.get("source_hash"))||!PROFILE.equals(owner.get("encoding_profile"))||!"CLEAN".equals(owner.get("render_mode")))throw new IllegalArgumentException();
-            var persisted=jdbc.queryForList("SELECT c.*,s.job_id AS stage_job,s.owner_type AS stage_owner_type,s.owner_id AS stage_owner,s.shard_key,s.stage_type,s.input_hash FROM export_clip c LEFT JOIN job_stage s ON s.id=c.stage_id WHERE c.export_id=?",owner.get("id"));
-            if(persisted.size()!=clips.size())throw new IllegalArgumentException();Map<String,Map<String,Object>> byId=new HashMap<>();for(var clip:clips)byId.put(String.valueOf(clip.get("segment_id")),clip);
+            List<Object> parameters=new ArrayList<>();parameters.add(owner.get("id"));if(selected!=null)parameters.addAll(selected);
+            var persisted=jdbc.queryForList("SELECT c.*,s.job_id AS stage_job,s.owner_type AS stage_owner_type,s.owner_id AS stage_owner,s.shard_key,s.stage_type,s.input_hash FROM export_clip c LEFT JOIN job_stage s ON s.id=c.stage_id WHERE c.export_id=?"+(selected==null?"":" AND c.id IN ("+String.join(",",Collections.nCopies(selected.size(),"?"))+")"),parameters.toArray());
+            if(persisted.size()!=(selected==null?clips.size():selected.size()))throw new IllegalArgumentException();Map<String,Map<String,Object>> byId=new HashMap<>();for(var clip:clips)byId.put(String.valueOf(clip.get("segment_id")),clip);
             for(var row:persisted){var clip=byId.remove(String.valueOf(row.get("segment_id")));if(clip==null)throw new IllegalArgumentException();
                 String expectedParts=ClipRequestService.canonicalJson(JSON.valueToTree(clip.get("parts")));
                 String actualParts=ClipRequestService.canonicalJson(JSON.readTree(String.valueOf(row.get("source_parts_json"))));
@@ -429,7 +538,7 @@ public class ExportService {
     }
 
     private Map<String, Object> clip(String exportId, String clipId, boolean lock) {
-        List<Map<String, Object>> rows = jdbc.queryForList("SELECT c.*,s.status,s.attempt,s.error_code FROM export_clip c JOIN job_stage s ON s.id=c.stage_id AND s.owner_type='EXPORT' AND s.owner_id=c.export_id AND s.shard_key=c.id WHERE c.export_id=? AND c.id=?" + (lock ? " FOR UPDATE" : ""), exportId, clipId);
+        List<Map<String, Object>> rows = jdbc.queryForList("SELECT c.*,s.status,s.attempt,s.error_code,s.run_token,s.input_hash,s.manifest_key,s.manifest_hash FROM export_clip c JOIN job_stage s ON s.id=c.stage_id AND s.owner_type='EXPORT' AND s.owner_id=c.export_id AND s.shard_key=c.id WHERE c.export_id=? AND c.id=?" + (lock ? " FOR UPDATE" : ""), exportId, clipId);
         if (rows.isEmpty()) { throw missing("EXPORT_CLIP_NOT_FOUND", "Export clip was not found"); }
         return rows.getFirst();
     }

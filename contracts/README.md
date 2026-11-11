@@ -1,5 +1,9 @@
 # 视频分析结果契约
 
+## 已完成MP4交付包
+
+[export-video-package.schema.json](./export-video-package.schema.json) 定义明确选择的同批原MP4交付清单。视频包不设字幕确认门槛，保留合法源修订0和实际区间/文件哈希；编码profile与内部render_mode分开。各文件、选择、时序及旧人工证明仍需程序核验，Schema不是媒体存在或来源可信的证明。[合成夹具](../fixtures/export-video-package.synthetic.json)不是实际成片；操作和资源边界见[批量下载MP4](../docs/69-批量下载已完成MP4.md)。
+
 ## 视频对话历史元数据
 
 [agent-session-history.schema.json](./agent-session-history.schema.json) 定义VIDEO会话的只读分页摘要，只有首问、来源提示和轮数，不含完整回答或转写。摘要不能进入完整Session缓存或用于原提交认领；游标、微秒顺序、跨字段校验与旧服务兼容见[分页历史说明](../docs/68-轻量分页视频对话历史.md)。[示例](../fixtures/agent-session-history.synthetic.json)为合成元数据，不是模型结果。

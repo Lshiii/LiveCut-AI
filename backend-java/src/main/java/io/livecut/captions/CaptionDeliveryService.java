@@ -2,13 +2,10 @@ package io.livecut.captions;
 
 import io.livecut.exports.ExportService;
 import io.livecut.jobs.JobException;
-import jakarta.annotation.PreDestroy;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import tools.jackson.databind.json.JsonMapper;
 
-import java.nio.file.Path;
 import java.util.*;
 
 /** Confirmed captions and verified clean MP4s share one delivery representation. */
@@ -21,14 +18,9 @@ public final class CaptionDeliveryService {
     public record Selection(String clipId, long captionRevision) {}
     public record Attachment(String filename, String contentType, byte[] bytes, String hash) {}
 
-    public CaptionDeliveryService(CaptionService captions, ExportService exports,
-            @Value("${livecut.storage.root}") String storageRoot,
-            @Value("${livecut.captions.package-max-bytes:2147483648}") long maxBytes,
-            @Value("${livecut.captions.package-slots:2}") int concurrency,
-            @Value("${livecut.captions.package-temporary-quota:4294967296}") long temporaryQuota,
-            @Value("${livecut.captions.package-build-seconds:180}") long buildSeconds) {
+    public CaptionDeliveryService(CaptionService captions, ExportService exports, CaptionBundleWriter bundles) {
         this.captions = captions; this.exports = exports;
-        bundles = new CaptionBundleWriter(Path.of(storageRoot), maxBytes, concurrency, temporaryQuota, buildSeconds, 900);
+        this.bundles = bundles;
     }
 
     public Attachment file(String exportId, String clipId, long revision, String format) {
@@ -121,5 +113,4 @@ public final class CaptionDeliveryService {
         return new JobException(HttpStatus.BAD_REQUEST, "INVALID_CAPTION_PACKAGE", "Select 1..100 unique completed clips with explicit confirmed caption revisions");
     }
 
-    @PreDestroy public void close() { bundles.close(); }
 }
