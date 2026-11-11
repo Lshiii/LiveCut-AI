@@ -118,3 +118,7 @@ uv run pytest worker-python/tests/test_contracts.py worker-python/tests/test_inp
 字幕渲染专用 [cues 文件](./caption-render-cues.schema.json) 与 [公共快照](./caption-render.schema.json) 分别约束纯文本输入和独立状态；示例 fixtures/caption-render.example.json 完全合成。UTF-16/UTF-8字节限制、半开区间非重叠、URL与本记录ID绑定及进度不回退仍需业务校验。
 
 `PORTRAIT_BLUR_720` 为固定 720×1280 的[竖屏柔化背景](../docs/50-竖屏柔化背景.md)扩展；新枚举进入原有冻结哈希，旧普通竖屏保持补黑。新旧 Worker 需要协调发布。
+
+## 回答前原句预查 v1.4
+
+[agent-answer-evidence-speech.schema.json](./agent-answer-evidence-speech.schema.json) 定义显式 `speech_lookup_v1` 的分项回答：首个模型请求前执行一次本地预查，记录真实 `EVIDENCE_POLICY` 步、有限范围、完整原句 ID 与裁剪状态。它使用执行协议 2，原 [1.3](./agent-answer-evidence.schema.json) 保持不变。Schema 之外还须核对 owner / source / 预查参数、最近原句与半开时间距离、UTF-16 限额、实际入模与引用并集；不能把合法引用当作语义支持或完整回答证明。接口、版本隔离和恢复规则见[回答前原句预查](../docs/74-回答前原句预查.md)；[共享夹具](../fixtures/agent-speech-lookup.synthetic.json) 为明确的合成协议数据，不包含真实模型效果。

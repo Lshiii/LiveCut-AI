@@ -10,7 +10,15 @@ public final class WorkerModels {
     public record Registration(@JsonProperty("worker_id") String workerId,
                                @JsonProperty("session_id") String sessionId,
                                @JsonProperty("stage_types") List<String> stageTypes,
-                               Integer slots, @JsonProperty("target_job_id") String targetJobId) {}
+                               Integer slots, @JsonProperty("target_job_id") String targetJobId,
+                               @JsonProperty("supported_protocol_versions") List<Integer> supportedProtocolVersions) {
+        public Registration {
+            supportedProtocolVersions=supportedProtocolVersions==null?List.of(1):List.copyOf(supportedProtocolVersions);
+        }
+        public Registration(String workerId,String sessionId,List<String> stageTypes,Integer slots,String targetJobId){
+            this(workerId,sessionId,stageTypes,slots,targetJobId,List.of(1));
+        }
+    }
     public record Session(@JsonProperty("worker_id") String workerId,
                           @JsonProperty("session_id") String sessionId) {}
     public record Receipt(String outcome, @JsonProperty("worker_id") String workerId,

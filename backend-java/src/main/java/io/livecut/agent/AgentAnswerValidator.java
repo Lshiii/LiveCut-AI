@@ -13,6 +13,7 @@ public final class AgentAnswerValidator {
     private static final Set<String> ANSWER=Set.of("schema_version","session_id","turn_id","job_id","video_id",
         "source_hash","transcript_hash","question","answer","answer_scope","citations","tool_calls","provenance","suggested_clip_instruction");
     public static JsonNode validate(JsonNode answer,Map<String,Object> owner){
+        if(AgentSpeechLookup.enabled(owner))return AgentSpeechLookupAnswerValidator.validate(answer,owner);
         if(AgentEvidence.structured(owner))return AgentEvidenceAnswerValidator.validate(answer,owner);
         boolean visual="frames".equals(owner.get("visual_mode"));
         Long focus=AgentFocus.value(owner);boolean focused=focus!=null;

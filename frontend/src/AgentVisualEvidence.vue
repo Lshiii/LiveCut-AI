@@ -19,7 +19,7 @@ onBeforeUnmount(() => { alive = false })
 </script>
 
 <template>
-  <section v-if="turn.result?.schema_version === '1.1' || turn.result?.schema_version === '1.2' || turn.result?.schema_version === '1.3'" class="agent-visual-evidence" aria-label="本轮画面依据">
+  <section v-if="turn.result?.schema_version === '1.1' || turn.result?.schema_version === '1.2' || turn.result?.schema_version === '1.3' || turn.result?.schema_version === '1.4'" class="agent-visual-evidence" aria-label="本轮画面依据">
     <h4>画面依据 · 引用 {{ citations.length }} 帧 / 本轮观察 {{ frames.length }} 帧</h4>
     <p class="visual-boundary">仅表示实际抽查的画面；不包含原始音轨，不等于连续观看或完整动作证明。原句依据单独列出。</p>
     <p v-if="turn.focus_timestamp_ms !== undefined" class="visual-boundary">用户附加位置 {{ topicTime(turn.focus_timestamp_ms) }} 是定位提示；下方截图有独立实际 PTS，像素不保证与浏览器暂停画面完全相同。</p>
