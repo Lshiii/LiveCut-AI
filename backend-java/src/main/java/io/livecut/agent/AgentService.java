@@ -4,6 +4,7 @@ import static io.livecut.agent.AgentModels.*;
 import java.sql.Timestamp;
 import java.time.Instant;
 import java.util.*;
+import io.livecut.dispatch.StageWakeups;
 import io.livecut.clips.ClipRequestService;
 import io.livecut.captions.CaptionService;
 import io.livecut.captions.CaptionSourceResolver;
@@ -25,6 +26,7 @@ import tools.jackson.databind.JsonNode;
 /** Independent conversations reuse published evidence, never the editable review or its budget. */
 @Service
 public class AgentService {
+    private final StageWakeups wakeups;
     private final JdbcTemplate jdbc;
     private final ArtifactVerifier artifacts;
     private final CaptionService captions;
@@ -36,8 +38,8 @@ public class AgentService {
     @Value("${LIVECUT_AGENT_VISUAL_MODEL:}") private String configuredVisualModel="";
     private record FrozenSource(String video,String hash,String transcriptKey,String transcriptHash,String analysisKey,
                                 String analysisHash,long duration,JsonNode utterances,JsonNode topics) {}
-    public AgentService(JdbcTemplate jdbc,ArtifactVerifier artifacts,CaptionService captions,CaptionSourceResolver captionSources,PlatformTransactionManager manager){
-        this.jdbc=jdbc;this.artifacts=artifacts;this.captions=captions;this.captionSources=captionSources;this.replayVerifier=new AgentResponseReplayVerifier(artifacts);tx=new TransactionTemplate(manager);tx.setIsolationLevel(TransactionDefinition.ISOLATION_READ_COMMITTED);
+    public AgentService(JdbcTemplate jdbc,ArtifactVerifier artifacts,CaptionService captions,CaptionSourceResolver captionSources,PlatformTransactionManager manager,StageWakeups wakeups){
+        this.wakeups=wakeups;this.jdbc=jdbc;this.artifacts=artifacts;this.captions=captions;this.captionSources=captionSources;this.replayVerifier=new AgentResponseReplayVerifier(artifacts);tx=new TransactionTemplate(manager);tx.setIsolationLevel(TransactionDefinition.ISOLATION_READ_COMMITTED);
     }
     public Session createSession(String jobId,JsonNode input,String key){
         String parent=uuid(jobId);key(key);if(input==null||!input.isObject()||!input.isEmpty())throw bad("INVALID_AGENT_SESSION","Session input must be empty");
@@ -179,6 +181,7 @@ public class AgentService {
                 turn,id,parent,count+1,question,key,fingerprint,model,fallbacks,limit,history,visual,focus,evidenceMode,evidencePolicy,screen==null?null:canonical(screen.context()));
             jdbc.update("INSERT INTO job_stage (id,job_id,owner_type,owner_id,stage_type,shard_key,status,input_hash,required_worker_protocol) VALUES (?,?,'AGENT_TURN',?, ?,?,'READY',?,?)",
                 stage,parent,turn,evidenceMode.equals("structured")?AgentEvidence.STAGE:focus!=null?AgentFocus.STAGE:visual.equals("frames")?"AGENT_VISUAL":"SEGMENT","agent-"+turn,sha(fingerprint+"\n"+current.hash()+"\n"+current.transcriptHash()+"\n"+current.analysisHash()+"\n"+model+"\n"+fallbacks+"\n"+history+(screen==null?"":"\nscreen_source="+AgentScreenSearch.hash(screen.context()))),screen!=null?4:evidencePolicy.equals("none")?1:2);
+            wakeups.ready(stage);
             return turnSnapshot(lockOwner(turn,parent));
         });}catch(DuplicateKeyException collision){return tx.execute(status->{lockPublicSession(id);var rows=jdbc.queryForList("SELECT * FROM agent_turn WHERE idempotency_key=? FOR UPDATE",key);if(rows.isEmpty())throw collision;return existingTurn(rows.getFirst(),fingerprint);});}
     }
@@ -191,6 +194,7 @@ public class AgentService {
         var stages=jdbc.queryForList("SELECT id,status FROM job_stage FORCE INDEX (idx_stage_owner_status) WHERE owner_type='AGENT_TURN' AND owner_id=? FOR UPDATE",turn);
         if(stages.size()!=1||!Set.of("READY","RUNNING","RETRY_WAIT").contains(stages.getFirst().get("status")))throw conflict("AGENT_STAGE_UNAVAILABLE","Agent stage already changed");
         jdbc.update("UPDATE job_stage SET status='CANCELLED',run_token=NULL,worker_id=NULL,worker_session_id=NULL,lease_until=NULL,hard_deadline_at=NULL,last_retryable=FALSE,error_code='USER_CANCELLED',diagnostic_json=NULL,text_progress_json=NULL,updated_at=CURRENT_TIMESTAMP(6) WHERE id=?",stages.getFirst().get("id"));
+        wakeups.released(String.valueOf(stages.getFirst().get("id")));
         jdbc.update("UPDATE agent_turn SET status='CANCELLED',state_version=state_version+1,updated_at=CURRENT_TIMESTAMP(6) WHERE id=?",turn);
         return turnSnapshot(lockOwner(turn,String.valueOf(owner.get("job_id"))));
     });}
@@ -349,7 +353,9 @@ public class AgentService {
             String reason=replayBlock(current,true);if(reason!=null)throw replayRejected(reason);
             var o=current.owner();String id=UUID.randomUUID().toString(),stage=UUID.randomUUID().toString(),request=AgentResponseReplayData.requestHash(sourceId,snapshot);int sequence=jdbc.queryForObject("SELECT COUNT(*)+1 FROM agent_turn WHERE session_id=?",Integer.class,o.get("session_id"));
             jdbc.update("INSERT INTO agent_turn (id,session_id,job_id,sequence_number,question,idempotency_key,request_hash,text_model_id,text_fallback_models_json,max_text_calls,history_json,visual_mode,focus_timestamp_ms,evidence_mode,evidence_policy,replay_source_turn_id,replay_snapshot_hash,replay_descriptor_json) VALUES (?,?,?,?,?,?,?,?,?,0,?,?,?,?,?,?,?,?)",id,o.get("session_id"),o.get("job_id"),sequence,o.get("question"),key,request,o.get("text_model_id"),o.get("text_fallback_models_json"),o.get("history_json"),o.get("visual_mode"),o.get("focus_timestamp_ms"),o.get("evidence_mode"),o.get("evidence_policy"),sourceId,snapshot,canonical(prepared.descriptor()));
-            jdbc.update("INSERT INTO job_stage (id,job_id,owner_type,owner_id,stage_type,shard_key,status,input_hash,required_worker_protocol) VALUES (?,?,'AGENT_TURN',?,'AGENT_EVIDENCE',?,'READY',?,3)",stage,o.get("job_id"),id,"agent-"+id,AgentResponseReplayData.inputHash(id,request,snapshot));return turnSnapshot(lockOwner(id,String.valueOf(o.get("job_id"))));
+            jdbc.update("INSERT INTO job_stage (id,job_id,owner_type,owner_id,stage_type,shard_key,status,input_hash,required_worker_protocol) VALUES (?,?,'AGENT_TURN',?,'AGENT_EVIDENCE',?,'READY',?,3)",stage,o.get("job_id"),id,"agent-"+id,AgentResponseReplayData.inputHash(id,request,snapshot));
+            wakeups.ready(stage);
+            return turnSnapshot(lockOwner(id,String.valueOf(o.get("job_id"))));
         });}catch(DuplicateKeyException duplicate){return tx.execute(status->{lockPublicOwner(sourceId);Turn found=existingReplay(sourceId,key,snapshot);if(found!=null)return found;throw conflict("AGENT_RESPONSE_REPLAY_ALREADY_EXISTS","The original turn already has a recovery");});}
     }
     private static JobException replayRejected(String reason){return switch(reason){case "SESSION_BUSY"->conflict("AGENT_SESSION_BUSY","Wait for the active session turn");case "SESSION_LIMIT"->conflict("AGENT_SESSION_LIMIT","This session reached its turn limit");default->AgentResponseReplayVerifier.unavailable(reason);};}
@@ -425,6 +431,7 @@ public class AgentService {
                 turn,id,parent,count+1,instruction,key,fingerprint,model,fallbacks,limit,canonical(context));
             jdbc.update("INSERT INTO job_stage (id,job_id,owner_type,owner_id,stage_type,shard_key,status,input_hash) VALUES (?,?,'AGENT_TURN',?,'CAPTION_PROOFREAD',?,'READY',?)",
                 stage,parent,turn,"caption-"+turn,sha(fingerprint+"\n"+session.get("source_hash")+"\n"+session.get("transcript_hash")+"\n"+session.get("analysis_hash")+"\n"+model+"\n"+fallbacks+"\n"+canonical(context)));
+            wakeups.ready(stage);
             return captionTurnSnapshot(lockOwner(turn,parent));
         });}catch(DuplicateKeyException collision){return tx.execute(status->{var session=lockPublicSession(id);requireKind(session,true);var rows=jdbc.queryForList("SELECT * FROM agent_turn WHERE idempotency_key=? FOR UPDATE",key);if(rows.isEmpty())throw collision;return existingCaptionTurn(rows.getFirst(),fingerprint);});}
     }
@@ -438,6 +445,7 @@ public class AgentService {
         var stages=jdbc.queryForList("SELECT id,status FROM job_stage FORCE INDEX (idx_stage_owner_status) WHERE owner_type='AGENT_TURN' AND owner_id=? FOR UPDATE",id);
         if(stages.size()!=1||!Set.of("READY","RUNNING","RETRY_WAIT").contains(stages.getFirst().get("status")))throw conflict("AGENT_STAGE_UNAVAILABLE","Caption proofreading stage changed");
         jdbc.update("UPDATE job_stage SET status='CANCELLED',run_token=NULL,worker_id=NULL,worker_session_id=NULL,lease_until=NULL,hard_deadline_at=NULL,last_retryable=FALSE,error_code='USER_CANCELLED',diagnostic_json=NULL,text_progress_json=NULL,updated_at=CURRENT_TIMESTAMP(6) WHERE id=?",stages.getFirst().get("id"));
+        wakeups.released(String.valueOf(stages.getFirst().get("id")));
         jdbc.update("UPDATE agent_turn SET status='CANCELLED',state_version=state_version+1,updated_at=CURRENT_TIMESTAMP(6) WHERE id=?",id);
         return captionTurnSnapshot(lockOwner(id,String.valueOf(owner.get("job_id"))));});}
     private CaptionProofreadModels.Session captionSessionSnapshot(Map<String,Object> owner){

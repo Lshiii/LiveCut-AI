@@ -93,12 +93,14 @@ LIVECUT_API_PORT=8080
 
 > Compose 创建的业务库是 `livecut`；`.env.java.example` 原地址中的 `livecut_dev` 需要按上面改成 `livecut`。配置使用字面的 `NAME=value`，不要给整个值加 shell 引号，也不要把 `DASHSCOPE_API_KEY` 放进只接受 `LIVECUT_` 项的 `.env.java`。
 
-启动 Docker Desktop，确认本机 `13306` 端口可用，再启动数据库：
+启动 Docker Desktop，确认本机 `13306` 和 `19092` 端口可用，再启动数据库、Kafka 与通知 topic：
 
 ```powershell
-docker compose --env-file .env.compose -f infra/compose.yml up -d
-docker compose --env-file .env.compose -f infra/compose.yml ps
+docker compose --env-file .env.compose -f infra/compose.yml --profile kafka up -d mysql kafka kafka-init
+docker compose --env-file .env.compose -f infra/compose.yml --profile kafka ps -a
 ```
+
+新配置示例启用 **Kafka 阶段通知**：Java 在阶段就绪事务内写 Outbox，消息唤醒 Worker 后由原领取协议执行下一阶段。等 Kafka healthy、`kafka-init` exited(0) 后再启动 Worker。已有私有配置按 [Kafka 调度指南](docs/80-Kafka阶段通知与可靠调度.md) 加入配置；未设置时保留旧 poll 模式。
 
 ### 用单个 JAR 运行网页与 API
 
@@ -606,6 +608,7 @@ flowchart TD
 - **离线必要证据评测**：为同一问题冻结必要原句与画面时间窗，分别核对轨迹取得、实际引用和首次取得路径；使用实际有理 PTS，区分用户定位、程序预查和模型取证。提供 JSON / HTML 报告与未标注模板，正文语义保持 N/A。[运行与口径](docs/79-Agent必要证据覆盖评测.md)。
 - **两种按需定位方式**：普通要求使用 BM25 与可选 BGE 向量融合检索；回答引用剪辑直接绑定选中的发生位置和邻句，避免重新检索到另一处同词内容。
 - **Java 持久调度与资源控制**：感知 Worker 能力与容量，原子领取阶段，使用租约、attempt 与 run_token 拒绝迟到结果；模型预算和调用状态持久化。
+- **Kafka 阶段通知**：READY 与事务 Outbox 一起提交，broker ACK 后确认发布，Worker 持续消费并唤醒领取；保留容量释放通知、重复执行保护和低频补偿。[配置与可靠性说明](docs/80-Kafka阶段通知与可靠调度.md)
 - **长视频 OCR 结果完整发布**：OCR 分析最多携带 120 帧，Java 对完整 OCR 清单单独校验容量、连续帧编号、路径与文件摘要，避免分析已完成却因通用文件数上限被拒收；其他类型仍使用原限制。[边界与验收](docs/77-OCR高帧结果发布.md)。
 - **可核对的原文搜索**：独立只读接口验证 ASR 与时间轴来源，以有界分页提供原句；文件读取放在短元数据事务之外，返回前再次核来源身份，其他任务进度不会误使同一转写失效。播放器、搜索和前后文各自隔离迟到操作。
 - **独立人工方案与不可变回执**：从明确选定的 ASR 起止句创建 `MANUAL_ASR` 方案，不伪造 AI 候选或规划阶段。创建、修订和导出先持久保存原 key/body，再发送业务请求；未知结果先查原回执，读取其精确修订核对 hash。确认与导出冻结来源和版本，新 head 不替换旧提交或已确认成片；多窗口本机回执按请求独立保留。

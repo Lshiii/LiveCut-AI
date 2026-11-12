@@ -15,6 +15,7 @@ import java.util.Set;
 import java.util.TreeMap;
 import java.util.UUID;
 
+import io.livecut.dispatch.StageWakeups;
 import io.livecut.jobs.JobModels.*;
 import io.livecut.exports.ExportService;
 import io.livecut.clips.ClipRequestService;
@@ -35,7 +36,7 @@ import org.springframework.transaction.support.TransactionTemplate;
 import tools.jackson.core.type.TypeReference;
 import tools.jackson.databind.ObjectMapper;
 
-/** Fixed-stage database scheduler. All mutations lock the parent before stages. */
+/** Stage lifecycle and fenced execution; READY notifications commit with state. Parent locks precede stages. */
 @Service
 @EnableScheduling
 public class JobService {
@@ -50,6 +51,7 @@ public class JobService {
             row.getString("manifest_key"), row.getString("manifest_hash"), row.getString("error_code"),
             row.getString("owner_type"), row.getString("owner_id"),
             StageDiagnostics.read(row.getString("diagnostic_json"), row.getString("error_code"), row.getInt("attempt")),TextExecutionPolicy.readProgress(row.getString("text_progress_json")),row.getInt("required_worker_protocol"));
+    private final StageWakeups wakeups;
     private final JdbcTemplate jdbc;
     private final TransactionTemplate transaction;
     private final ArtifactVerifier artifactVerifier;
@@ -73,11 +75,12 @@ public class JobService {
                       @Value("${livecut.jobs.max-attempts:3}") int maxAttempts,
                       @Value("${livecut.jobs.retry-delay-seconds:2}") int retryDelaySeconds,
                       @Value("${livecut.jobs.scan-enabled:true}") boolean scanEnabled,
-                      ArtifactVerifier artifactVerifier, ExportService exports, WorkerCapacityService workers, ClipRequestService clips, AgentService agents) {
+                      ArtifactVerifier artifactVerifier, ExportService exports, WorkerCapacityService workers, ClipRequestService clips, AgentService agents, StageWakeups wakeups) {
         if (leaseSeconds < 1 || leaseSeconds > 3600 || hardDeadlineSeconds < 1 || hardDeadlineSeconds > 86400
                 || maxAttempts < 1 || maxAttempts > 10 || retryDelaySeconds < 0 || retryDelaySeconds > 3600) {
             throw new IllegalArgumentException("Invalid scheduler lease, deadline, attempt or retry settings");
         }
+        this.wakeups = wakeups;
         this.jdbc = jdbc;
         this.artifactVerifier = artifactVerifier;
         this.exports = exports;
@@ -118,6 +121,7 @@ public class JobService {
                             UUID.randomUUID().toString(), id, id, type, type.equals("MEDIA") ? "READY" : "BLOCKED",
                             sha256(sourceHash + "\n" + configHash + "\n" + type + "\n0"));
                 }
+                wakeups.readyForJob(id);
                 return snapshot(job(id, true));
             });
         } catch (DuplicateKeyException concurrentCreate) {
@@ -190,6 +194,7 @@ public class JobService {
                             UUID.randomUUID().toString(), id, id, type, "MEDIA".equals(type) ? "READY" : "BLOCKED",
                             sha256(sourceHash + "\n" + configHash + "\n" + sha256(preparationJson) + "\n" + type + "\n0"));
                 }
+                wakeups.readyForJob(id);
                 return snapshot(job(id, true));
             });
         } catch (DuplicateKeyException collision) {
@@ -232,6 +237,7 @@ public class JobService {
             if (!actions(job, stages(id, true)).canCancel()) { throw conflict("JOB_NOT_CANCELLABLE", "A completed job cannot be cancelled"); }
             jdbc.update("UPDATE job_stage SET status='CANCELLED',run_token=NULL,worker_id=NULL,worker_session_id=NULL,lease_until=NULL,hard_deadline_at=NULL,updated_at=CURRENT_TIMESTAMP(6) WHERE job_id=? AND owner_type='ANALYSIS' AND status NOT IN ('SUCCEEDED','SKIPPED')", id);
             touch(id, "CANCELLED");
+            wakeups.releasedForOwner("ANALYSIS", id);
             return snapshot(job(id, true));
         });
     }
@@ -251,6 +257,7 @@ public class JobService {
             }
             jdbc.update("UPDATE job_stage SET status='READY',run_token=NULL,worker_id=NULL,worker_session_id=NULL,lease_until=NULL,hard_deadline_at=NULL,next_run_at=CURRENT_TIMESTAMP(6),error_code=NULL,diagnostic_json=NULL,updated_at=CURRENT_TIMESTAMP(6) WHERE job_id=? AND owner_type='ANALYSIS' AND status='FAILED'", id);
             touch(id, "RUNNING");
+            wakeups.readyForJob(id);
             return snapshot(job(id, true));
         });
     }
@@ -447,6 +454,7 @@ public class JobService {
             else if (isAgentTurn(stage)) { agents.recordSuccess(stage,job,manifest); }
             else { advance(jobId, stage.stageType()); }
             touchParent(stage, null);
+            wakeups.released(id);
             return action("ACCEPTED", id);
         });
     }
@@ -502,7 +510,10 @@ public class JobService {
                     mutations++;
                 }
                 mutations += jdbc.update("UPDATE job_stage SET status='READY',updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND status='RETRY_WAIT' AND next_run_at<=?", id, timestamp(now));
-                if (mutations > 0) { touchParent(stage, null); }
+                if (mutations > 0) {
+                    touchParent(stage, null);
+                    if (jdbc.queryForObject("SELECT status FROM job_stage WHERE id=?", String.class, id).equals("READY")) wakeups.ready(id);
+                }
                 return mutations;
             });
             changed += count == null ? 0 : count;
@@ -515,6 +526,7 @@ public class JobService {
     }
 
     private void retryWait(StageRow stage, String code, Instant now, Map<String, Object> diagnostic) {
+        wakeups.released(stage.id());
         jdbc.update("UPDATE job_stage SET status='RETRY_WAIT',run_token=NULL,worker_id=NULL,worker_session_id=NULL,lease_until=NULL,hard_deadline_at=NULL,next_run_at=?,error_code=?,diagnostic_json=?,last_retryable=TRUE,updated_at=CURRENT_TIMESTAMP(6) WHERE id=?", timestamp(now.plusSeconds(retryDelaySeconds)), code, StageDiagnostics.json(diagnostic), stage.id());
     }
 
@@ -525,6 +537,7 @@ public class JobService {
     private void terminalFailure(StageRow stage, String code, Map<String, Object> diagnostic) {
         List<StageRow> siblings = isExport(stage)||isClipRequest(stage)||isAgentTurn(stage) ? List.of() : stages(stage.jobId(), true);
         jdbc.update("UPDATE job_stage SET status='FAILED',run_token=NULL,worker_id=NULL,worker_session_id=NULL,lease_until=NULL,hard_deadline_at=NULL,error_code=?,diagnostic_json=?,last_retryable=FALSE,updated_at=CURRENT_TIMESTAMP(6) WHERE id=?", code, StageDiagnostics.json(diagnostic), stage.id());
+        wakeups.released(stage.id());
         if (isExport(stage)) { exports.refreshLocked(stage.ownerId()); return; }
         if (isClipRequest(stage)) { clips.refreshLocked(stage.ownerId()); return; }
         if (isAgentTurn(stage)) { agents.refreshLocked(stage.ownerId()); return; }
@@ -551,6 +564,7 @@ public class JobService {
         for (StageRow row : rows) {
             if (row.stageType().equals(next) && row.status().equals("BLOCKED")) {
                 jdbc.update("UPDATE job_stage SET status='READY',input_hash=?,next_run_at=CURRENT_TIMESTAMP(6),updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND status='BLOCKED'", sha256(row.inputHash() + dependencies), row.id());
+                    wakeups.ready(row.id());
             }
         }
     }

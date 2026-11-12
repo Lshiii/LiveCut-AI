@@ -374,6 +374,15 @@ wheels = [
 ]
 
 [[package]]
+name = "kafka-python"
+version = "2.3.3"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/d1/a1/17a675cb1a4368a2b29070ed7386135d7db41b6ac5c8ab6f6876a4270ac6/kafka_python-2.3.3.tar.gz", hash = "sha256:c566a326161595d18e6a65069fb5cee8e389528529932b224ce57641ce49de1d", size = 358586, upload-time = "2026-10-26T17:48:40.847Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/32/f3/1a4a5a60bf047c8c3786adf461977958852a1528c267e2ba659396552c39/kafka_python-2.3.3-py2.py3-none-any.whl", hash = "sha256:9ab1c473f0bc72c8db82ec77137f30691de42e68807a1933c3200b8771235ce1", size = 326619, upload-time = "2026-10-26T17:48:36.768Z" },
+]
+
+[[package]]
 name = "livecut-ai"
 version = "0.1.0"
 source = { editable = "." }
@@ -384,6 +393,9 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+kafka = [
+    { name = "kafka-python" },
+]
 ocr = [
     { name = "onnxruntime" },
     { name = "rapidocr" },
@@ -406,13 +418,14 @@ requires-dist = [
     { name = "httpcore", specifier = ">=1,<2" },
     { name = "httpx", specifier = ">=0.28,<1" },
     { name = "jsonschema", specifier = ">=4.23,<5" },
+    { name = "kafka-python", marker = "extra == 'kafka'", specifier = ">=2.3.3,<3" },
     { name = "numpy", marker = "extra == 'retrieval'", specifier = ">=1.26,<3" },
     { name = "onnxruntime", marker = "extra == 'ocr'", specifier = ">=1.20,<2" },
     { name = "onnxruntime", marker = "extra == 'retrieval'", specifier = ">=1.20,<2" },
     { name = "rapidocr", marker = "extra == 'ocr'", specifier = ">=3,<4" },
     { name = "tokenizers", marker = "extra == 'retrieval'", specifier = ">=0.20,<1" },
 ]
-provides-extras = ["ocr", "retrieval"]
+provides-extras = ["ocr", "retrieval", "kafka"]
 
 [package.metadata.requires-dev]
 dev = [

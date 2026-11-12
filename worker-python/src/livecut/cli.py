@@ -22,6 +22,7 @@ from .evaluation_inputs import EvaluationInputError, load_json, validate_annotat
 from .evaluation_runner import annotation_template, audit_files, evaluate_files
 from .evidence_audit import audit_timestamps
 from .inputs import DatasetValidationError, validate_dataset_manifest
+from .kafka_wakeup import KafkaWakeup, KafkaWakeupError
 from .media import MediaError, export_clip, extract_audio, probe_media
 from .model_budget import ModelBudgetError
 from .ocr import observe_video_ocr, ocr_model_id
@@ -107,6 +108,13 @@ def main(argv: list[str] | None = None) -> int:
     worker.add_argument("--stage-type", choices=("MEDIA", "ASR", "SEGMENT", "CAPTION_PROOFREAD", "ANCHOR_CLIP", "AGENT_VISUAL", "AGENT_VISUAL_FOCUS", "AGENT_EVIDENCE", "TIMELINE", "EXPORT_CLIP"),
                         help="Only claim this stage type; useful for a media-only smoke check")
     worker.add_argument("--poll-seconds", type=float, default=3)
+    worker.add_argument("--dispatch-mode", choices=("poll", "kafka"),
+                        default=os.environ.get("LIVECUT_DISPATCH_MODE", "poll"))
+    worker.add_argument("--kafka-bootstrap-servers",
+                        default=os.environ.get("LIVECUT_KAFKA_BOOTSTRAP_SERVERS", "127.0.0.1:19092"))
+    worker.add_argument("--kafka-topic", default=os.environ.get("LIVECUT_KAFKA_TOPIC", "livecut.stage-wakeup.v1"))
+    worker.add_argument("--reconcile-seconds", default=os.environ.get("LIVECUT_KAFKA_RECONCILE_SECONDS", "60"),
+                        help="Kafka mode only: low-frequency ready safety sweep, 10..3600 seconds")
     worker.add_argument("--registration-wait-seconds", default=45, metavar="SECONDS",
                         help="Wait up to 0..3600 seconds for an existing worker session; 0 fails immediately")
     worker.add_argument("--reconnect-wait-seconds", default=180, metavar="SECONDS",
@@ -191,6 +199,20 @@ def main(argv: list[str] | None = None) -> int:
                 raise WorkerError("INVALID_RECONNECT_WAIT_CONFIGURATION") from None
             if not math.isfinite(reconnect_wait_seconds) or not 0 <= reconnect_wait_seconds <= 3600:
                 raise WorkerError("INVALID_RECONNECT_WAIT_CONFIGURATION")
+            if args.dispatch_mode not in {"poll", "kafka"}:
+                raise KafkaWakeupError("INVALID_DISPATCH_MODE")
+            wakeup = None
+            if args.dispatch_mode == "kafka":
+                if args.once:
+                    raise KafkaWakeupError("KAFKA_REQUIRES_CONTINUOUS_WORKER")
+                try:
+                    reconcile_seconds = float(args.reconcile_seconds)
+                except (TypeError, ValueError):
+                    raise WorkerError("INVALID_RECONCILE_INTERVAL") from None
+                if not math.isfinite(reconcile_seconds) or not 10 <= reconcile_seconds <= 3600:
+                    raise WorkerError("INVALID_RECONCILE_INTERVAL")
+                wakeup = KafkaWakeup(args.kafka_bootstrap_servers, args.worker_id, topic=args.kafka_topic,
+                                    reconnect_wait_seconds=reconnect_wait_seconds, observer=_emit)
             if args.reuse_asr_job and (not args.once or args.stage_type != "ASR" or not args.job_id):
                 raise WorkerError("INVALID_ASR_REUSE_CONFIGURATION")
             if args.cached_answer_replay_only and (args.reuse_asr_job or args.stage_type not in {None, "AGENT_EVIDENCE"}):
@@ -215,7 +237,11 @@ def main(argv: list[str] | None = None) -> int:
                     _emit({"status": status, "worker_id": args.worker_id})
                     return 1 if status == "failed" else 0
                 else:
-                    runner.run(poll_seconds=args.poll_seconds, stage_type=args.stage_type)
+                    if wakeup is None:
+                        runner.run(poll_seconds=args.poll_seconds, stage_type=args.stage_type)
+                    else:
+                        runner.run(poll_seconds=args.poll_seconds, stage_type=args.stage_type,
+                                   wakeup=wakeup, reconcile_seconds=reconcile_seconds)
             except KeyboardInterrupt:
                 if runner is not None:
                     runner.stop.set()
@@ -355,7 +381,7 @@ def main(argv: list[str] | None = None) -> int:
                    "credentials_verified": False})
         return 0
     except (MediaError, ASRError, SegmentationError, PipelineError, VisionError,
-            WorkerError, WorkerClientError, ModelBudgetError, EvaluationError, EvaluationInputError, EvidenceEvaluationError) as exc:
+            WorkerError, WorkerClientError, KafkaWakeupError, ModelBudgetError, EvaluationError, EvaluationInputError, EvidenceEvaluationError) as exc:
         _emit({"status": "error", "error_code": exc.code, "message": str(exc)})
         return 2
     except (ContractValidationError, DatasetValidationError, ValueError, OSError) as exc:

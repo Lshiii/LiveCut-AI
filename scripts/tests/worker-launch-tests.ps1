@@ -130,6 +130,32 @@ try {
             $invalidStages++
         }
     }
+    & $launcher -EnvFile $configPath -WorkerId 'kafka-launch-test' -StageType MEDIA -DispatchMode kafka -KafkaBootstrapServers '127.0.0.1:19092' -ReconcileSeconds 60.5
+    Assert-WorkerFlag '--dispatch-mode' 'kafka'
+    Assert-WorkerFlag '--kafka-bootstrap-servers' '127.0.0.1:19092'
+    Assert-WorkerFlag '--reconcile-seconds' '60.5'
+    if ($workerLaunchTestState.Arguments -notcontains 'kafka') { throw 'Kafka extra was not requested.' }
+    $beforeRejectedKafka = $workerLaunchTestState.LaunchCount
+    $kafkaOnceRejected = $false
+    try { & $launcher -EnvFile $configPath -WorkerId 'kafka-launch-test' -DispatchMode kafka -Once }
+    catch { $kafkaOnceRejected = $true }
+    if (-not $kafkaOnceRejected -or $workerLaunchTestState.LaunchCount -ne $beforeRejectedKafka) { throw 'One-shot Kafka must fail before launch.' }
+    if ([Environment]::GetEnvironmentVariable($variableName, 'Process') -cne 'before-launch') { throw 'Rejected Kafka launch changed the environment.' }
+    $dispatchBeforeKafkaTest = [Environment]::GetEnvironmentVariable('LIVECUT_DISPATCH_MODE', 'Process')
+    $reconcileBeforeKafkaTest = [Environment]::GetEnvironmentVariable('LIVECUT_KAFKA_RECONCILE_SECONDS', 'Process')
+    try {
+        $env:LIVECUT_DISPATCH_MODE = 'kafka'
+        $env:LIVECUT_KAFKA_RECONCILE_SECONDS = '137'
+        & $launcher -EnvFile $configPath -WorkerId 'explicit-poll-test' -DispatchMode poll -Once
+        Assert-WorkerFlag '--dispatch-mode' 'poll'
+        if ($workerLaunchTestState.Arguments -contains 'kafka') { throw 'Explicit poll installed Kafka or inherited the Kafka mode.' }
+        & $launcher -EnvFile $configPath -WorkerId 'inherited-kafka-test'
+        Assert-WorkerFlag '--dispatch-mode' 'kafka'
+        if ($workerLaunchTestState.Arguments -contains '--reconcile-seconds') { throw 'Unspecified reconcile interval overrode the configured environment.' }
+    } finally {
+        [Environment]::SetEnvironmentVariable('LIVECUT_DISPATCH_MODE', $dispatchBeforeKafkaTest, 'Process')
+        [Environment]::SetEnvironmentVariable('LIVECUT_KAFKA_RECONCILE_SECONDS', $reconcileBeforeKafkaTest, 'Process')
+    }
     [pscustomobject]@{ status = 'passed'; launches = $workerLaunchTestState.LaunchCount; stages_forwarded = $stageCases.Count;
         invalid_stages_rejected = $invalidStages; invalid_waits_rejected = $invalidWaits;
         registration_default = 45; reconnect_default = 180; culture = 'fr-FR' } | ConvertTo-Json -Compress

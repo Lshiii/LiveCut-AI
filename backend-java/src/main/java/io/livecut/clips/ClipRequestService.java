@@ -7,6 +7,7 @@ import java.security.MessageDigest;
 import java.sql.Timestamp;
 import java.time.Instant;
 import java.util.*;
+import io.livecut.dispatch.StageWakeups;
 import io.livecut.jobs.ArtifactVerifier;
 import io.livecut.jobs.JobException;
 import io.livecut.jobs.JobModels.StageRow;
@@ -26,6 +27,7 @@ import tools.jackson.databind.node.ObjectNode;
 /** Intent requests own revisions and budgets; source analysis and user drafts remain untouched. */
 @Service
 public class ClipRequestService {
+    private final StageWakeups wakeups;
     private final JdbcTemplate jdbc;
     private final ArtifactVerifier artifacts;
     private final TransactionTemplate tx;
@@ -35,8 +37,8 @@ public class ClipRequestService {
     @Value("${LIVECUT_TEXT_FALLBACK_MODELS:}")
     private String configuredFallbackModels;
     private record FrozenSource(String video,String hash,String transcriptKey,String transcriptHash,long duration,JsonNode utterances,String model) {}
-    public ClipRequestService(JdbcTemplate jdbc,ArtifactVerifier artifacts,PlatformTransactionManager manager,ClipManualReview manual){
-        this.jdbc=jdbc;this.artifacts=artifacts;this.manual=manual;tx=new TransactionTemplate(manager);tx.setIsolationLevel(TransactionDefinition.ISOLATION_READ_COMMITTED);
+    public ClipRequestService(JdbcTemplate jdbc,ArtifactVerifier artifacts,PlatformTransactionManager manager,ClipManualReview manual,StageWakeups wakeups){
+        this.wakeups=wakeups;this.jdbc=jdbc;this.artifacts=artifacts;this.manual=manual;tx=new TransactionTemplate(manager);tx.setIsolationLevel(TransactionDefinition.ISOLATION_READ_COMMITTED);
     }
     public Snapshot create(String parentId,CreateRequest input,String key){
         String parent=uuid(parentId);String instruction=input==null?null:input.instruction();
@@ -91,6 +93,7 @@ public class ClipRequestService {
             var stages=jdbc.queryForList("SELECT id,status FROM job_stage FORCE INDEX (idx_stage_owner_status) WHERE owner_type='CLIP_REQUEST' AND owner_id=? FOR UPDATE",requestId);
             if(stages.size()!=1||!Set.of("READY","RUNNING","RETRY_WAIT").contains(stages.getFirst().get("status")))throw conflict("CLIP_STAGE_UNAVAILABLE","The clipping stage has already changed");
             jdbc.update("UPDATE job_stage SET status='CANCELLED',run_token=NULL,worker_id=NULL,worker_session_id=NULL,lease_until=NULL,hard_deadline_at=NULL,last_retryable=FALSE,error_code='USER_CANCELLED',diagnostic_json=NULL,text_progress_json=NULL,updated_at=CURRENT_TIMESTAMP(6) WHERE id=?",stages.getFirst().get("id"));
+            wakeups.releasedForOwner("CLIP_REQUEST",requestId);
             jdbc.update("UPDATE clip_request SET status='CANCELLED',state_version=state_version+1,updated_at=CURRENT_TIMESTAMP(6) WHERE id=?",requestId);
             return snapshot(lockOwner(requestId,String.valueOf(owner.get("job_id"))));
         });
@@ -121,6 +124,7 @@ public class ClipRequestService {
             id,parent,source.video(),key,fingerprint,instruction,source.model(),source.hash(),source.transcriptHash(),source.transcriptKey(),sourceJson,source.duration(),budget,TextExecutionPolicy.serialize(fallbackModels),resumedFrom,answerJson,answerJson==null?null:sha(answerJson));
         jdbc.update("INSERT INTO job_stage (id,job_id,owner_type,owner_id,stage_type,shard_key,status,input_hash) VALUES (?,?,'CLIP_REQUEST',?,?,?,'READY',?)",
             stage,parent,id,answer==null?"SEGMENT":AnswerClipSource.STAGE,"clip-"+id,sha(fingerprint+"\n"+source.hash()+"\n"+source.transcriptHash()+"\n"+source.model()+"\n"+TextExecutionPolicy.serialize(fallbackModels)+(answerJson==null?"":"\n"+answerJson)));
+        wakeups.ready(stage);
         return snapshot(lockOwner(id,parent));
     }
     public Snapshot save(String id,JsonNode input){

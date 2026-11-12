@@ -27,6 +27,7 @@ import httpx
 
 from .asr import transcribe_file
 from .contracts import validate_analysis_result
+from .kafka_wakeup import KafkaWakeup
 from .media import extract_audio, probe_media
 from .ocr import ocr_model_id
 from .ocr_cache import cached_observe_video_ocr
@@ -1121,9 +1122,13 @@ class StageWorker:
                 remaining = min(remaining, runtime_deadline - now)
             self.stop.wait(max(0, min(.05, remaining)))
 
-    def run(self, *, poll_seconds: float = 3, stage_type: str | None = None) -> None:
+    def run(self, *, poll_seconds: float = 3, stage_type: str | None = None,
+            wakeup: KafkaWakeup | None = None, reconcile_seconds: float = 60) -> None:
         if type(poll_seconds) not in (int, float) or not math.isfinite(poll_seconds) or poll_seconds <= 0:
             raise WorkerError("INVALID_POLL_INTERVAL")
+        if (type(reconcile_seconds) not in (int, float) or not math.isfinite(reconcile_seconds)
+                or not 10 <= reconcile_seconds <= 3600):
+            raise WorkerError("INVALID_RECONCILE_INTERVAL")
         # The same process owns its journal for the entire advertised lifetime.
         # Registering outside this lock could let two processes share an identity.
         with _single_worker(self.journal_dir):
@@ -1131,6 +1136,11 @@ class StageWorker:
             candidate_session = str(uuid4())
             backoff = min(1.0, self.reconnect_wait_seconds / 4) if self.reconnect_wait_seconds else 1.0
             try:
+                # Subscribe/assign before the initial ready drain. A notification
+                # racing that drain stays pending; a pre-subscription READY row
+                # is found by the drain. Kafka objects stay on their own thread.
+                if wakeup is not None and not wakeup.start(self.stop, self._request_guard):
+                    return
                 while not self.stop.is_set():
                     try:
                         with self._client_scope(deadline=lambda: self._runtime_deadline):
@@ -1146,6 +1156,8 @@ class StageWorker:
                                 candidate_session = str(uuid4())
                                 while not self.stop.is_set():
                                     try:
+                                        if wakeup is not None:
+                                            wakeup.check()
                                         with self._client_scope(deadline=lambda: self._runtime_deadline):
                                             status = self._run_once(stage_type=stage_type)
                                     except WorkerClientError as exc:
@@ -1169,7 +1181,16 @@ class StageWorker:
                                     if self._reconnect_started is None:
                                         backoff = min(1.0, self.reconnect_wait_seconds / 4)
                                     if status in {"idle", "unavailable"}:
-                                        self._idle_wait(poll_seconds)
+                                        if wakeup is None:
+                                            self._idle_wait(poll_seconds)
+                                        else:
+                                            def dispatch_guard():
+                                                if self._presence_error is not None:
+                                                    raise self._presence_error
+                                                self._request_guard()
+                                            # Notifications coalesce while busy;
+                                            # no 3-second ready scan in this mode.
+                                            wakeup.wait(reconcile_seconds, self.stop, dispatch_guard)
                     except WorkerClientError as exc:
                         if self.stop.is_set():
                             return
@@ -1184,6 +1205,8 @@ class StageWorker:
                             return
             finally:
                 self._continuous = False
+                if wakeup is not None:
+                    wakeup.close()
 
 
 ProviderTransportFactory = Callable[[StageContext, str], httpx.BaseTransport]

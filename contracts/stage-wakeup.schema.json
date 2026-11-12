@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://livecut.local/contracts/stage-wakeup.schema.json",
+  "title": "Kafka stage wakeup notification v1",
+  "description": "A coalescible wakeup hint. The authenticated Java ready/claim protocol remains the execution authority.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "event_id", "event_type", "stage_id", "job_id", "stage_type", "required_worker_protocol", "reason", "occurred_at"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "event_id": {"type": "string", "format": "uuid"},
+    "event_type": {"const": "STAGE_WAKEUP"},
+    "stage_id": {"type": "string", "format": "uuid"},
+    "job_id": {"type": "string", "format": "uuid"},
+    "stage_type": {"enum": ["MEDIA", "ASR", "SEGMENT", "TIMELINE", "EXPORT_CLIP", "CAPTION_PROOFREAD", "ANCHOR_CLIP", "AGENT_VISUAL", "AGENT_VISUAL_FOCUS", "AGENT_EVIDENCE"]},
+    "required_worker_protocol": {"enum": [1, 2, 3, 4]},
+    "reason": {"enum": ["READY", "CAPACITY_RELEASED"]},
+    "occurred_at": {"type": "string", "format": "date-time"}
+  }
+}
