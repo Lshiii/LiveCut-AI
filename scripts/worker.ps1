@@ -4,6 +4,11 @@ param(
     [string]$WorkerId = 'worker-local',
     [string]$JobId = '',
     [string]$ReuseAsrJob = '',
+    [ValidateSet('', 'poll', 'kafka')]
+    [string]$DispatchMode = '',
+    [string]$KafkaBootstrapServers = '',
+    [ValidateRange(10, 3600)]
+    [double]$ReconcileSeconds = 60,
     [ValidateSet('', 'MEDIA', 'ASR', 'SEGMENT', 'TIMELINE', 'EXPORT_CLIP', 'CAPTION_PROOFREAD', 'ANCHOR_CLIP', 'AGENT_VISUAL', 'AGENT_VISUAL_FOCUS', 'AGENT_EVIDENCE')]
     [string]$StageType = '',
     [ValidateScript({ -not [double]::IsNaN($_) -and -not [double]::IsInfinity($_) -and $_ -ge 0 -and $_ -le 3600 })]
@@ -35,11 +40,20 @@ try {
     }
     $storage = if ($env:LIVECUT_STORAGE_ROOT) { $env:LIVECUT_STORAGE_ROOT } else { '../storage' }
     if (-not [IO.Path]::IsPathRooted($storage)) { $storage = [IO.Path]::GetFullPath((Join-Path (Join-Path $repoRoot 'backend-java') $storage)) }
-    $launchArgs = @('run', '--extra', 'ocr', 'livecut', 'worker', '--java-url', $JavaUrl,
+    $selectedDispatch = if ($DispatchMode) { $DispatchMode } elseif ($env:LIVECUT_DISPATCH_MODE) { $env:LIVECUT_DISPATCH_MODE } else { 'poll' }
+    if ($selectedDispatch -notin @('poll', 'kafka')) { throw 'Invalid dispatch mode; use poll or kafka.' }
+    if ($selectedDispatch -eq 'kafka' -and $Once) { throw 'Kafka dispatch is continuous; omit -Once.' }
+    $dependencyArgs = @('run', '--extra', 'ocr')
+    if ($selectedDispatch -eq 'kafka') { $dependencyArgs += @('--extra', 'kafka') }
+    $launchArgs = $dependencyArgs + @('livecut', 'worker', '--dispatch-mode', $selectedDispatch, '--java-url', $JavaUrl,
         '--worker-id', $WorkerId, '--storage-root', $storage,
         '--journal-dir', (Join-Path $repoRoot "data/worker-journals/$WorkerId"),
         '--registration-wait-seconds', $RegistrationWaitSeconds.ToString([Globalization.CultureInfo]::InvariantCulture),
         '--reconnect-wait-seconds', $ReconnectWaitSeconds.ToString([Globalization.CultureInfo]::InvariantCulture))
+    if ($selectedDispatch -eq 'kafka') {
+        if ($PSBoundParameters.ContainsKey('ReconcileSeconds')) { $launchArgs += @('--reconcile-seconds', $ReconcileSeconds.ToString([Globalization.CultureInfo]::InvariantCulture)) }
+        if ($KafkaBootstrapServers) { $launchArgs += @('--kafka-bootstrap-servers', $KafkaBootstrapServers) }
+    }
     if ($WorkerId -notmatch '^[A-Za-z0-9_-]{1,100}$') { throw 'Invalid worker identifier.' }
     if ($StageType) { $launchArgs += @('--stage-type', $StageType) }
     if ($JobId) { $launchArgs += @('--job-id', $JobId) }

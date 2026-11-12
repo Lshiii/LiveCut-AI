@@ -3,6 +3,7 @@ package io.livecut.captions;
 import java.sql.Timestamp;
 import java.time.Instant;
 import java.util.*;
+import io.livecut.dispatch.StageWakeups;
 import io.livecut.clips.ClipRequestService;
 import io.livecut.exports.ExportModels;
 import io.livecut.exports.ExportService;
@@ -23,10 +24,11 @@ import static io.livecut.captions.CaptionRenderModels.*;
 @Service
 public class CaptionRenderService {
     private static final JsonMapper JSON=JsonMapper.builder().build();
+    private final StageWakeups wakeups;
     private final JdbcTemplate jdbc;private final ExportService exports;private final CaptionService captions;private final CaptionRenderAssets assets;
     private final TransactionTemplate tx;private final int maxAttempts;
-    public CaptionRenderService(JdbcTemplate jdbc,ExportService exports,CaptionService captions,CaptionRenderAssets assets,PlatformTransactionManager manager,
-        @Value("${livecut.jobs.max-attempts:3}") int maxAttempts){this.jdbc=jdbc;this.exports=exports;this.captions=captions;this.assets=assets;this.maxAttempts=maxAttempts;
+    public CaptionRenderService(JdbcTemplate jdbc,ExportService exports,CaptionService captions,CaptionRenderAssets assets,PlatformTransactionManager manager,StageWakeups wakeups,
+        @Value("${livecut.jobs.max-attempts:3}") int maxAttempts){this.wakeups=wakeups;this.jdbc=jdbc;this.exports=exports;this.captions=captions;this.assets=assets;this.maxAttempts=maxAttempts;
         tx=new TransactionTemplate(manager);tx.setIsolationLevel(TransactionDefinition.ISOLATION_READ_COMMITTED);}
     public Snapshot create(String exportValue,String clipValue,String key,JsonNode body){
         String sourceExport=id(exportValue),sourceClip=id(clipValue);final long revision;final String contentHash,style,frame;
@@ -65,6 +67,7 @@ public class CaptionRenderService {
         if(state.equals("CANCELLED"))return snapshot(owner);if(!Set.of("QUEUED","RUNNING").contains(state))throw error(HttpStatus.CONFLICT,"CAPTION_RENDER_NOT_CANCELLABLE","Only an active render may be cancelled");
         jdbc.queryForList("SELECT id FROM job_stage WHERE owner_type='EXPORT' AND owner_id=? ORDER BY id FOR UPDATE",id);
         jdbc.update("UPDATE job_stage SET status='CANCELLED',run_token=NULL,worker_id=NULL,worker_session_id=NULL,lease_until=NULL,hard_deadline_at=NULL,updated_at=CURRENT_TIMESTAMP(6) WHERE owner_type='EXPORT' AND owner_id=? AND status IN ('READY','RUNNING','RETRY_WAIT')",id);
+        wakeups.releasedForOwner("EXPORT",id);
         jdbc.update("UPDATE export_job SET status='CANCELLED',state_version=state_version+1,updated_at=CURRENT_TIMESTAMP(6) WHERE id=?",id);return snapshot(lock(id));});}
     public Snapshot retry(String value){String id=id(value);return tx.execute(status->{var owner=lock(id);var row=stage(id);
         if(!"FAILED".equals(owner.get("status"))||!"FAILED".equals(row.get("status")))throw error(HttpStatus.CONFLICT,"CAPTION_RENDER_NOT_RETRYABLE","Only a failed render may retry its frozen inputs");

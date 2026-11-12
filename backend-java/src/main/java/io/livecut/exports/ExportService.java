@@ -19,6 +19,7 @@ import java.util.Set;
 import java.util.TreeMap;
 import java.util.UUID;
 
+import io.livecut.dispatch.StageWakeups;
 import io.livecut.jobs.ArtifactVerifier;
 import io.livecut.jobs.JobException;
 import io.livecut.jobs.JobModels.StageRow;
@@ -47,6 +48,7 @@ import tools.jackson.databind.json.JsonMapper;
 public class ExportService {
     public static final String PROFILE = "h264-aac-v1";
     private static final JsonMapper JSON = JsonMapper.builder().build();
+    private final StageWakeups wakeups;
     private final JdbcTemplate jdbc;
     private final ReviewService reviews;
     private final TopicReviewService topics;
@@ -63,8 +65,9 @@ public class ExportService {
     }
 
     public ExportService(JdbcTemplate jdbc, ReviewService reviews, TopicReviewService topics, ArtifactVerifier verifier, ClipRequestService clipRequests, ManualClipPlanService manualPlans, TranscriptService transcripts,
-                         PlatformTransactionManager manager,
+                         PlatformTransactionManager manager, StageWakeups wakeups,
                          @Value("${livecut.jobs.max-attempts:3}") int maxAttempts) {
+        this.wakeups = wakeups;
         this.jdbc = jdbc; this.reviews = reviews; this.topics = topics; this.verifier = verifier; this.clipRequests=clipRequests; this.manualPlans=manualPlans;this.transcripts=transcripts;this.maxAttempts = maxAttempts;
         this.transaction = new TransactionTemplate(manager);
         this.transaction.setIsolationLevel(TransactionDefinition.ISOLATION_READ_COMMITTED);
@@ -127,6 +130,7 @@ public class ExportService {
                 String inputHash = sha256(fingerprint + "\n" + JSON.writeValueAsString(new TreeMap<>(frozenClip)) + "\n" + clipId);
                 jdbc.update("INSERT INTO job_stage (id,job_id,owner_type,owner_id,stage_type,shard_key,status,input_hash) VALUES (?,?,'EXPORT',?,'EXPORT_CLIP',?,'READY',?)",
                         stageId, jobId, exportId, clipId, inputHash);
+                wakeups.ready(stageId);
                 jdbc.update("INSERT INTO export_clip (id,export_id,stage_id,segment_id,product_id,product_name,topic_title,start_ms,end_ms) VALUES (?,?,?,?,?,?,?,?,?)",
                         clipId, exportId, stageId, frozenClip.get("segment_id"), frozenClip.get("product_id"), frozenClip.get("product_name"), frozenClip.get("title"), frozenClip.get("start_ms"), frozenClip.get("end_ms"));
             }
@@ -165,6 +169,7 @@ public class ExportService {
             jdbc.update("INSERT INTO export_job (id,job_id,video_id,approved_revision,source_hash,snapshot_hash,fingerprint,encoding_profile,frozen_json,clip_request_id) VALUES (?,?,?,?,?,?,?,?,?,?)",exportId,jobId,request.get("video_id"),revision,request.get("source_hash"),fingerprint,fingerprint,PROFILE,frozenJson,id);
             for(Map<String,Object> clip:frozenClips){String clipId=UUID.randomUUID().toString(),stageId=UUID.randomUUID().toString();String inputHash=sha256(fingerprint+"\n"+ClipRequestService.canonicalJson(JSON.valueToTree(clip))+"\n"+clipId);
                 jdbc.update("INSERT INTO job_stage (id,job_id,owner_type,owner_id,stage_type,shard_key,status,input_hash) VALUES (?,?,'EXPORT',?,'EXPORT_CLIP',?,'READY',?)",stageId,jobId,exportId,clipId,inputHash);
+                wakeups.ready(stageId);
                 jdbc.update("INSERT INTO export_clip (id,export_id,stage_id,segment_id,product_id,product_name,topic_title,start_ms,end_ms,source_parts_json) VALUES (?,?,?,?,NULL,NULL,?,?,?,?)",clipId,exportId,stageId,clip.get("segment_id"),clip.get("title"),clip.get("start_ms"),clip.get("end_ms"),ClipRequestService.canonicalJson(JSON.valueToTree(clip.get("parts"))));
             }
             return snapshot(lockOwner(exportId,jobId));
@@ -201,6 +206,7 @@ public class ExportService {
                 String clipId=UUID.randomUUID().toString(),stageId=UUID.randomUUID().toString();JsonNode clip=frozen.path("clips").get(0);
                 String inputHash=sha256(hash+"\n"+ClipRequestService.canonicalJson(clip)+"\n"+clipId);
                 jdbc.update("INSERT INTO job_stage (id,job_id,owner_type,owner_id,stage_type,shard_key,status,input_hash) VALUES (?,?,'EXPORT',?,'EXPORT_CLIP',?,'READY',?)",stageId,source.path("job_id").asText(),exportId,clipId,inputHash);
+                wakeups.ready(stageId);
                 jdbc.update("INSERT INTO export_clip (id,export_id,stage_id,segment_id,product_id,product_name,topic_title,start_ms,end_ms) VALUES (?,?,?,?,NULL,NULL,?,?,?)",
                         clipId,exportId,stageId,clip.path("segment_id").asText(),clip.path("title").asText(),clip.path("start_ms").longValue(),clip.path("end_ms").longValue());
             }else exportId=found.getFirst();
@@ -338,6 +344,7 @@ public class ExportService {
         jdbc.update("INSERT INTO export_job (id,job_id,video_id,approved_revision,source_hash,snapshot_hash,fingerprint,encoding_profile,frozen_json,render_mode,manual_clip_plan_id) VALUES (?,?,?,?,?,?,?,?,?,'CAPTIONED',?)",exportId,jobId,videoId,approvedRevision,sourceHash,snapshotHash,fingerprint,CaptionRenderSpec.PROFILE,frozenJson,manualSource);
         String inputHash=sha256(snapshotHash+"\n"+ClipRequestService.canonicalJson(JSON.valueToTree(clip))+"\n"+clipId);
         jdbc.update("INSERT INTO job_stage (id,job_id,owner_type,owner_id,stage_type,shard_key,status,input_hash) VALUES (?,?,'EXPORT',?,'EXPORT_CLIP',?,'READY',?)",stageId,jobId,exportId,clipId,inputHash);
+        wakeups.ready(stageId);
         jdbc.update("INSERT INTO export_clip (id,export_id,stage_id,segment_id,product_id,product_name,topic_title,start_ms,end_ms) VALUES (?,?,?,?,NULL,NULL,?,0,?)",clipId,exportId,stageId,render.path("source_clip_id").asText(),title,duration);
         return new CreatedRender(exportId,clipId);
     }
@@ -391,6 +398,7 @@ public class ExportService {
             if (((Number) clip.get("attempt")).intValue() >= maxAttempts) { throw conflict("ATTEMPTS_EXHAUSTED", "Clip execution attempts are exhausted"); }
             jdbc.update("UPDATE job_stage SET status='READY',run_token=NULL,worker_id=NULL,worker_session_id=NULL,lease_until=NULL,hard_deadline_at=NULL,next_run_at=CURRENT_TIMESTAMP(6),error_code=NULL,diagnostic_json=NULL,render_progress_json=NULL,updated_at=CURRENT_TIMESTAMP(6) WHERE id=?",
                     clip.get("stage_id"));
+        wakeups.ready(String.valueOf(clip.get("stage_id")));
             refreshLocked(id);
             return snapshot(lockOwner(id, String.valueOf(owner.get("job_id"))));
         });

@@ -1,5 +1,7 @@
 # 视频分析结果契约
 
+[stage-wakeup.schema.json](./stage-wakeup.schema.json) 定义 Kafka 的可合并阶段唤醒提示。它不含执行凭证；READY 与 CAPACITY_RELEASED 均通过原 Java ready/claim 协议重新核对。事务 Outbox、至少一次投递和消费恢复见 [Kafka 调度](../docs/80-Kafka阶段通知与可靠调度.md)。
+
 ## 独立人工原句剪辑
 
 [manual-clip-plan.schema.json](./manual-clip-plan.schema.json)、[列表](./manual-clip-plan-list.schema.json)和[不可变提交回执](./manual-clip-submission.schema.json)定义明确MANUAL_ASR来源的方案、人工修订与创建/新增修订回执。初始人工版为r1，不含模型预算、AI候选分类或自动provenance；三端另核实际ASR范围、完整source、真实canonical hash、当前版本和确认权限。[transcript-range.schema.json](./transcript-range.schema.json)用于创建前只读核对全部区间，句数不从搜索命中结果推断。[人工方案](../fixtures/manual-clip-plan.synthetic.json)、[回执](../fixtures/manual-clip-submission.synthetic.json)、[元数据列表](../fixtures/manual-clip-plan-list.synthetic.json)和[范围](../fixtures/transcript-range.synthetic.json)均为明确合成夹具，hash按公开算法实际计算，不表示真实成片。工作流与验收见[按原句人工剪辑](../docs/71-按原句人工剪辑.md)。
