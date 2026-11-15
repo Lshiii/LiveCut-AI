@@ -1,5 +1,6 @@
 """Media unit tests plus real, locally synthesized FFmpeg integration tests."""
 
+import hashlib
 import json
 import os
 import shutil
@@ -246,6 +247,99 @@ class MediaTests(unittest.TestCase):
         probe.return_value = replace(self.info, audio_codec=None, audio_start_time_seconds=None)
         self.assert_error("NO_AUDIO", media.extract_audio, self.source, self.root / "audio.wav")
 
+    def _extraction_result(self, frames, declared="3.750000"):
+        def encoded(command, **kwargs):
+            if "-select_streams" in command:
+                stream = {} if declared is None else {"duration": declared}
+                return subprocess.CompletedProcess(command, 0, json.dumps({"streams": [stream]}), "")
+            with wave.open(command[-1], "wb") as audio:
+                audio.setnchannels(1)
+                audio.setsampwidth(2)
+                audio.setframerate(16000)
+                audio.writeframes(b"\x12\x34" * frames)
+            return subprocess.CompletedProcess(command, 0, "", "")
+        return encoded
+
+    @patch("livecut.media.probe_media")
+    @patch("livecut.media._run_process")
+    def test_audio_extraction_pads_only_verified_short_tail_without_changing_samples(self, run, probe):
+        probe.return_value = self.info
+        run.side_effect = self._extraction_result(60000)
+        target = self.root / "padded.wav"
+        self.assertEqual(target.resolve(), media.extract_audio(self.source, target))
+        with wave.open(str(target), "rb") as audio:
+            self.assertEqual(64000, audio.getnframes())
+            self.assertEqual(b"\x12\x34" * 60000, audio.readframes(60000))
+            self.assertEqual(b"\x00\x00" * 4000, audio.readframes(4000))
+        self.assertEqual(2, run.call_count)
+        self.assertIn("a:0", run.call_args.args[0])
+        self.assertEqual([], list(self.root.glob(".padded.*.wav")))
+
+    @patch("livecut.media.probe_media")
+    @patch("livecut.media._run_process")
+    def test_audio_extraction_does_not_pad_unexpected_decoder_truncation(self, run, probe):
+        probe.return_value = self.info
+        run.side_effect = self._extraction_result(57000)
+        target = self.root / "truncated.wav"
+        target.write_bytes(b"previous good audio")
+        self.assert_error("OUTPUT_VALIDATION_FAILED", media.extract_audio, self.source, target)
+        self.assertEqual(b"previous good audio", target.read_bytes())
+        self.assertEqual([], list(self.root.glob(".truncated.*.wav")))
+
+    @patch("livecut.media.probe_media")
+    @patch("livecut.media._run_process")
+    def test_audio_extraction_requires_valid_declared_duration_for_padding(self, run, probe):
+        probe.return_value = self.info
+        target = self.root / "unknown.wav"
+        target.write_bytes(b"previous good audio")
+        for declared in (None, "N/A", "NaN", "0", "4.000000", "1.999000"):
+            with self.subTest(declared=declared):
+                run.side_effect = self._extraction_result(60000, declared)
+                self.assert_error("OUTPUT_VALIDATION_FAILED", media.extract_audio, self.source, target)
+                self.assertEqual(b"previous good audio", target.read_bytes())
+                self.assertEqual([], list(self.root.glob(".unknown.*.wav")))
+
+    @patch("livecut.media.probe_media")
+    @patch("livecut.media._run_process")
+    def test_audio_extraction_never_trims_or_pads_large_gaps(self, run, probe):
+        probe.return_value = self.info
+        for frames in (16000, 31984, 72000):
+            with self.subTest(frames=frames):
+                run.reset_mock()
+                run.side_effect = self._extraction_result(frames)
+                target = self.root / "gap.wav"
+                self.assert_error("OUTPUT_VALIDATION_FAILED", media.extract_audio, self.source, target)
+                self.assertFalse(target.exists())
+                self.assertEqual(1, run.call_count)
+
+    @patch("livecut.media.probe_media")
+    @patch("livecut.media._run_process")
+    def test_audio_tail_padding_cancellation_retains_previous_output(self, run, probe):
+        probe.return_value = self.info
+        run.side_effect = self._extraction_result(60000)
+        target = self.root / "cancelled.wav"
+        target.write_bytes(b"previous good audio")
+
+        def cancelled():
+            raise RuntimeError("lease lost")
+
+        with self.assertRaisesRegex(RuntimeError, "lease lost"):
+            media.extract_audio(self.source, target, guard=cancelled)
+        self.assertEqual(b"previous good audio", target.read_bytes())
+        self.assertEqual([], list(self.root.glob(".cancelled.*.wav")))
+
+    @patch("livecut.media.probe_media")
+    @patch("livecut.media._run_process")
+    def test_audio_with_existing_tolerance_keeps_original_samples_and_probe_count(self, run, probe):
+        probe.return_value = self.info
+        run.side_effect = self._extraction_result(63200)
+        target = self.root / "unchanged.wav"
+        media.extract_audio(self.source, target)
+        with wave.open(str(target), "rb") as audio:
+            self.assertEqual(63200, audio.getnframes())
+            self.assertEqual(b"\x12\x34" * 63200, audio.readframes(63200))
+        self.assertEqual(1, run.call_count)
+
     def test_invalid_timeout_is_reported_before_executable_is_started(self):
         for timeout in [0, -1, float("nan"), float("inf"), True, "30"]:
             with self.subTest(timeout=timeout):
@@ -325,6 +419,36 @@ class RealFfmpegTests(unittest.TestCase):
         self.assertLess(first_frame.stdout[0], 30)
         self.assertLess(first_frame.stdout[1], 30)
         self.assertGreater(first_frame.stdout[2], 200)
+
+    def test_real_video_only_tail_becomes_silence_on_the_same_audio_timeline(self):
+        source = self.root / "short audio.mp4"
+        result = subprocess.run(
+            [FFMPEG, "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
+             "-f", "lavfi", "-i", "color=c=red:size=160x120:rate=25:duration=4",
+             "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=3.75",
+             "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", str(source)],
+            capture_output=True, text=True, shell=False, timeout=30, check=False,
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        before_hash = hashlib.sha256(source.read_bytes()).hexdigest()
+        raw = self.root / "short raw.wav"
+        decoded = subprocess.run(
+            [FFMPEG, "-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-i", str(source),
+             "-map", "0:a:0", "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", str(raw)],
+            capture_output=True, text=True, shell=False, timeout=30, check=False,
+        )
+        self.assertEqual(0, decoded.returncode, decoded.stderr)
+        with wave.open(str(raw), "rb") as audio:
+            original_frames = audio.getnframes()
+            original_samples = audio.readframes(original_frames)
+        self.assertGreater(4000 - original_frames / 16, 100)
+        output = media.extract_audio(source, self.root / "tail padded.wav",
+                                     ffmpeg_path=FFMPEG, ffprobe_path=FFPROBE)
+        with wave.open(str(output), "rb") as audio:
+            self.assertEqual(64000, audio.getnframes())
+            self.assertEqual(original_samples, audio.readframes(original_frames))
+            self.assertEqual(b"\x00\x00" * (64000 - original_frames), audio.readframes(64000))
+        self.assertEqual(before_hash, hashlib.sha256(source.read_bytes()).hexdigest())
 
 
 if __name__ == "__main__":
