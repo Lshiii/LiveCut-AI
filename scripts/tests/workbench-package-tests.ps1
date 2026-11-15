@@ -74,8 +74,11 @@ try {
         Invoke-BundleTool 'cmd.exe' @('/d', '/c', 'echo synthetic-warning 1>&2 & exit /b 0') (Join-Path $testRoot 'native-warning.log')
         Assert-Case ($ErrorActionPreference -eq 'Stop' -and (Get-Content -LiteralPath (Join-Path $testRoot 'native-warning.log') -Raw).Contains('synthetic-warning')) 'native stderr warning with exit zero is successful and preference restored'
         $nonzero = $false
-        try { Invoke-BundleTool 'cmd.exe' @('/d', '/c', 'exit /b 7') (Join-Path $testRoot 'native-failure.log') } catch { $nonzero = $_.Exception.Message.StartsWith('WORKBENCH_TOOL_FAILED:') }
+        $failureMessages = @(
+            try { Invoke-BundleTool 'cmd.exe' @('/d', '/c', 'echo WORKBENCH_SYNTHETIC_CAUSE 1>&2 & exit /b 7') (Join-Path $testRoot 'native-failure.log') 6>&1 } catch { $nonzero = $_.Exception.Message.StartsWith('WORKBENCH_TOOL_FAILED:') }
+        )
         Assert-Case ($nonzero -and $ErrorActionPreference -eq 'Stop') 'native nonzero is not ignored'
+        Assert-Case (($failureMessages | Out-String).Contains('WORKBENCH_SYNTHETIC_CAUSE')) 'native failure exposes the captured cause on the host stream'
     }
     [Environment]::SetEnvironmentVariable('JAVA_HOME', $null, 'Process')
     $env:DASHSCOPE_API_KEY = 'synthetic-inherited-provider'

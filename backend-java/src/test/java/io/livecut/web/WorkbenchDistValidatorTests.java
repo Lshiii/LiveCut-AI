@@ -128,4 +128,85 @@ class WorkbenchDistValidatorTests {
             Path dist = distribution(); write(dist, "assets/index-12345678.js", Files.readString(dist.resolve("assets/index-12345678.js")) + addition); rejected(dist, root.resolve("output"), project);
         }
     }
+    @Test void ignoresImportUrlAndWorkerWordsInsideBusinessStringsAndTemplateText() throws Exception {
+        Path dist = distribution();
+        String addition = """
+            const state = `source-import`;
+            const label = "from 'https://invalid.example/string.js'";
+            const note = 'import("https://invalid.example/string.js")';
+            const template = `new Worker('https://invalid.example/worker.js'); new URL('https://invalid.example/image.svg')`;
+            const escaped = "quote: \\"; import('https://invalid.example/string.js')";
+            """;
+        write(dist, "assets/index-12345678.js", Files.readString(dist.resolve("assets/index-12345678.js")) + addition);
+        assertEquals(5, validate(dist, root.resolve("output"), project()));
+    }
+    @Test void ignoresLineAndBlockCommentsButKeepsRealReferencesAfterThem() throws Exception {
+        Path dist = distribution();
+        String addition = """
+            // import('https://invalid.example/comment.js'); new Worker(workerName);
+            /* from 'https://invalid.example/comment.js'; new URL('https://invalid.example/image.svg') */
+            import /* supported comment */ './chunk-abcdefgh.js';
+            """;
+        write(dist, "assets/index-12345678.js", Files.readString(dist.resolve("assets/index-12345678.js")) + addition);
+        write(dist, "assets/chunk-abcdefgh.js", "export const value=1;");
+        assertEquals(6, validate(dist, root.resolve("output"), project()));
+    }
+    @Test void rejectsActualStaticDynamicSideEffectAndExportReferencesAfterHarmlessText() throws Exception {
+        Path project = project();
+        for (String statement : new String[]{"import 'https://invalid.example/a.js';", "import{x}from'https://invalid.example/a.js';",
+                "export{x}from'https://invalid.example/a.js';", "import('https://invalid.example/a.js');", "import(moduleName);",
+                "new Worker(workerName);", "new URL('https://invalid.example/a.svg',import.meta.url);"}) {
+            Path dist = distribution();
+            write(dist, "assets/index-12345678.js", Files.readString(dist.resolve("assets/index-12345678.js")) + "const label=`source-import`; /* import('harmless') */" + statement);
+            rejected(dist, root.resolve("output"), project);
+        }
+    }
+    @Test void aSkippedStringMatchCannotConsumeAnAdjacentUnsafeStaticReference() throws Exception {
+        Path project = project();
+        for (String statement : new String[]{
+                "const s=\"source-import\"; import \"https://invalid.example/a.js\";",
+                "const s='source-import'; import 'https://invalid.example/a.js';",
+                "const s=\"from\"; import{x}from\"https://invalid.example/a.js\";",
+                "const s=\"source-import\"; export{x}from\"https://invalid.example/a.js\";"}) {
+            Path dist = distribution(); write(dist, "assets/index-12345678.js", Files.readString(dist.resolve("assets/index-12345678.js")) + statement);
+            rejected(dist, root.resolve("output"), project);
+        }
+    }
+    @Test void includesAnAdjacentSafeStaticReferenceInTheResourceGraph() throws Exception {
+        Path dist = distribution();
+        write(dist, "assets/index-12345678.js", Files.readString(dist.resolve("assets/index-12345678.js")) + "const s=\"source-import\"; import \"./chunk-abcdefgh.js\";");
+        write(dist, "assets/chunk-abcdefgh.js", "export default 1;");
+        assertEquals(6, validate(dist, root.resolve("output"), project()));
+    }
+    @Test void checksReachableImportsInsideNestedTemplateExpressions() throws Exception {
+        Path dist = distribution();
+        write(dist, "assets/index-12345678.js", Files.readString(dist.resolve("assets/index-12345678.js"))
+                + "const text=`source-import ${({value:`nested ${import('./chunk-abcdefgh.js')}`}).value}`;");
+        write(dist, "assets/chunk-abcdefgh.js", "export default 1;");
+        assertEquals(6, validate(dist, root.resolve("output"), project()));
+    }
+    @Test void rejectsUnsafeOrDynamicReferencesInsideTemplateExpressions() throws Exception {
+        Path project = project();
+        for (String statement : new String[]{"`${import(moduleName)}`", "`${`nested ${import('https://invalid.example/a.js')}`}`",
+                "`${new Worker(workerName)}`", "`${new URL('https://invalid.example/a.svg',import.meta.url)}`"}) {
+            Path dist = distribution(); write(dist, "assets/index-12345678.js", Files.readString(dist.resolve("assets/index-12345678.js")) + "const text=" + statement + ";");
+            rejected(dist, root.resolve("output"), project);
+        }
+    }
+    @Test void ignoresRegexLiteralTextWithoutHidingExecutableImportsAfterDivision() throws Exception {
+        Path dist = distribution(), project = project();
+        String original = Files.readString(dist.resolve("assets/index-12345678.js"));
+        write(dist, "assets/index-12345678.js", original + "const re=/import('https:[/][/]invalid.example')/; if(flag)/source-import/.test(value);");
+        assertEquals(5, validate(dist, root.resolve("output"), project));
+        for (String statement : new String[]{"const n=6/2; import('https://invalid.example/a.js');", "const n={}/import('https://invalid.example/a.js')/2;",
+                "const n=value++/import('https://invalid.example/a.js')/2;"}) {
+            write(dist, "assets/index-12345678.js", original + statement); rejected(dist, root.resolve("output"), project);
+        }
+    }
+    @Test void rejectsUnterminatedStringsCommentsAndTemplateExpressions() throws Exception {
+        Path project = project();
+        for (String addition : new String[]{"const text='unterminated", "/* unterminated", "const text=`unterminated", "const text=`${import(moduleName)"}) {
+            Path dist = distribution(); write(dist, "assets/index-12345678.js", Files.readString(dist.resolve("assets/index-12345678.js")) + addition); rejected(dist, root.resolve("output"), project);
+        }
+    }
 }
