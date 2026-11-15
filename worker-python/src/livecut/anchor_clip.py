@@ -29,6 +29,7 @@ from .segmentation import (
 from .video_agent import _HASH, _ID
 
 PROMPT_VERSION = "anchor-clips-v1"
+CONTEXT_PROMPT_VERSION = "anchor-clips-v2"
 GOAL_ID = "answer-source"
 _SPACE = "\t\n\v\f\r \u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff"
 _SYSTEM = """你根据用户明确选中的视频答复引用，提出一个待人工审核的剪辑候选。
@@ -47,6 +48,12 @@ evidence_utterance_ids 只能列保留parts内直接支持目标的原句ID，�
 所有保留和排除ID必须来自本次 retrieval.utterances，不得引用其他原文、外部知识或仅答复中提到的内容。
 不输出毫秒、output_id、enabled或其他字段。程序映射时间、生成输出ID，所有候选默认不勾选。
 只输出完整JSON：{"outputs":[{"goal_id":"answer-source","title":"所选解释","status":"NEEDS_REVIEW","reason":"依据可见原句提出候选，仍需人工核对解释边界。","parts":[{"start_utterance_id":"本次可见起句ID","end_utterance_id":"本次可见止句ID"}],"excluded":[],"evidence_utterance_ids":["保留区间内的实际证据ID"]}]}。"""
+_CONTEXT_SYSTEM = _SYSTEM + """
+本次为扩展上下文协议v2：服务端从每条锚句向前后逐层读取，各最多8句且各最多120秒，总计不超过72句/12000个UTF-16单元；遇到上限或无法完整纳入的原句即停止该方向。
+在选边界前，核对剪辑要求中的对象/定义、过程先后和结论是否在保留片段内。锚句以“所以/这种/它”等承接时，应向前找清楚所指对象与必要定义，不能只保留结论附近的句子。
+从已给的上下文选择能独立理解的最小连续解释，保留必要引入、步骤和结束语；不要把整个可见窗口直接当成答案，新的话题和无关问答应留在片外。
+若必要定义或结论仍落在窗口外，或只靠常识补全才完整，必须NEEDS_REVIEW并在reason说明具体缺口，不得因窗口扩大或锚句已覆盖就输出FOUND。
+若可见原文确实覆盖上述要素且满足要求，可输出FOUND；ASR术语疑似错写时依据原文判断是否影响理解，不要改写原文或自动将NEEDS_REVIEW改成FOUND。"""
 
 
 class AnchorSourceError(SegmentationError):
@@ -100,6 +107,56 @@ def _description(instruction: str) -> str:
     return "".join(result)
 
 
+def answer_context_ids(items: list[dict], selected: list[str], version: str) -> list[str]:
+    """Deterministic whole-sentence context; legacy projection stays byte-compatible."""
+    order = {item["utterance_id"]: index for index, item in enumerate(items)}
+    context = set(selected)
+    size = sum(_units(items[order[uid]]["text"]) for uid in selected)
+    if version == "1.0":
+        neighbors = {position for uid in selected for position in (order[uid] - 1, order[uid] + 1)
+                     if 0 <= position < len(items)}
+        for position in sorted(neighbors):
+            item = items[position]
+            width = _units(_text(item["text"], 100000))
+            if item["utterance_id"] not in context and size + width <= 12000:
+                context.add(item["utterance_id"])
+                size += width
+    elif version == "1.1":
+        blocked = set()
+        for distance in range(1, 9):
+            for uid in selected:
+                anchor = items[order[uid]]
+                for direction in (-1, 1):
+                    side = (uid, direction)
+                    if side in blocked:
+                        continue
+                    position = order[uid] + distance * direction
+                    if not 0 <= position < len(items):
+                        blocked.add(side)
+                        continue
+                    item = items[position]
+                    span = (anchor["start_ms"] - item["start_ms"] if direction < 0
+                            else item["end_ms"] - anchor["end_ms"])
+                    if span > 120000:
+                        blocked.add(side)
+                        continue
+                    if item["utterance_id"] in context:
+                        continue
+                    width = _units(_text(item["text"], 100000))
+                    if len(context) >= 72 or size + width > 12000:
+                        blocked.add(side)
+                        continue
+                    context.add(item["utterance_id"])
+                    size += width
+    else:
+        raise AnchorSourceError("SOURCE_SCHEMA")
+    return sorted(context, key=order.get)
+
+
+def _prompt_version(source: dict) -> str:
+    return CONTEXT_PROMPT_VERSION if source["schema_version"] == "1.1" else PROMPT_VERSION
+
+
 def validate_answer_source(
     source: dict,
     items: list[dict],
@@ -138,22 +195,7 @@ def validate_answer_source(
         size += _units(original["text"])
     if size > 12000:
         raise AnchorSourceError("ANCHOR_TEXT_LIMIT")
-    context = set(selected)
-    neighbors = {
-        position
-        for uid in selected
-        for position in (order[uid] - 1, order[uid] + 1)
-        if 0 <= position < len(items)
-    }
-    for position in sorted(neighbors):
-        item = items[position]
-        if item["utterance_id"] in context:
-            continue
-        width = _units(_text(item["text"], 100000))
-        if size + width <= 12000:
-            context.add(item["utterance_id"])
-            size += width
-    if source["context_utterance_ids"] != sorted(context, key=order.get):
+    if source["context_utterance_ids"] != answer_context_ids(items, selected, source["schema_version"]):
         raise AnchorSourceError("ANCHOR_CONTEXT")
     return source
 
@@ -168,6 +210,8 @@ def validate_anchor_outputs(plan: dict, items: list[dict], source: dict) -> None
         },
     )
     _text(plan["instruction"], 2000)
+    if plan["provenance"]["prompt_version"] != _prompt_version(source):
+        raise _InvalidOutput("ANCHOR_PROMPT_VERSION")
     if (
         len(plan["goals"]) != 1
         or plan["goals"][0]["goal_id"] != GOAL_ID
@@ -216,7 +260,7 @@ def _index(items: list[dict], source: dict) -> dict:
             ranges[-1]["end_utterance_id"] = item["utterance_id"]
         previous = position
     value = {
-        "version": "answer-anchor-context-v1",
+        "version": "answer-anchor-context-v2" if source["schema_version"] == "1.1" else "answer-anchor-context-v1",
         "source_hash": source["source_hash"],
         "transcript_hash": source["transcript_hash"],
         "answer_hash": source["answer_hash"],
@@ -291,10 +335,12 @@ def build_anchor_clip_plan(
             key: identity[key] for key in ("job_id", "video_id", "source_hash", "transcript_hash")
         },
     )
+    prompt_version = _prompt_version(answer_source)
+    system = _CONTEXT_SYSTEM if prompt_version == CONTEXT_PROMPT_VERSION else _SYSTEM
     endpoint = _endpoint(base_url or os.environ.get("LIVECUT_TEXT_BASE_URL") or DEFAULT_BASE_URL)
     config = {
         **identity,
-        "prompt_version": PROMPT_VERSION,
+        "prompt_version": prompt_version,
         "utterances": items,
         "answer_source": answer_source,
         "model": model,
@@ -349,10 +395,10 @@ def build_anchor_clip_plan(
             "retrieval": {GOAL_ID: retrieval},
         }
         messages = [
-            {"role": "system", "content": _SYSTEM},
+            {"role": "system", "content": system},
             {"role": "user", "content": _json(payload)},
         ]
-        _save(directory / "phase-0-input.json", {"system": _SYSTEM, "payload": payload})
+        _save(directory / "phase-0-input.json", {"system": system, "payload": payload})
         key = _text_api_key(api_key, endpoint)
         if not key:
             raise SegmentationError("MISSING_API_KEY", "Set LIVECUT_TEXT_API_KEY")
@@ -419,7 +465,7 @@ def build_anchor_clip_plan(
                         "outputs": outputs,
                         "provenance": {
                             "text_model_id": model,
-                            "prompt_version": PROMPT_VERSION,
+                            "prompt_version": prompt_version,
                             "retrieval_mode": "anchor_context",
                             "index_hash": index["index_hash"],
                         },

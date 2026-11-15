@@ -61,7 +61,8 @@ class ManualClipExportIntegrationTests {
         };}
     }
     @BeforeAll void start(){
-        assertTrue(System.getenv("LIVECUT_DB_URL").matches("jdbc:mysql://127\\.0\\.0\\.1:(?:13307/livecut_test_topics|3306/livecut_test)(?:\\?.*)?"),
+        // 13316 is the task-owned MySQL used for isolated long-replay regression checks.
+        assertTrue(System.getenv("LIVECUT_DB_URL").matches("jdbc:mysql://127\\.0\\.0\\.1:(?:13307/livecut_test_topics|13316/livecut_test|3306/livecut_test)(?:\\?.*)?"),
                 "Manual export tests require the isolated local or CI test schema");
         Path font=Path.of("../data/fonts/noto-sans-cjk-sc-2.004/NotoSansCJKsc-Regular.otf").toAbsolutePath().normalize();
         assertTrue(Files.isRegularFile(font),"Install the fixed caption font before render integration tests");

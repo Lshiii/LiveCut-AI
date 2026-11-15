@@ -13,6 +13,7 @@ public final class AgentAnswerValidator {
     private static final Set<String> ANSWER=Set.of("schema_version","session_id","turn_id","job_id","video_id",
         "source_hash","transcript_hash","question","answer","answer_scope","citations","tool_calls","provenance","suggested_clip_instruction");
     public static JsonNode validate(JsonNode answer,Map<String,Object> owner){
+        boolean coverage=AgentTextCoverage.enabled(owner);
         if(AgentScreenSearch.enabled(owner))return AgentScreenSearchAnswerValidator.validate(answer,owner);
         if(AgentSpeechLookup.enabled(owner))return AgentSpeechLookupAnswerValidator.validate(answer,owner);
         if(AgentEvidence.structured(owner))return AgentEvidenceAnswerValidator.validate(answer,owner);
@@ -70,7 +71,7 @@ public final class AgentAnswerValidator {
                     ||!text(citation,"text",100000).equals(original.path("text").asText()))throw bad("Citation must exactly match original ASR");
         }
         JsonNode provenance=answer.path("provenance");fields(provenance,Set.of("text_model_id","prompt_version","retrieval_mode"));
-        equal(provenance,"text_model_id",String.valueOf(owner.get("text_model_id")));equal(provenance,"prompt_version",focused?"video-agent-visual-focus-v1":visual?"video-agent-visual-v1":"video-agent-v1");
+        equal(provenance,"text_model_id",String.valueOf(owner.get("text_model_id")));equal(provenance,"prompt_version",coverage?AgentTextCoverage.PROMPT:focused?"video-agent-visual-focus-v1":visual?"video-agent-visual-v1":"video-agent-v1");
         String mode=text(provenance,"retrieval_mode",40);
         if(!Set.of("none","bm25","bm25_dense_rrf").contains(mode)||searched==mode.equals("none"))throw bad("Retrieval mode must describe the actual tools");
         JsonNode suggested=answer.path("suggested_clip_instruction");

@@ -26,6 +26,7 @@ from .segmentation import (
 )
 
 PROMPT_VERSION = "video-agent-v1"
+COVERAGE_PROMPT_VERSION = "video-agent-coverage-v1"
 _ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}")
 _HASH = re.compile(r"[a-f0-9]{64}")
 _TOOLS = {"search_transcript", "read_context", "list_topics"}
@@ -118,7 +119,8 @@ def _decision(raw: dict, by_id: dict, visible: set[str], tools_left: int) -> dic
             "suggested_clip_instruction": instruction}
 
 
-def validate_agent_answer(result: dict, utterances: list[dict], *, expected: dict | None = None) -> dict:
+def validate_agent_answer(result: dict, utterances: list[dict], *, expected: dict | None = None,
+                          expected_prompt: str | None = None) -> dict:
     fields = {"schema_version", "session_id", "turn_id", "job_id", "video_id", "source_hash",
               "transcript_hash", "question", "answer", "answer_scope", "citations", "tool_calls",
               "provenance", "suggested_clip_instruction"}
@@ -173,7 +175,8 @@ def validate_agent_answer(result: dict, utterances: list[dict], *, expected: dic
     provenance = result["provenance"]
     if (not isinstance(provenance, dict) or set(provenance) != {"text_model_id", "prompt_version", "retrieval_mode"}
             or not isinstance(provenance["text_model_id"], str) or not _ID.fullmatch(provenance["text_model_id"])
-            or provenance["prompt_version"] != PROMPT_VERSION
+            or provenance["prompt_version"] not in {PROMPT_VERSION, COVERAGE_PROMPT_VERSION}
+            or expected_prompt is not None and provenance["prompt_version"] != expected_prompt
             or not isinstance(provenance["retrieval_mode"], str)
             or provenance["retrieval_mode"] not in {"none", "bm25", "bm25_dense_rrf"}
             or ((provenance["retrieval_mode"] != "none") != any(s["tool_name"] == "search_transcript" for s in steps))):
@@ -211,7 +214,23 @@ def build_video_answer(utterances: list[dict], topics: list[dict], duration_ms: 
                        api_key: str | None = None, base_url: str | None = None,
                        client: httpx.Client | None = None, timeout_seconds: float = 300,
                        dense_embedder: Embedder | None = None, embedding_model_id: str | None = None,
-                       index_cache_dir: str | Path | None = None, guard: Callable[[], None] = lambda: None) -> dict:
+                       index_cache_dir: str | Path | None = None, guard: Callable[[], None] = lambda: None,
+                       qa_policy: str | None = None,
+                       budget_remaining: Callable[[], int | None] | None = None,
+                       max_request_attempts: int = 1) -> dict:
+    if qa_policy is not None:
+        if qa_policy != "coverage_v1":
+            raise SegmentationError("INVALID_AGENT_INPUT", "Unknown text answer policy")
+        from .video_agent_coverage import build_coverage_answer
+
+        return build_coverage_answer(utterances, topics, duration_ms, question, output_dir,
+            session_id=session_id, turn_id=turn_id, job_id=job_id, video_id=video_id,
+            source_hash=source_hash, transcript_hash=transcript_hash, history=history,
+            model=model, max_calls=max_calls, max_tool_steps=max_tool_steps, api_key=api_key,
+            base_url=base_url, client=client, timeout_seconds=timeout_seconds,
+            dense_embedder=dense_embedder, embedding_model_id=embedding_model_id,
+            index_cache_dir=index_cache_dir, guard=guard, budget_remaining=budget_remaining,
+            max_request_attempts=max_request_attempts)
     items = _inputs(utterances, duration_ms)
     by_id = {u["utterance_id"]: u for u in items}
     order = {uid: i for i, uid in enumerate(by_id)}
@@ -308,7 +327,7 @@ def build_video_answer(utterances: list[dict], topics: list[dict], duration_ms: 
                               "answer_scope": action["answer_scope"], "citations": citations, "tool_calls": trace,
                               "suggested_clip_instruction": action["suggested_clip_instruction"],
                               "provenance": {"text_model_id": model, "prompt_version": PROMPT_VERSION, "retrieval_mode": mode}}
-                    validate_agent_answer(result, items)
+                    validate_agent_answer(result, items, expected_prompt=PROMPT_VERSION)
                     guard()
                     _save(root / "agent-answer.json", result)
                     guard()

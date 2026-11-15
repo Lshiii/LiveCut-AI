@@ -23,7 +23,7 @@ import { SequencePreview } from './sequencePreview'
 import { selectAnswerClip, type AnswerClipSelection } from './answerClip'
 import { topicTime } from './topics'
 import { AgentReadScope, AgentResponseError, agentTurnActive, canPrefillClipInstruction,
-  newestAgentSession, newestAgentTurn, parseAgentSession, parseAgentTurn,
+  newestAgentSession, newestAgentTurn, parseAgentSession, parseAgentTurn, parseAgentTextCoverageCapability,
   type AgentCitation, type AgentSession, type AgentTurn } from './videoAgent'
 import { AgentLegacySubmissionContext, AgentSubmissionError, agentDraftAfterSubmission, agentDraftMatchesSubmission, agentSubmissionStorageKey, assertAgentSubmissionStored, createAgentSubmission, filterAcknowledgedAgentSubmissions, inspectAgentSubmissionLimit, mergeAgentSubmissionResult, parseAgentSubmissionResponse,
   removeAgentSubmission, resolveAgentSubmission, restoreAgentSubmission, retainAgentSubmissions, scanAgentSubmissions,
@@ -148,6 +148,7 @@ function message(value: unknown) {
     NETWORK_UNAVAILABLE: '暂时无法连接服务，输入和已有回答仍保留。',
     REQUEST_TIMEOUT: '提交结果尚未确认，输入仍保留。请使用下方“核对原提交”，不会因修改问题或预算建立新请求。',
     INVALID_AGENT_RESPONSE: '返回的对话内容不完整或来源不匹配，已保留本页输入和已有回答。',
+    AGENT_TEXT_COVERAGE_UNAVAILABLE: '暂不能核对文本问答能力，问题与预算仍保留，请恢复连接后重试。',
     AGENT_SESSION_BUSY: '本对话还有一轮正在执行，请等待回答或取消本轮后再提问。',
     AGENT_SESSION_LIMIT: '当前对话已达到轮数上限，请新建对话后继续。',
     AGENT_SOURCE_NOT_READY: '请先完成视频话题解析，再围绕视频提问。',
@@ -199,6 +200,18 @@ function message(value: unknown) {
   return known[code] ?? `对话操作未完成：${code}`
 }
 function parseSession(raw: unknown, id?: string) { return parseAgentSession(raw, props.jobId, props.videoId, props.videoHash, id) }
+async function textCoveragePolicy(current: () => boolean): Promise<'coverage_v1' | 'legacy' | null> {
+  try {
+    const raw = await api<unknown>('/api/agent-capabilities/text-coverage')
+    if (!foregroundReadable() || !current()) return null
+    parseAgentTextCoverageCapability(raw)
+    return 'coverage_v1'
+  } catch (value) {
+    if (!foregroundReadable() || !current()) return null
+    if (value instanceof ApiError && value.status === 404) return 'legacy'
+    throw new ApiError('AGENT_TEXT_COVERAGE_UNAVAILABLE')
+  }
+}
 async function loadVisualCapability(current: () => boolean = foregroundReadable, signal?: AbortSignal) {
   if (!foregroundReadable() || !current() || signal?.aborted) return null
   const version = ++capabilityVersion
@@ -588,6 +601,12 @@ async function send() {
   action.value = 'send'; error.value = ''; notice.value = ''
   let submitted: AgentSubmissionEntry | null = null, posted = false
   try {
+    let qaPolicy: 'coverage_v1' | undefined
+    if (mode === 'none') {
+      const supported = await textCoveragePolicy(() => submissionCurrent(version, operation, owner))
+      if (supported === null || !submissionCurrent(version, operation, owner)) return
+      if (supported === 'coverage_v1') qaPolicy = supported
+    }
     if (mode === 'frames') {
       const capability = await loadVisualCapability(() => submissionCurrent(version, operation, owner))
       if (!submissionCurrent(version, operation, owner)) return
@@ -630,7 +649,7 @@ async function send() {
     if (screen && screenSource.value?.duration_ms !== session.source.duration_ms) throw new AgentResponseError()
     requireNoSubmission()
     let entry: AgentSubmissionEntry
-    try { entry = createAgentSubmission(localStorage, owner, 'TURN', JSON.stringify({ question: input, max_text_calls: budget, ...(mode === 'frames' ? { visual_mode: 'frames' } : {}), ...(focus ? { focus_timestamp_ms: focus.timestamp_ms } : {}), ...(structured ? { evidence_mode: 'structured' } : {}), ...(policy !== 'none' ? { evidence_policy: policy } : {}) }), () => crypto.randomUUID(), sessions.value, session, [...acknowledgedSubmissions.values()], legacyContext) }
+    try { entry = createAgentSubmission(localStorage, owner, 'TURN', JSON.stringify({ question: input, max_text_calls: budget, ...(mode === 'frames' ? { visual_mode: 'frames' } : {}), ...(focus ? { focus_timestamp_ms: focus.timestamp_ms } : {}), ...(structured ? { evidence_mode: 'structured' } : {}), ...(policy !== 'none' ? { evidence_policy: policy } : {}), ...(qaPolicy ? { qa_policy: qaPolicy } : {}) }), () => crypto.randomUUID(), sessions.value, session, [...acknowledgedSubmissions.values()], legacyContext) }
     catch (value) { scanSubmissions(); throw value }
     rememberSubmission(entry)
     submitted = entry
@@ -678,7 +697,10 @@ function adoptSubmissionResult(result: AgentSubmissionResult) {
   if (!selectedId.value) selectedId.value = result.session.id
 }
 function adoptAcknowledgedSubmission(entry: AgentSubmissionEntry, result: AgentSubmissionResult) {
-  const draft = { session_id: selectedId.value, question: question.value, budget: maxCalls.value, visual_mode: visualMode.value, evidence_mode: evidenceMode.value ? 'structured' as const : 'none' as const, ...(evidencePolicy.value !== 'none' ? { evidence_policy: evidencePolicy.value } : {}), ...(focusHint.value ? { focus_timestamp_ms: focusHint.value.timestamp_ms } : {}) }
+  // No route is selected for a new unsent draft here. Recovery compares the original
+  // durable policy and never upgrades it by probing today's capability.
+  const originalPolicy = entry.kind === 'TURN' ? (JSON.parse(entry.input) as { qa_policy?: 'coverage_v1' }).qa_policy : undefined
+  const draft = { session_id: selectedId.value, question: question.value, budget: maxCalls.value, visual_mode: visualMode.value, evidence_mode: evidenceMode.value ? 'structured' as const : 'none' as const, ...(evidencePolicy.value !== 'none' ? { evidence_policy: evidencePolicy.value } : {}), ...(focusHint.value ? { focus_timestamp_ms: focusHint.value.timestamp_ms } : {}), ...(originalPolicy ? { qa_policy: originalPolicy } : {}) }
   const matched = agentDraftMatchesSubmission(entry, draft), nextQuestion = agentDraftAfterSubmission(entry, draft)
   adoptSubmissionResult(result); acknowledgeSubmission(entry); question.value = nextQuestion
   if (matched) { focusHint.value = null; evidenceMode.value = false; evidencePolicy.value = 'none' }

@@ -41,6 +41,7 @@ class BudgetTransport(httpx.BaseTransport):
         self.inner = inner
         self._caption_reserved: int | None = None
         self._visual_reserved: int | None = None
+        self._coverage_reserved: int | None = None
         self._asr_calls: dict[str, str] = {}
         self._recovery_path = context.directory / "model-call-recovery.json"
         if _native_path(self._recovery_path).exists():
@@ -57,6 +58,43 @@ class BudgetTransport(httpx.BaseTransport):
 
     def close(self) -> None:
         self.inner.close()
+
+    def coverage_text_budget(self) -> int | None:
+        """Read only the protocol-6 text owner; unavailable never opens new work."""
+        lease = self.context.lease
+        config, maximum = lease.config.get("agent_turn", {}), lease.config.get("max_text_calls")
+        self.context.guard.check()
+        try:
+            if (lease.stage_type != "SEGMENT" or lease.required_worker_protocol != 6
+                    or not isinstance(config, dict) or config.get("qa_policy") != "coverage_v1"
+                    or config.get("visual_mode", "none") != "none" or config.get("kind", "VIDEO") != "VIDEO"
+                    or type(maximum) is not int or not 1 <= maximum <= 24):
+                return None
+            try:
+                turn = self.client.agent_turn(config.get("turn_id"))
+            except WorkerClientError:
+                return None
+            if not isinstance(turn, dict) or not isinstance(turn.get("stage"), dict) or not isinstance(turn.get("budget"), dict):
+                return None
+            stage, budget = turn["stage"], turn["budget"]
+            if (turn.get("id") != config.get("turn_id") or turn.get("session_id") != config.get("session_id")
+                    or turn.get("job_id") != lease.job_id or turn.get("qa_policy") != "coverage_v1"
+                    or turn.get("visual_mode", "none") != "none" or stage.get("id") != lease.stage_id
+                    or stage.get("stage_type") != "SEGMENT"):
+                return None
+            if (turn.get("status") != "RUNNING" or stage.get("status") != "RUNNING"
+                    or type(stage.get("attempt")) is not int or stage["attempt"] != lease.attempt):
+                self.context.guard.lose()
+                self.context.guard.check()
+            reserved = budget.get("text_calls_reserved")
+            if (type(budget.get("max_text_calls")) is not int or budget["max_text_calls"] != maximum
+                    or type(reserved) is not int or not 0 <= reserved <= maximum
+                    or self._coverage_reserved is not None and reserved < self._coverage_reserved):
+                return None
+            self._coverage_reserved = reserved
+            return maximum - reserved
+        finally:
+            self.context.guard.check()
 
     def caption_text_budget(self) -> int | None:
         """Read the exact caption owner; an unavailable snapshot never opens tools."""

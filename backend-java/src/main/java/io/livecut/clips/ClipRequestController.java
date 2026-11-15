@@ -11,6 +11,8 @@ public class ClipRequestController {
     private final ExportService exports;
     private final ClipRequestHistoryService history;
     public ClipRequestController(ClipRequestService requests,ExportService exports,ClipRequestHistoryService history){this.requests=requests;this.exports=exports;this.history=history;}
+    @GetMapping("/api/clip-capabilities/anchor-context")
+    public java.util.Map<String,Object> anchorContextCapability(){return java.util.Map.of("anchor_context_supported",true,"worker_protocol",5);}
     @PostMapping("/api/jobs/{jobId}/clip-requests")
     public ClipRequestModels.Snapshot create(@PathVariable String jobId,@RequestBody ClipRequestModels.CreateRequest request,@RequestHeader(value="Idempotency-Key",required=false) String key){return requests.create(jobId,request,key);}
     @GetMapping("/api/jobs/{jobId}/clip-requests")

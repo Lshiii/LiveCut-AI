@@ -7,7 +7,7 @@ export interface AnswerClipBinding {
   source_hash: string; transcript_hash: string; duration_ms: number; utterance_ids: string[]
 }
 export interface AnswerClipSource extends AnswerClipBinding {
-  schema_version: '1.0'; question: string; answer: string; citations: AgentCitation[]; context_utterance_ids: string[]
+  schema_version: '1.0' | '1.1'; question: string; answer: string; citations: AgentCitation[]; context_utterance_ids: string[]
 }
 export interface AnswerClipSelection { instruction: string; binding: AnswerClipBinding; question: string; citations: AgentCitation[] }
 export class AnswerClipError extends Error { constructor() { super('INVALID_ANSWER_CLIP_SOURCE') } }
@@ -36,14 +36,14 @@ export function sameAnswerClipBinding(a: AnswerClipBinding | null | undefined, b
   return !a && !b || !!a && !!b && JSON.stringify(answerClipBinding(a)) === JSON.stringify(answerClipBinding(b))
 }
 export function sameAnswerClipSource(a: AnswerClipSource | null | undefined, b: AnswerClipSource | null | undefined): boolean {
-  return sameAnswerClipBinding(a, b) && (!a && !b || !!a && !!b && a.question === b.question && a.answer === b.answer
+  return sameAnswerClipBinding(a, b) && (!a && !b || !!a && !!b && a.schema_version === b.schema_version && a.question === b.question && a.answer === b.answer
     && JSON.stringify(a.citations.map(citation => [citation.utterance_id, citation.start_ms, citation.end_ms, citation.text])) === JSON.stringify(b.citations.map(citation => [citation.utterance_id, citation.start_ms, citation.end_ms, citation.text]))
     && JSON.stringify(a.context_utterance_ids) === JSON.stringify(b.context_utterance_ids))
 }
 export function parseAnswerClipSource(raw: unknown, jobId: string, videoId: string, source: AgentSource): AnswerClipSource {
   if (!row(raw) || !fields(raw, [...bindingFields, 'schema_version', 'question', 'answer', 'citations', 'context_utterance_ids'])) invalid()
   const binding = parseAnswerClipBinding(Object.fromEntries(bindingFields.map(key => [key, raw[key]])))
-  if (raw.schema_version !== '1.0' || binding.job_id !== jobId || binding.video_id !== videoId || binding.source_hash !== source.video_sha256
+  if (!['1.0', '1.1'].includes(raw.schema_version as string) || binding.job_id !== jobId || binding.video_id !== videoId || binding.source_hash !== source.video_sha256
     || binding.transcript_hash !== source.transcript_hash || binding.duration_ms !== source.duration_ms || !text(raw.question, 2000) || !text(raw.answer, 6000)
     || !Array.isArray(raw.citations) || raw.citations.length !== binding.utterance_ids.length || !ids(raw.context_utterance_ids, 72)
     || binding.utterance_ids.some(id => !(raw.context_utterance_ids as string[]).includes(id))) invalid()
@@ -56,7 +56,7 @@ export function parseAnswerClipSource(raw: unknown, jobId: string, videoId: stri
     return { utterance_id: value.utterance_id as string, start_ms: value.start_ms as number, end_ms: value.end_ms as number, text: value.text }
   })
   if (units > 12000) invalid()
-  return { schema_version: '1.0', ...binding, question: raw.question, answer: raw.answer, citations, context_utterance_ids: [...raw.context_utterance_ids] }
+  return { schema_version: raw.schema_version as AnswerClipSource['schema_version'], ...binding, question: raw.question, answer: raw.answer, citations, context_utterance_ids: [...raw.context_utterance_ids] }
 }
 function canonical(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(canonical)

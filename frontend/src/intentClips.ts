@@ -136,7 +136,7 @@ export function parseIntentSnapshot(raw: unknown, jobId: string, requestId?: str
       || !row(plan.constraints) || typeof plan.constraints.keep_explanation_complete !== 'boolean'
       || !Array.isArray(plan.constraints.exclude) || plan.constraints.exclude.length > 8 || new Set(plan.constraints.exclude).size !== plan.constraints.exclude.length || plan.constraints.exclude.some(value => !text(value, 120))
       || !row(plan.provenance) || !text(plan.provenance.text_model_id, 200) || !text(plan.provenance.prompt_version, 200)
-      || (sourceAnswer ? plan.provenance.prompt_version !== 'anchor-clips-v1' || plan.provenance.retrieval_mode !== 'anchor_context'
+      || (sourceAnswer ? plan.provenance.prompt_version !== (sourceAnswer.schema_version === '1.1' ? 'anchor-clips-v2' : 'anchor-clips-v1') || plan.provenance.retrieval_mode !== 'anchor_context'
         : plan.provenance.prompt_version !== 'intent-clips-v1' || !['bm25', 'bm25_dense_rrf'].includes(plan.provenance.retrieval_mode as string))
       || !digest(plan.provenance.index_hash) || !Array.isArray(plan.outputs)) invalid()
     const goals = new Set<string>()

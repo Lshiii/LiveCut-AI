@@ -29,7 +29,7 @@ public final class ClipPlanValidator {
         JsonNode provenance=plan.path("provenance");fields(provenance,Set.of("text_model_id","prompt_version","retrieval_mode","index_hash"));
         equal(provenance,"text_model_id",String.valueOf(request.get("text_model_id")));
         boolean anchored=AnswerClipSource.stored(request)!=null;
-        equal(provenance,"prompt_version",anchored?AnswerClipSource.PROMPT:"intent-clips-v1");String mode=text(provenance,"retrieval_mode",64);
+        equal(provenance,"prompt_version",anchored?AnswerClipSource.prompt(AnswerClipSource.stored(request).source()):"intent-clips-v1");String mode=text(provenance,"retrieval_mode",64);
         if(!(anchored?Set.of("anchor_context"):Set.of("bm25","bm25_dense_rrf")).contains(mode))throw bad("Invalid retrieval mode");hash(text(provenance,"index_hash",64));
         Set<String> outputIds=new HashSet<>(),seenGoals=new HashSet<>();
         for(JsonNode output:array(plan,"outputs",1,6)){

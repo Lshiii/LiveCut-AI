@@ -301,7 +301,7 @@ def test_missing_registration_endpoint_never_falls_back_to_unregistered_claims(t
             worker(tmp_path, client, []).run_once()
     finally:
         client.close()
-    assert [request.url.path for request in requests] == ['/internal/workers/register']
+    assert [request.url.path for request in requests] == ['/api/agent-capabilities/speech-lookup', '/internal/workers/register']
 
 
 def test_each_gracefully_stopped_once_uses_a_fresh_registration_session(tmp_path):

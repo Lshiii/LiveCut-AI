@@ -6,7 +6,7 @@
   "additionalProperties": false,
   "required": ["schema_version", "turn_id", "session_id", "answer_hash", "job_id", "video_id", "source_hash", "transcript_hash", "duration_ms", "question", "answer", "utterance_ids", "citations", "context_utterance_ids"],
   "properties": {
-    "schema_version": {"const": "1.0"},
+    "schema_version": {"enum": ["1.0", "1.1"]},
     "turn_id": {"type": "string", "format": "uuid"},
     "session_id": {"type": "string", "format": "uuid"},
     "answer_hash": {"$ref": "#/$defs/hash"},

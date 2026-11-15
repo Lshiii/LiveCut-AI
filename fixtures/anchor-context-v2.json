@@ -1,0 +1,225 @@
+{
+  "data_kind": "synthetic_anchor_context_v2",
+  "utterances": [
+    {
+      "utterance_id": "position:0041",
+      "start_ms": 0,
+      "end_ms": 10999,
+      "text": "定义与流程 0 😀",
+      "source_chunk_id": "synthetic"
+    },
+    {
+      "utterance_id": "position:0058",
+      "start_ms": 11000,
+      "end_ms": 21999,
+      "text": "定义与流程 1 😀",
+      "source_chunk_id": "synthetic"
+    },
+    {
+      "utterance_id": "position:0075",
+      "start_ms": 22000,
+      "end_ms": 32999,
+      "text": "定义与流程 2 😀",
+      "source_chunk_id": "synthetic"
+    },
+    {
+      "utterance_id": "position:0092",
+      "start_ms": 33000,
+      "end_ms": 43999,
+      "text": "定义与流程 3 😀",
+      "source_chunk_id": "synthetic"
+    },
+    {
+      "utterance_id": "position:0109",
+      "start_ms": 44000,
+      "end_ms": 54999,
+      "text": "定义与流程 4 😀",
+      "source_chunk_id": "synthetic"
+    },
+    {
+      "utterance_id": "position:0126",
+      "start_ms": 55000,
+      "end_ms": 65999,
+      "text": "定义与流程 5 😀",
+      "source_chunk_id": "synthetic"
+    },
+    {
+      "utterance_id": "position:0143",
+      "start_ms": 66000,
+      "end_ms": 76999,
+      "text": "定义与流程 6 😀",
+      "source_chunk_id": "synthetic"
+    },
+    {
+      "utterance_id": "position:0160",
+      "start_ms": 77000,
+      "end_ms": 87999,
+      "text": "定义与流程 7 😀",
+      "source_chunk_id": "synthetic"
+    },
+    {
+      "utterance_id": "position:0177",
+      "start_ms": 88000,
+      "end_ms": 98999,
+      "text": "定义与流程 8 😀",
+      "source_chunk_id": "synthetic"
+    },
+    {
+      "utterance_id": "position:0194",
+      "start_ms": 99000,
+      "end_ms": 109999,
+      "text": "定义与流程 9 😀",
+      "source_chunk_id": "synthetic"
+    },
+    {
+      "utterance_id": "position:0211",
+      "start_ms": 110000,
+      "end_ms": 120999,
+      "text": "定义与流程 10 😀",
+      "source_chunk_id": "synthetic"
+    },
+    {
+      "utterance_id": "position:0228",
+      "start_ms": 121000,
+      "end_ms": 131999,
+      "text": "定义与流程 11 😀",
+      "source_chunk_id": "synthetic"
+    },
+    {
+      "utterance_id": "position:0245",
+      "start_ms": 132000,
+      "end_ms": 142999,
+      "text": "定义与流程 12 😀",
+      "source_chunk_id": "synthetic"
+    },
+    {
+      "utterance_id": "position:0262",
+      "start_ms": 143000,
+      "end_ms": 153999,
+      "text": "定义与流程 13 😀",
+      "source_chunk_id": "synthetic"
+    },
+    {
+      "utterance_id": "position:0279",
+      "start_ms": 154000,
+      "end_ms": 164999,
+      "text": "定义与流程 14 😀",
+      "source_chunk_id": "synthetic"
+    },
+    {
+      "utterance_id": "position:0296",
+      "start_ms": 165000,
+      "end_ms": 175999,
+      "text": "定义与流程 15 😀",
+      "source_chunk_id": "synthetic"
+    },
+    {
+      "utterance_id": "position:0313",
+      "start_ms": 176000,
+      "end_ms": 186999,
+      "text": "定义与流程 16 😀",
+      "source_chunk_id": "synthetic"
+    },
+    {
+      "utterance_id": "position:0330",
+      "start_ms": 187000,
+      "end_ms": 197999,
+      "text": "定义与流程 17 😀",
+      "source_chunk_id": "synthetic"
+    },
+    {
+      "utterance_id": "position:0347",
+      "start_ms": 198000,
+      "end_ms": 208999,
+      "text": "定义与流程 18 😀",
+      "source_chunk_id": "synthetic"
+    },
+    {
+      "utterance_id": "position:0364",
+      "start_ms": 209000,
+      "end_ms": 219999,
+      "text": "定义与流程 19 😀",
+      "source_chunk_id": "synthetic"
+    },
+    {
+      "utterance_id": "position:0381",
+      "start_ms": 220000,
+      "end_ms": 230999,
+      "text": "定义与流程 20 😀",
+      "source_chunk_id": "synthetic"
+    },
+    {
+      "utterance_id": "position:0398",
+      "start_ms": 231000,
+      "end_ms": 241999,
+      "text": "定义与流程 21 😀",
+      "source_chunk_id": "synthetic"
+    },
+    {
+      "utterance_id": "position:0415",
+      "start_ms": 242000,
+      "end_ms": 252999,
+      "text": "定义与流程 22 😀",
+      "source_chunk_id": "synthetic"
+    },
+    {
+      "utterance_id": "position:0432",
+      "start_ms": 253000,
+      "end_ms": 263999,
+      "text": "定义与流程 23 😀",
+      "source_chunk_id": "synthetic"
+    }
+  ],
+  "answer_source": {
+    "schema_version": "1.1",
+    "turn_id": "44444444-4444-4444-8444-444444444444",
+    "session_id": "55555555-5555-4555-8555-555555555555",
+    "answer_hash": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "job_id": "11111111-1111-4111-8111-111111111111",
+    "video_id": "22222222-2222-4222-8222-222222222222",
+    "source_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "transcript_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "duration_ms": 264000,
+    "question": "对照定义与完整流程。",
+    "answer": "选中本处结论，需核对前文。",
+    "utterance_ids": [
+      "position:0245",
+      "position:0262"
+    ],
+    "citations": [
+      {
+        "utterance_id": "position:0245",
+        "start_ms": 132000,
+        "end_ms": 142999,
+        "text": "定义与流程 12 😀"
+      },
+      {
+        "utterance_id": "position:0262",
+        "start_ms": 143000,
+        "end_ms": 153999,
+        "text": "定义与流程 13 😀"
+      }
+    ],
+    "context_utterance_ids": [
+      "position:0109",
+      "position:0126",
+      "position:0143",
+      "position:0160",
+      "position:0177",
+      "position:0194",
+      "position:0211",
+      "position:0228",
+      "position:0245",
+      "position:0262",
+      "position:0279",
+      "position:0296",
+      "position:0313",
+      "position:0330",
+      "position:0347",
+      "position:0364",
+      "position:0381",
+      "position:0398"
+    ]
+  },
+  "index_hash": "de3f82ca1a8525b1e558613de0ab57d3c89b520ec33ca71b0999d91365026e4e"
+}

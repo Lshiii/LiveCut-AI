@@ -186,8 +186,16 @@ class Lease:
         turn = value["config"].get("agent_turn", {})
         policy = turn.get("evidence_policy") if isinstance(turn, dict) else None
         replay = isinstance(turn, dict) and "cache_replay" in turn
-        if (type(protocol) is not int or protocol not in {1, 2, 3, 4}
-                or "required_worker_protocol" in value and protocol not in {2, 3, 4}
+        anchor_source = value["config"].get("clip_request", {}).get("answer_source", {}) if isinstance(value["config"].get("clip_request", {}), dict) else {}
+        anchor_v2 = isinstance(anchor_source, dict) and anchor_source.get("schema_version") == "1.1"
+        qa_policy = turn.get("qa_policy") if isinstance(turn, dict) else None
+        if (type(protocol) is not int or protocol not in {1, 2, 3, 4, 5, 6}
+                or "required_worker_protocol" in value and protocol not in {2, 3, 4, 5, 6}
+                or protocol == 5 and (value["stage_type"] != "ANCHOR_CLIP" or not anchor_v2)
+                or anchor_v2 and protocol != 5
+                or protocol == 6 and (value["stage_type"] != "SEGMENT" or qa_policy != "coverage_v1"
+                                     or turn.get("visual_mode", "none") != "none")
+                or qa_policy is not None and qa_policy != "none" and (qa_policy != "coverage_v1" or protocol != 6)
                 or protocol == 2 and (value["stage_type"] != "AGENT_EVIDENCE" or policy != "speech_lookup_v1")
                 or protocol == 3 and (value["stage_type"] != "AGENT_EVIDENCE" or policy != "speech_lookup_v1" or not replay
                                      or type(value["config"].get("max_text_calls")) is not int or value["config"]["max_text_calls"] != 0)
@@ -665,7 +673,7 @@ class StageWorker:
         if any(thread is not None and thread.is_alive()
                for thread in (self._presence_thread, self._stage_thread)):
             raise WorkerError("WORKER_HEARTBEAT_NOT_STOPPED")
-        if "AGENT_EVIDENCE" in capabilities:
+        if any(stage in capabilities for stage in ("AGENT_EVIDENCE", "ANCHOR_CLIP", "SEGMENT")):
             if self._evidence_protocol_versions is None:
                 bootstrap = getattr(self.client, "cached_answer_replay_supported" if self.cached_answer_replay_only
                                     else "worker_protocol_versions", None)
@@ -682,7 +690,10 @@ class StageWorker:
                         yield False
                         return
                     raise
-                if not isinstance(protocols, tuple) or protocols not in {(1,), (1, 2), (1, 2, 3), (1, 2, 4), (1, 2, 3, 4), (3,)} or any(type(v) is not int for v in protocols):
+                if (not isinstance(protocols, tuple) or any(type(v) is not int for v in protocols)
+                        or protocols not in {(1,), (3,)} and (protocols[:2] != (1, 2)
+                            or protocols != tuple(sorted(set(protocols)))
+                            or any(v not in {1, 2, 3, 4, 5, 6} for v in protocols))):
                     raise WorkerClientError("INVALID_WORKER_PROTOCOL_CAPABILITY")
                 self._evidence_protocol_versions = tuple(protocols)
             self._protocol_versions = self._evidence_protocol_versions
@@ -894,7 +905,7 @@ class StageWorker:
                         _identifier(row.get("id"))
                         protocol = row.get("required_worker_protocol", 1)
                         if (type(protocol) is not int or protocol not in (self._protocol_versions or (1,))
-                                or "required_worker_protocol" in row and protocol not in {2, 3, 4}):
+                                or "required_worker_protocol" in row and protocol not in {2, 3, 4, 5, 6}):
                             raise WorkerError("INVALID_WORKER_PROTOCOL")
                         if self.target_job_id is not None and row.get("job_id") != self.target_job_id:
                             raise WorkerError("CLAIM_TARGET_CHANGED")
@@ -913,7 +924,7 @@ class StageWorker:
                     raise WorkerError("CLAIM_STAGE_TYPE_CHANGED")
                 pending = {"stage_id": _identifier(item.get("id")),
                            "worker_id": self.worker_id, "claim_request_id": str(uuid4()), **target}
-                if item.get("required_worker_protocol") in {2, 3, 4}:
+                if item.get("required_worker_protocol") in {2, 3, 4, 5, 6}:
                     pending["required_worker_protocol"] = item["required_worker_protocol"]
                 _write(claim_path, pending)
             if pending.get("worker_id") != self.worker_id:
@@ -1256,6 +1267,13 @@ class AnalysisStageExecutor:
         if (evidence and config.get("evidence_mode") != "structured"
                 or not evidence and "evidence_mode" in config):
             raise WorkerError("INVALID_AGENT_EVIDENCE_INPUT")
+        coverage = config.get("qa_policy") == "coverage_v1"
+        if ("qa_policy" in config and not coverage
+                or coverage and (lease.required_worker_protocol != 6 or lease.stage_type != "SEGMENT"
+                                 or visual or caption or config.get("visual_mode", "none") != "none"
+                                 or config.get("kind", "VIDEO") != "VIDEO")
+                or lease.required_worker_protocol == 6 and not coverage):
+            raise WorkerError("INVALID_AGENT_COVERAGE_INPUT")
         if "cache_replay" in config or "replay_source_turn_id" in config or "replay_snapshot_hash" in config:
             raise WorkerError("INVALID_CACHED_REPLAY_SOURCE")
         speech = config.get("evidence_policy") == "speech_lookup_v1"
@@ -1368,6 +1386,10 @@ class AnalysisStageExecutor:
                                     _native_path(directory), source=_native_path(shared_path(context.storage_root, lease.source_key, must_exist=True)),
                                     history=config["history"], **options)
             else:
+                if coverage:
+                    options["qa_policy"] = "coverage_v1"
+                    options["budget_remaining"] = getattr(text_transport, "coverage_text_budget", lambda: None)
+                    options["max_request_attempts"] = text_transport.policy.max_attempts if isinstance(text_transport, ResilientTextTransport) else 1
                 build_video_answer(transcript, analysis["segments"], config["duration_ms"], config["question"],
                                    _native_path(directory), history=config["history"], **options)
         context.guard.check()
@@ -1404,6 +1426,9 @@ class AnalysisStageExecutor:
                          or lease.config.get("max_text_calls") != config["max_text_calls"]
                          or lease.config.get("text_model") != config["text_model_id"])
                 or not anchored and "answer_source" in config):
+            raise WorkerError("INVALID_ANCHOR_CLIP_INPUT")
+        if anchored and ((config["answer_source"].get("schema_version") == "1.1")
+                         != (lease.required_worker_protocol == 5)):
             raise WorkerError("INVALID_ANCHOR_CLIP_INPUT")
         transcript_path = context.predecessor("ASR", "transcript")
         expected_path = shared_path(context.storage_root, config["source_transcript_key"], must_exist=True)
