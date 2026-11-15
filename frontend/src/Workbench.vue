@@ -8,6 +8,7 @@ import VideoAgentPanel from './VideoAgentPanel.vue'
 import TranscriptSearchPanel from './TranscriptSearchPanel.vue'
 import type { AnswerClipSelection } from './answerClip'
 import UploadPanel from './UploadPanel.vue'
+import SourceImportPanel from './SourceImportPanel.vue'
 import FailureDiagnostic from './FailureDiagnostic.vue'
 import TextRequestProgress from './TextRequestProgress.vue'
 import ExecutorStatus from './ExecutorStatus.vue'
@@ -28,6 +29,7 @@ const visualProvider = ref<'ocr' | 'none'>('none'), maxTextCalls = ref(24), maxO
 const recoveryBudget = ref(12)
 const pendingResumes = new Map<string, AnalysisResumeReceipt>()
 const uploadPanel = ref<{ chooseFile: () => void } | null>(null)
+const sourceImportPanel = ref<{ open: () => void } | null>(null)
 const reviewEditor = ref<{ dirty: boolean; pending: boolean } | null>(null)
 const intentEditor = ref<{ dirty: boolean; pending: boolean; prefillInstruction(value: string): boolean; prefillAnswerClip(value: AnswerClipSelection): boolean } | null>(null)
 const agentEditor = ref<{ dirty: boolean; pending: boolean } | null>(null)
@@ -134,6 +136,11 @@ async function chooseUpload() {
   // The file input lives in main, which is inert while the task drawer is open.
   await nextTick()
   uploadPanel.value?.chooseFile()
+}
+async function chooseSourceImport() {
+  closeTasks()
+  await nextTick()
+  sourceImportPanel.value?.open()
 }
 function closeTasks() {
   if (!mobileTasksOpen.value) return
@@ -291,6 +298,16 @@ function uploadBusy(value: boolean) {
   if (value) pending.value = 'upload'
   else if (pending.value === 'upload') pending.value = ''
 }
+function canStartSourceImport() {
+  if (pending.value && pending.value !== 'source-import') { errorMessage.value = '请等待当前操作完成，再导入链接。'; return false }
+  if (editorsPending.value) { errorMessage.value = '请等待审核、剪辑方案或对话提交完成，再使用导入视频。'; return false }
+  if (editorsDirty.value) { errorMessage.value = '请先保存或放弃审核、剪辑方案修改或对话输入，再使用导入视频。'; return false }
+  return true
+}
+function sourceImportBusy(value: boolean) {
+  if (value) pending.value = 'source-import'
+  else if (pending.value === 'source-import') pending.value = ''
+}
 function uploadStarted() { uploadSelectionVersion = selectionVersion; errorMessage.value = ''; notice.value = '' }
 async function uploaded(video: VideoAsset) {
   if (stopped) return
@@ -407,7 +424,7 @@ onUnmounted(() => { stopped = true; compactQuery.removeEventListener('change', u
     <aside id="workbench-tasks" class="workbench-sidebar" :class="{ open: mobileTasksOpen }" :role="compactLayout && mobileTasksOpen ? 'dialog' : undefined" :aria-modal="compactLayout && mobileTasksOpen ? true : undefined" aria-label="视频与分析任务" @keydown="taskDrawerKey">
       <a class="brand" href="/" aria-label="LiveCut AI 首页" @click.prevent="openNewAnalysis"><span class="brand-mark">L<span>✦</span></span><strong>LiveCut<span>AI</span></strong></a>
       <button id="workbench-task-close" class="mobile-sidebar-close" aria-label="收起任务列表" @click="closeTasks">×</button>
-      <div class="sidebar-actions"><button class="primary" :disabled="!!pending" @click="chooseUpload">＋ 上传视频</button><button class="secondary" :disabled="!!pending" @click="openNewAnalysis">新建分析</button></div>
+      <div class="sidebar-actions"><button class="primary" :disabled="!!pending" @click="chooseUpload">＋ 上传视频</button><button class="secondary" :disabled="!!pending" @click="chooseSourceImport">链接导入</button><button class="secondary" :disabled="!!pending" @click="openNewAnalysis">新建分析</button></div>
       <div class="sidebar-heading"><h2>视频与任务 <span>{{ jobs.length }}</span></h2><button class="text-button" :disabled="loading" aria-label="刷新任务列表" @click="refresh">↻</button></div>
       <div class="sidebar-counts"><span>分析中 {{ activeCount }}</span><span>待审核 {{ reviewCount }}</span></div>
       <div class="task-scope" role="group" aria-label="任务列表范围"><button :aria-pressed="taskListScope === 'recent'" @click="taskListScope = 'recent'">最近视频</button><button :aria-pressed="taskListScope === 'all'" @click="taskListScope = 'all'">全部分析 <span>{{ jobs.length }}</span></button></div>
@@ -428,7 +445,7 @@ onUnmounted(() => { stopped = true; compactQuery.removeEventListener('change', u
         <div class="header-state"><span v-if="selectedJob" class="status" :class="selectedJob.status.toLowerCase()">{{ resultsAvailable ? '解析完成' : names[selectedJob.status] ?? selectedJob.status }}</span><span class="connection"><i :class="{ online }"></i>{{ online ? '服务已连接' : '服务未连接' }}</span><button class="header-upload primary" aria-label="上传视频" title="上传视频" :disabled="!!pending" @click="chooseUpload"><svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M12 16V4m-4 4 4-4 4 4M5 15v4a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-4"/></svg><span class="header-upload-label">上传视频</span><span class="header-upload-short">上传</span></button></div>
       </header>
       <div class="workspace-messages"><div v-if="errorMessage || connectionError" class="message error" role="alert"><span>{{ errorMessage || connectionError }}</span><button aria-label="关闭错误提示" @click="dismissErrors">×</button></div><div v-if="notice" class="message notice" role="status"><span>{{ notice }}</span><button aria-label="关闭操作提示" @click="notice = ''">×</button></div></div>
-      <div class="upload-host"><UploadPanel ref="uploadPanel" :can-start="canStartUpload" @busy="uploadBusy" @started="uploadStarted" @complete="uploaded" /></div>
+      <div class="upload-host"><UploadPanel ref="uploadPanel" :can-start="canStartUpload" @busy="uploadBusy" @started="uploadStarted" @complete="uploaded" /><SourceImportPanel ref="sourceImportPanel" :can-start="canStartSourceImport" @busy="sourceImportBusy" @started="uploadStarted" @complete="uploaded" /></div>
       <div class="workspace-tabs" role="tablist" aria-label="视频工作区" @keydown="tabKey">
         <button id="workbench-tab-agent" role="tab" aria-controls="workbench-pane-agent" :aria-selected="activeTab === 'agent'" :tabindex="activeTab === 'agent' ? 0 : -1" :disabled="!topicResultsAvailable" @click="setTab('agent')"><svg class="workspace-tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M5 4h14a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H9l-6 3V6a2 2 0 0 1 2-2Z"/><path d="M7 9h10M7 13h6"/></svg>视频对话<span v-if="agentEditor?.dirty" class="draft-dot" aria-label="有未提交输入"></span></button>
         <button id="workbench-tab-transcript" role="tab" aria-controls="workbench-pane-transcript" :aria-selected="activeTab === 'transcript'" :tabindex="activeTab === 'transcript' ? 0 : -1" :disabled="!topicResultsAvailable" @click="setTab('transcript')"><svg class="workspace-tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5M7 9h7M7 12h5"/></svg>原句搜索</button>

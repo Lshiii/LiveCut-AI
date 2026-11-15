@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Public video link import snapshot",
+  "type": "object",
+  "required": ["id", "url", "status", "phase", "progress_percent", "downloaded_bytes", "video_id", "error_code", "attempt", "created_at", "updated_at"],
+  "properties": {
+    "id": {"type": "string", "format": "uuid"},
+    "url": {"type": "string", "format": "uri", "maxLength": 2048},
+    "status": {"enum": ["QUEUED", "RUNNING", "COMPLETED", "FAILED", "CANCELLED"]},
+    "phase": {"enum": ["QUEUED", "DOWNLOADING", "NORMALIZING", "VERIFYING", "COMPLETED", "FAILED", "CANCELLED"]},
+    "progress_percent": {"type": ["integer", "null"], "minimum": 0, "maximum": 100},
+    "downloaded_bytes": {"type": "integer", "minimum": 0},
+    "video_id": {"type": ["string", "null"], "format": "uuid"},
+    "error_code": {"type": ["string", "null"], "pattern": "^[A-Z][A-Z0-9_]*$"},
+    "attempt": {"type": "integer", "minimum": 0, "maximum": 3},
+    "created_at": {"type": "string"},
+    "updated_at": {"type": "string"}
+  },
+  "additionalProperties": false
+}
