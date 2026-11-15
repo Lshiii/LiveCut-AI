@@ -12,6 +12,9 @@ import os
 import re
 import socket
 import sys
+import time
+import urllib.request
+from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
@@ -37,6 +40,12 @@ def validate_url(url: str) -> str:
             if query and query != {"p": ["1"]}:
                 raise ValueError
             return "BiliBili"
+        if (not query and value.hostname == "www.douyin.com"
+                and re.fullmatch(r"/video/[0-9]{15,22}/?", value.path)):
+            return "Douyin"
+        if (not query and value.hostname == "v.douyin.com"
+                and re.fullmatch(r"/[A-Za-z0-9_-]{1,64}/?", value.path)):
+            return "Douyin"
     except (ValueError, TypeError, AttributeError):
         pass
     raise ImportDownloadError("SOURCE_IMPORT_INVALID_URL")
@@ -53,7 +62,7 @@ def _public_ip(value: str) -> bool:
 
 
 def install_network_guard() -> None:
-    """Check every DNS result and connect destination, including redirects.
+    """Filter every DNS result and check connect destinations, including redirects.
 
     Connecting the validated numeric address prevents a second DNS lookup from
     rebinding a public hostname to an internal address. TLS still uses the
@@ -66,8 +75,9 @@ def install_network_guard() -> None:
     def resolve(host, port, *args, **kwargs):
         if not isinstance(host, str) or port not in (443, "443"):
             raise OSError("SOURCE_IMPORT_NETWORK_DENIED")
-        results = original_resolve(host, port, *args, **kwargs)
-        if not results or any(not _public_ip(item[4][0]) for item in results):
+        results = [item for item in original_resolve(host, port, *args, **kwargs)
+                   if _public_ip(item[4][0])]
+        if not results:
             raise OSError("SOURCE_IMPORT_NETWORK_DENIED")
         return results
 
@@ -164,10 +174,207 @@ def _atomic(path: Path, value) -> None:
     os.replace(temporary, path)
 
 
+def _failure_code(error: BaseException) -> str:
+    """Preserve only fixed guard codes through yt-dlp's exception wrappers.
+
+    Exception messages, URLs and headers are never published. A remote error
+    mentioning the code does not qualify: it must be our literal OSError or an
+    ImportDownloadError, possibly in a bounded cause/exception-info chain.
+    """
+    queue, seen = [error], set()
+    for _ in range(32):
+        if not queue:
+            break
+        current = queue.pop()
+        if not isinstance(current, BaseException) or id(current) in seen:
+            continue
+        seen.add(id(current))
+        if isinstance(current, ImportDownloadError) and re.fullmatch(
+                r"SOURCE_IMPORT_[A-Z_]{1,49}", str(current)):
+            return str(current)
+        if isinstance(current, OSError) and current.args == ("SOURCE_IMPORT_NETWORK_DENIED",):
+            return "SOURCE_IMPORT_NETWORK_DENIED"
+        queue.extend([current.__cause__, current.__context__, getattr(current, "cause", None),
+                      getattr(current, "reason", None)])
+        info = getattr(current, "exc_info", None)
+        if isinstance(info, tuple) and len(info) == 3:
+            queue.append(info[1])
+    return "SOURCE_IMPORT_DOWNLOAD_FAILED"
+
+
+_DOUYIN_AMBIGUOUS_QUERY = {"list", "playlist", "index", "modal_id", "aweme_id", "item_id",
+                          "item_ids", "video_id"}
+_DOUYIN_MOBILE_UA = ("Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) "
+                    "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 "
+                    "Mobile/15E148 Safari/604.1")
+
+
+def _douyin_redirect_target(url: str, *, allow_short: bool = False) -> tuple[str, str | None]:
+    """Allow only official single-video landing routes, never arbitrary pages."""
+    try:
+        _https(url)
+        value = urlsplit(url)
+        query = parse_qs(value.query, keep_blank_values=True, strict_parsing=True)
+        if value.fragment or len(url) > 8192 or _DOUYIN_AMBIGUOUS_QUERY.intersection(query):
+            raise ValueError
+        if (allow_short and value.hostname == "v.douyin.com" and not query
+                and re.fullmatch(r"/[A-Za-z0-9_-]{1,64}/?", value.path)):
+            return url, None
+        if value.hostname in {"douyin.com", "www.douyin.com", "m.douyin.com"}:
+            found = re.fullmatch(r"/video/([0-9]{15,22})/?", value.path)
+        elif value.hostname == "www.iesdouyin.com":
+            found = re.fullmatch(r"/share/video/([0-9]{15,22})/?", value.path)
+        else:
+            found = None
+        if found:
+            video_id = found[1]
+            return f"https://www.douyin.com/video/{video_id}", video_id
+    except (ValueError, TypeError, AttributeError, ImportDownloadError):
+        pass
+    raise ImportDownloadError("SOURCE_IMPORT_UNSUPPORTED_SOURCE")
+
+
+class _DouyinRedirects(urllib.request.HTTPRedirectHandler):
+    def __init__(self):
+        super().__init__()
+        self.count, self.video_id = 0, None
+        self.deadline = time.monotonic() + 30
+
+    def observe(self, url):
+        canonical, video_id = _douyin_redirect_target(url, allow_short=True)
+        if video_id is not None:
+            if self.video_id is not None and video_id != self.video_id:
+                raise ImportDownloadError("SOURCE_IMPORT_UNSUPPORTED_SOURCE")
+            self.video_id = video_id
+        return canonical, video_id
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        self.count += 1
+        if self.count > 5 or time.monotonic() >= self.deadline:
+            raise ImportDownloadError("SOURCE_IMPORT_REDIRECT_LIMIT")
+        self.observe(newurl)
+        req.timeout = max(0.001, min(8, self.deadline - time.monotonic()))
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _resolve_douyin_short(url, *, opener=None):
+    redirects = _DouyinRedirects()
+    if opener is None:
+        # Proxy discovery is disabled; the same process's socket guard checks
+        # each redirect's DNS results and numeric connection destination.
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), redirects)
+    request = urllib.request.Request(url, headers={"User-Agent": _DOUYIN_MOBILE_UA})
+    with opener.open(request, timeout=8) as response:
+        canonical, video_id = redirects.observe(response.url)
+        if video_id is None:
+            raise ImportDownloadError("SOURCE_IMPORT_UNSUPPORTED_SOURCE")
+        return canonical
+
+
+class _InlineScripts(HTMLParser):
+    def __init__(self):
+        super().__init__(convert_charrefs=False)
+        self.active, self.current, self.scripts = False, [], []
+
+    def handle_starttag(self, tag, attrs):
+        if tag.lower() == "script":
+            self.active = not any(key.lower() == "src" for key, _ in attrs)
+            self.current = []
+
+    def handle_data(self, data):
+        if self.active:
+            self.current.append(data)
+
+    def handle_endtag(self, tag):
+        if tag.lower() == "script" and self.active:
+            self.scripts.append("".join(self.current))
+            self.active = False
+
+
+def _unique_json_pairs(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate key")
+        result[key] = value
+    return result
+
+
+def _public_douyin_detail(html, video_id):
+    """Read actually served SSR JSON only. Never execute challenge/javascript."""
+    if not isinstance(html, str) or len(html.encode("utf-8")) > 2 * 1024 * 1024:
+        raise ImportDownloadError("SOURCE_IMPORT_AUTH_REQUIRED")
+    parser = _InlineScripts()
+    parser.feed(html)
+    candidates = []
+    for script in parser.scripts:
+        marker = re.match(r"\s*(?:window\.)?_ROUTER_DATA\s*=\s*", script)
+        if not marker:
+            continue
+        try:
+            value, end = json.JSONDecoder(object_pairs_hook=_unique_json_pairs).raw_decode(script[marker.end():])
+            if script[marker.end()+end:].strip() not in {"", ";"}:
+                raise ValueError
+            response = value["loaderData"]["video_(id)/page"]["videoInfoRes"]
+            if response.get("status_code", 0) != 0 or not isinstance(response.get("item_list"), list):
+                raise ValueError
+            items = response["item_list"]
+            if len(items) != 1 or not isinstance(items[0], dict):
+                raise ValueError
+            item = items[0]
+            if (str(item.get("aweme_id")) != video_id or not isinstance(item.get("video"), dict)
+                    or item.get("images") or item.get("image_post_info") or item.get("is_live")
+                    or item.get("live_info") or item.get("room_id") or item.get("is_private")):
+                raise ValueError
+            candidates.append(item)
+        except (ValueError, TypeError, KeyError, AttributeError):
+            raise ImportDownloadError("SOURCE_IMPORT_AUTH_REQUIRED") from None
+    if len(candidates) != 1:
+        raise ImportDownloadError("SOURCE_IMPORT_AUTH_REQUIRED")
+    return candidates[0]
+
+
+def _extract_douyin(ydl, extractor, url, request_type):
+    video_id = _douyin_redirect_target(url)[1]
+    try:
+        return ydl.extract_info(url, download=False, ie_key="Douyin")
+    except Exception as error:
+        if _failure_code(error) == "SOURCE_IMPORT_NETWORK_DENIED":
+            raise
+        if "fresh cookies" not in str(error).lower():
+            raise
+    # Anonymous HTTP Set-Cookie responses are task-local in-memory state. No
+    # browser profile/cookie file is opened and no signature/challenge is solved.
+    before = {(c.domain, c.name, c.value) for c in ydl.cookiejar}
+    with ydl.urlopen(request_type("https://www.douyin.com/", headers={"User-Agent": _DOUYIN_MOBILE_UA})) as response:
+        response.read(512 * 1024 + 1)
+    after = {(c.domain, c.name, c.value) for c in ydl.cookiejar}
+    if after != before:
+        try:
+            return ydl.extract_info(url, download=False, ie_key="Douyin")
+        except Exception as error:
+            if _failure_code(error) == "SOURCE_IMPORT_NETWORK_DENIED":
+                raise
+            if "fresh cookies" not in str(error).lower():
+                raise
+    share = f"https://www.iesdouyin.com/share/video/{video_id}/"
+    with ydl.urlopen(request_type(share, headers={"User-Agent": _DOUYIN_MOBILE_UA})) as response:
+        if _douyin_redirect_target(response.url)[1] != video_id:
+            raise ImportDownloadError("SOURCE_IMPORT_UNSUPPORTED_SOURCE")
+        content = response.read(2 * 1024 * 1024 + 1)
+    if len(content) > 2 * 1024 * 1024:
+        raise ImportDownloadError("SOURCE_IMPORT_AUTH_REQUIRED")
+    detail = _public_douyin_detail(content.decode("utf-8", "replace"), video_id)
+    result = extractor._parse_aweme_video_app(detail)
+    result.update(extractor="douyin", extractor_key="Douyin", webpage_url=url, original_url=url)
+    return ydl.process_ie_result(result, download=False)
+
+
 def download(url: str, directory: Path, max_bytes: int, *, metadata_only=False) -> dict:
     extractor = validate_url(url)
     from yt_dlp import YoutubeDL
     from yt_dlp.extractor.bilibili import BiliBiliIE
+    from yt_dlp.extractor.tiktok import DouyinIE
     from yt_dlp.extractor.youtube import YoutubeIE
     from yt_dlp.networking import Request
     from yt_dlp.networking._urllib import UrllibRH
@@ -183,11 +390,18 @@ def download(url: str, directory: Path, max_bytes: int, *, metadata_only=False) 
     sys.addaudithook(_no_external_execution)
     directory.mkdir(parents=True, exist_ok=True)
     with YoutubeDL(options, auto_init=False) as ydl:
-        ydl.add_info_extractor(YoutubeIE() if extractor == "Youtube" else BiliBiliIE())
+        selected = {"Youtube": YoutubeIE, "BiliBili": BiliBiliIE, "Douyin": DouyinIE}[extractor]()
+        ydl.add_info_extractor(selected)
         # Pin the only HTTP implementation: optional requests/curl/websocket
         # handlers and their native networking cannot bypass Python sockets.
         ydl._request_director = ydl.build_request_director([UrllibRH])
-        info = ydl.extract_info(url, download=False, ie_key=extractor)
+        if extractor == "Douyin":
+            resolved = _resolve_douyin_short(url) if urlsplit(url).hostname == "v.douyin.com" else url
+            info = _extract_douyin(ydl, selected, resolved, Request)
+            if str(info.get("id")) != _douyin_redirect_target(resolved)[1]:
+                raise ImportDownloadError("SOURCE_IMPORT_UNSUPPORTED_SOURCE")
+        else:
+            info = ydl.extract_info(url, download=False, ie_key=extractor)
         if info.get("extractor_key") != extractor:
             raise ImportDownloadError("SOURCE_IMPORT_UNSUPPORTED_SOURCE")
         streams = _streams(info, max_bytes)
@@ -237,7 +451,7 @@ def main() -> int:
         print(json.dumps({"ok": True, "result": result}, ensure_ascii=True))
         return 0
     except BaseException as error:
-        code = str(error) if isinstance(error, ImportDownloadError) else "SOURCE_IMPORT_DOWNLOAD_FAILED"
+        code = _failure_code(error)
         print(json.dumps({"ok": False, "error_code": code}))
         return 1
 

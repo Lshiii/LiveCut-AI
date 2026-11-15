@@ -106,7 +106,7 @@ def test_dns_and_direct_connect_guard_cover_redirect_rebinding(monkeypatch):
         socket.getaddrinfo, socket.socket.connect, socket.socket.connect_ex = original_resolve, original_connect, original_connect_ex
 
 
-def test_mixed_dns_public_and_private_is_rejected(monkeypatch):
+def test_mixed_dns_returns_only_public_addresses(monkeypatch):
     original_resolve, original_connect = socket.getaddrinfo, socket.socket.connect
     original_connect_ex = socket.socket.connect_ex
     monkeypatch.setattr(socket, "getaddrinfo", lambda *a, **k: [
@@ -114,10 +114,33 @@ def test_mixed_dns_public_and_private_is_rejected(monkeypatch):
         (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("10.0.0.1", 443))])
     try:
         dl.install_network_guard()
-        with pytest.raises(OSError):
-            socket.getaddrinfo("rebound.example", 443)
+        rows = socket.getaddrinfo("rebound.example", 443)
+        assert [row[4][0] for row in rows] == ["8.8.8.8"]
     finally:
         socket.getaddrinfo, socket.socket.connect, socket.socket.connect_ex = original_resolve, original_connect, original_connect_ex
+
+
+def test_private_or_fake_dns_without_public_address_is_rejected(monkeypatch):
+    original_resolve, original_connect = socket.getaddrinfo, socket.socket.connect
+    original_connect_ex = socket.socket.connect_ex
+    monkeypatch.setattr(socket, "getaddrinfo", lambda *a, **k: [
+        (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("198.18.0.23", 443)),
+        (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("10.0.0.1", 443))])
+    try:
+        dl.install_network_guard()
+        with pytest.raises(OSError, match="NETWORK_DENIED"):
+            socket.getaddrinfo("only-internal.example", 443)
+    finally:
+        socket.getaddrinfo, socket.socket.connect, socket.socket.connect_ex = original_resolve, original_connect, original_connect_ex
+
+
+def test_wrapped_network_denial_keeps_fixed_code_without_raw_provider_message():
+    original = OSError("SOURCE_IMPORT_NETWORK_DENIED")
+    middle, outer = RuntimeError("private provider response"), RuntimeError("signed URL must stay private")
+    middle.cause = original
+    outer.exc_info = (RuntimeError, middle, None)
+    assert dl._failure_code(outer) == "SOURCE_IMPORT_NETWORK_DENIED"
+    assert dl._failure_code(RuntimeError("remote text SOURCE_IMPORT_NETWORK_DENIED")) == "SOURCE_IMPORT_DOWNLOAD_FAILED"
 
 
 @pytest.mark.parametrize("info", [{"_type": "playlist"}, {"_type": "multi_video"},

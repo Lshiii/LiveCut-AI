@@ -19,6 +19,31 @@ test('source links normalize a single public video and refuse credentials, playl
     'https://youtu.be/abcdefghijk?playlist=x', 'https://youtu.be/abcdefghijk?v=abcdefghijk', 'https://youtu.be/abcdefghijk?a=1&a=2', 'https://youtu.be/abcdefghijk?track=%0Asecret',
     'https://youtu.be/abc\tdefghijk']) assert.throws(() => sourceImportUrl(bad), undefined, bad)
 })
+test('Douyin direct and short URLs have bounded canonical identities without resolving short links in the browser', () => {
+  for (const host of ['douyin.com', 'www.douyin.com', 'm.douyin.com']) {
+    assert.equal(sourceImportUrl(`https://${host}/video/123456789012345/?share=tracking`), 'https://www.douyin.com/video/123456789012345')
+    assert.equal(sourceImportUrl(`https://${host}/video/1234567890123456789012`), 'https://www.douyin.com/video/1234567890123456789012')
+  }
+  assert.equal(sourceImportUrl('https://v.douyin.com/a_B-9?from=share'), 'https://v.douyin.com/a_B-9/')
+  assert.equal(sourceImportUrl('https://v.douyin.com/a_B-9/?from=share'), 'https://v.douyin.com/a_B-9/')
+  assert.equal(sourceImportUrl(`https://v.douyin.com/${'a'.repeat(64)}`), `https://v.douyin.com/${'a'.repeat(64)}/`)
+  const short = 'https://v.douyin.com/a_B-9/'
+  assert.equal(parseSourceImport(snapshot({ url: short }), { url: 'https://v.douyin.com/a_B-9?track=1' }).url, short)
+  assert.throws(() => parseSourceImport(snapshot({ url: 'https://www.douyin.com/video/123456789012345' }), { url: short }))
+})
+test('Douyin rejects live/user/note pages, ambiguous shares, lookalike hosts, extra path and out-of-bounds identifiers', () => {
+  const bad = ['https://douyin.com/video/12345678901234', 'https://douyin.com/video/12345678901234567890123', 'https://douyin.com/video/123456789012345/more',
+    'https://live.douyin.com/123456789012345', 'https://douyin.com/user/123456789012345', 'https://douyin.com/note/123456789012345', 'https://www.v.douyin.com/abc/',
+    'https://m.v.douyin.com/abc/', 'https://douyin.com.example/video/123456789012345', 'https://v.douyin.com/', `https://v.douyin.com/${'a'.repeat(65)}/`,
+    'https://v.douyin.com/a%2Fb/', 'https://v.douyin.com/a/b/', 'http://v.douyin.com/abc/', 'https://user:pass@v.douyin.com/abc/',
+    'https://v.douyin.com/abc/?playlist=1', 'https://douyin.com/video/123456789012345?index=1', 'https://v.douyin.com/abc/?x=1&x=2',
+    '复制打开抖音 https://v.douyin.com/abc/ 查看视频', 'https://v.douyin.com/abc/ https://v.douyin.com/def/']
+  for (const input of bad) assert.throws(() => sourceImportUrl(input), undefined, input)
+  for (const key of ['modal_id', 'aweme_id', 'item_id', 'item_ids', 'video_id']) {
+    assert.throws(() => sourceImportUrl(`https://v.douyin.com/abc/?${key}=123456789012345`))
+    assert.throws(() => sourceImportUrl(`https://douyin.com/video/123456789012345?${key}=123456789012346`))
+  }
+})
 test('source snapshots bind canonical identity, status/phase and completed video without trusting network types', () => {
   assert.equal(parseSourceImport(snapshot()).attempt, 0)
   const completed = snapshot({ status: 'COMPLETED', phase: 'COMPLETED', progress_percent: 100, video_id: id(2), attempt: 1 })

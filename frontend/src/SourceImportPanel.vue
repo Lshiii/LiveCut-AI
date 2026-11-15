@@ -139,12 +139,12 @@ defineExpose({ open, pending, refresh })
 
 <template>
   <section class="source-import" aria-label="链接导入视频">
-    <button class="text-button source-toggle" :aria-expanded="expanded" aria-controls="source-import-content" @click="expanded = !expanded">{{ expanded ? '收起链接导入' : '从 YouTube / Bilibili 链接导入' }}<span v-if="receipts.length"> · 有提交待核对</span></button>
+    <button class="text-button source-toggle" :aria-expanded="expanded" aria-controls="source-import-content" @click="expanded = !expanded">{{ expanded ? '收起链接导入' : '从 YouTube / Bilibili / 抖音链接导入' }}<span v-if="receipts.length"> · 有提交待核对</span></button>
     <div id="source-import-content" v-show="expanded" class="source-content">
-      <p class="source-help">仅支持无需登录的公开单条录播。部分 YouTube 视频可能因站点验证无法导入。后台下载后会处理为 MP4。导入完成后，由你选择是否开始分析。</p>
+      <p class="source-help">仅支持无需登录的公开单条视频。抖音或部分 YouTube 视频可能因站点验证无法导入。请从分享文案中复制单个完整链接。后台下载后会处理为 MP4，完成后由你选择是否开始分析。</p>
       <form class="source-form" @submit.prevent="create">
         <label for="source-import-url">视频链接</label>
-        <div class="source-input-row"><input id="source-import-url" ref="input" v-model="url" type="url" maxlength="2048" placeholder="https://www.youtube.com/watch?v=…" autocomplete="off"><button class="primary" :disabled="pending || !url.trim() || !!storageError || !!receipts.length">导入链接</button></div>
+        <div class="source-input-row"><input id="source-import-url" ref="input" v-model="url" type="url" maxlength="2048" placeholder="粘贴 YouTube / Bilibili / 抖音视频链接" autocomplete="off"><button class="primary" :disabled="pending || !url.trim() || !!storageError || !!receipts.length">导入链接</button></div>
       </form>
       <p v-if="storageError" class="message error" role="alert">{{ storageError }}</p>
       <div v-for="entry in receipts" :key="entry.key" class="source-receipt"><p>原链接提交结果待核对：<span>{{ entry.url }}</span></p><button class="secondary" :disabled="pending" @click="checkReceipt(entry)">核对原提交</button><template v-if="replayKey === entry.key"><button class="secondary" :disabled="pending" @click="replay(entry)">原样重发原提交</button><button class="text-button" :disabled="pending" @click="abandon(entry)">放弃未提交链接</button></template></div>

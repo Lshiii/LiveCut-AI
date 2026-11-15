@@ -73,6 +73,19 @@ test('create persists exact key/body before POST and background completion never
     assert.ok(!ui.calls.some(call => call.path === '/api/jobs')); assert.deepEqual(ui.busy, [true, false, true, false])
   } finally { ui.close() }
 })
+test('Douyin short-link submission preserves its canonical original and public network failures remain actionable without internal addresses', async () => {
+  const ui = await mount()
+  try {
+    await ui.open(); await ui.input('https://v.douyin.com/a_B-9?share=tracking'); await ui.submit(); await settle(() => !ui.exposed.value.pending)
+    const write = ui.calls.find(call => call.init.method === 'POST')!
+    assert.equal(write.init.body, JSON.stringify({ url: 'https://v.douyin.com/a_B-9/' })); assert.equal(JSON.parse(write.stored!).input, write.init.body)
+    assert.equal(ui.emitted.length, 0); assert.match(hostText(ui.root), /抖音/)
+    ui.setItems([snapshot({ url: 'https://v.douyin.com/a_B-9/', status: 'FAILED', phase: 'FAILED', attempt: 1, error_code: 'SOURCE_IMPORT_NETWORK_DENIED' })])
+    await ui.exposed.value.refresh(); await flushHost()
+    assert.match(hostText(ui.root), /下载地址未通过公网校验，请检查代理 DNS 或换用本地上传/)
+    assert.ok(!hostText(ui.root).includes('198.18.'))
+  } finally { ui.close() }
+})
 test('unknown create preserves original receipt across new input and only exact business 404 exposes same-key replay', async () => {
   const ui = await mount()
   try {

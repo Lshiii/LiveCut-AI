@@ -74,7 +74,7 @@ def main():
         page.on("pageerror", lambda error: errors.append(str(error)))
         page.route("**/*", route)
         page.goto("https://livecut.invalid/")
-        page.get_by_role("button", name="从 YouTube / Bilibili 链接导入").click()
+        page.get_by_role("button", name="链接导入", exact=True).click()
         page.get_by_label("视频链接", exact=True).fill(LINK)
         page.get_by_role("button", name="导入链接", exact=True).click()
         expect(page.get_by_role("button", name="核对原提交", exact=True)).to_be_enabled()

@@ -23,7 +23,9 @@ try {
     if (-not [IO.Path]::IsPathRooted($storage)) { $storage = [IO.Path]::GetFullPath((Join-Path (Join-Path $repoRoot 'backend-java') $storage)) }
     # uv run uses an inexact sync by default; do not add --exact, which would
     # remove the analysis Worker's already installed OCR/Kafka extras.
-    $launchArgs = @('run', '--locked', '--no-env-file', '--extra', 'source-import', 'livecut-import-worker',
+    # Use the installed Python interpreter directly; generated console-script
+    # executables may be blocked by Windows application control.
+    $launchArgs = @('run', '--locked', '--no-env-file', '--extra', 'source-import', 'python', '-m', 'livecut.source_import',
         '--java-url', $JavaUrl, '--worker-id', $WorkerId, '--storage-root', $storage,
         '--journal-dir', (Join-Path $repoRoot "data/source-import-journals/$WorkerId"))
     if ($Once) { $launchArgs += '--once' }

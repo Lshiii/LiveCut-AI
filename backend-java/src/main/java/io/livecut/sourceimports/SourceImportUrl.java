@@ -21,7 +21,8 @@ public final class SourceImportUrl {
                 || (uri.getPort() != -1 && uri.getPort() != 443) || uri.getHost() == null) throw invalid();
             String decoded = URLDecoder.decode(value, StandardCharsets.UTF_8);
             if (decoded.chars().anyMatch(Character::isISOControl)) throw invalid();
-            String host = uri.getHost().toLowerCase(Locale.ROOT);
+            String originalHost = uri.getHost().toLowerCase(Locale.ROOT);
+            String host = originalHost;
             if (host.startsWith("www.")) host = host.substring(4);
             else if (host.startsWith("m.")) host = host.substring(2);
             String path = uri.getRawPath();
@@ -37,6 +38,19 @@ public final class SourceImportUrl {
             if (host.equals("bilibili.com") && path.matches("/video/(BV[A-Za-z0-9]{10}|av[1-9][0-9]{0,19})/?")) {
                 if (query.containsKey("p") && !"1".equals(query.get("p"))) throw invalid();
                 return "https://www.bilibili.com" + path.replaceAll("/$", "");
+            }
+            if (host.equals("douyin.com") || originalHost.equals("v.douyin.com")) {
+                // Do not silently discard a second video identity as tracking data.
+                for (String identity : java.util.Set.of("modal_id", "aweme_id", "item_id", "item_ids", "video_id")) {
+                    if (query.containsKey(identity)) throw invalid();
+                }
+                if (host.equals("douyin.com") && path.matches("/video/[0-9]{15,22}/?")) {
+                    return "https://www.douyin.com" + path.replaceAll("/$", "");
+                }
+                // Keep a short link's identity: only the guarded downloader resolves it.
+                if (originalHost.equals("v.douyin.com") && path.matches("/[A-Za-z0-9_-]{1,64}/?")) {
+                    return "https://v.douyin.com" + path.replaceAll("/$", "") + "/";
+                }
             }
             throw invalid();
         } catch (IllegalArgumentException failure) { throw invalid(); }
@@ -57,6 +71,6 @@ public final class SourceImportUrl {
         return result;
     }
     private static JobException invalid() {
-        return new JobException(HttpStatus.BAD_REQUEST, "INVALID_SOURCE_URL", "Use a supported public HTTPS single-video YouTube or Bilibili URL");
+        return new JobException(HttpStatus.BAD_REQUEST, "INVALID_SOURCE_URL", "Use a supported public HTTPS single-video YouTube, Bilibili or Douyin URL");
     }
 }

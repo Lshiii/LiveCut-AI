@@ -42,6 +42,18 @@ export function sourceImportUrl(input: string): string {
     if (url.searchParams.has('p') && (url.searchParams.getAll('p').length !== 1 || url.searchParams.get('p') !== '1')) throw new SourceImportError('SOURCE_MULTIPART_UNSUPPORTED')
     return `https://www.bilibili.com/video/${id}`
   }
+  if (['www.douyin.com', 'douyin.com', 'm.douyin.com', 'v.douyin.com'].includes(host)
+    && ['modal_id', 'aweme_id', 'item_id', 'item_ids', 'video_id'].some(key => url.searchParams.has(key))) throw new SourceImportError('SOURCE_URL_UNSUPPORTED')
+  if (['www.douyin.com', 'douyin.com', 'm.douyin.com'].includes(host)) {
+    const id = /^\/video\/(\d{15,22})\/?$/.exec(url.pathname)?.[1]
+    if (!id) throw new SourceImportError('SOURCE_URL_UNSUPPORTED')
+    return `https://www.douyin.com/video/${id}`
+  }
+  if (host === 'v.douyin.com') {
+    const slug = /^\/([A-Za-z0-9_-]{1,64})\/?$/.exec(url.pathname)?.[1]
+    if (!slug) throw new SourceImportError('SOURCE_URL_UNSUPPORTED')
+    return `https://v.douyin.com/${slug}/`
+  }
   throw new SourceImportError('SOURCE_URL_UNSUPPORTED')
 }
 
@@ -130,8 +142,8 @@ export function sourceImportNotFound(error: unknown) { return object(error) && e
 export function sourceImportErrorText(value: unknown): string {
   const code = object(value) && typeof value.code === 'string' ? value.code : ''
   const messages: Record<string, string> = {
-    SOURCE_URL_UNSUPPORTED: '请填写公开的单条 YouTube 或 Bilibili 录播链接（HTTPS）。',
-    INVALID_SOURCE_URL: '链接不受支持，请使用无需登录的单条 YouTube 或 Bilibili 录播。',
+    SOURCE_URL_UNSUPPORTED: '请填写公开的单条 YouTube、Bilibili 或抖音视频链接（HTTPS），不要粘贴整段分享文案。',
+    INVALID_SOURCE_URL: '链接不受支持，请使用无需登录的单条 YouTube、Bilibili 或抖音视频链接。',
     SOURCE_PLAYLIST_UNSUPPORTED: '暂不支持播放列表，请使用不带列表参数的单条视频链接。',
     SOURCE_MULTIPART_UNSUPPORTED: '暂不支持 Bilibili 多 P 的后续分集，请使用单条录播或本地 MP4。',
     SOURCE_IMPORT_PENDING: '还有提交结果待核对，请先核对原提交。',
@@ -154,7 +166,7 @@ export function sourceImportErrorText(value: unknown): string {
     IMPORT_NORMALIZATION_FAILED: '视频格式处理失败，可改用本地 H.264 / AAC MP4。',
     SOURCE_IMPORT_AUTH_REQUIRED: '此视频需要登录或访问授权，请改用有权使用的本地 MP4。',
     SOURCE_IMPORT_UNSUPPORTED_SOURCE: '此链接不是支持的公开单条录播，请改用本地 MP4。',
-    SOURCE_IMPORT_NETWORK_DENIED: '下载地址未通过网络校验，未继续导入。',
+    SOURCE_IMPORT_NETWORK_DENIED: '下载地址未通过公网校验，请检查代理 DNS 或换用本地上传。',
     SOURCE_IMPORT_DOWNLOAD_FAILED: '视频下载未完成，请核对链接后明确重试。',
     SOURCE_IMPORT_TOO_LARGE: '视频超过当前导入大小限制，请使用较短视频或本地 MP4。',
     SOURCE_IMPORT_DURATION_LIMIT: '视频超过当前导入时长限制，请使用较短录播。',
