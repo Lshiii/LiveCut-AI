@@ -127,7 +127,8 @@ def test_real_isolated_module_classifies_input_fault_without_network(tmp_path):
                "max_bytes": 1024, "metadata_only": True}
     result = subprocess.run([sys.executable, "-I", "-m", "livecut.source_import_download"],
         input=json.dumps(payload), capture_output=True, text=True, timeout=10)
-    assert result.returncode == 1
+    assert result.returncode == 1, result.stderr
+    assert result.stdout, result.stderr
     assert json.loads(result.stdout) == {"ok": False, "error_code": "SOURCE_IMPORT_INVALID_URL"}
 
 
@@ -156,5 +157,6 @@ runpy.run_module("livecut.source_import_download",run_name="__main__")
                "max_bytes": 1024, "metadata_only": True}
     result = subprocess.run([sys.executable, "-I", "-c", code, json.dumps(payload)],
         capture_output=True, text=True, timeout=10)
-    assert result.returncode == 1
+    assert result.returncode == 1, result.stderr
+    assert result.stdout, result.stderr
     assert json.loads(result.stdout) == {"ok": False, "error_code": "SOURCE_IMPORT_UNSUPPORTED_SOURCE"}
