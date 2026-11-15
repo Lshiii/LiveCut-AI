@@ -58,3 +58,14 @@ jobs:
           $manifest = Get-Content -LiteralPath $package.Manifest -Raw | ConvertFrom-Json
           if ($manifest.server_started -ne $false -or $manifest.worker_started -ne $false -or $manifest.model_requests -ne 0) { throw 'Build must not start runtime services.' }
           Write-Output ('Verified workbench JAR: ' + $package.Sha256)
+      - name: Retain failed build diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: workbench-build-diagnostics
+          path: |
+            data/distributions/**/build-status.json
+            data/distributions/**/*.log
+            data/ci-workbench-verification-*/surefire-reports/*.txt
+          if-no-files-found: ignore
+          retention-days: 7

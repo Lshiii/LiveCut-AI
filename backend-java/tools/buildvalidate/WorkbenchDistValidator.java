@@ -111,9 +111,10 @@ public final class WorkbenchDistValidator {
                 collectCss(html, key, files, pending);
             } else if (key.endsWith(".js")) {
                 String javascript = utf8(bytes);
-                collect(JS_IMPORT, javascript, key, files, pending, false);
-                collect(JS_URL, javascript, key, files, pending, false);
-                validateJavascriptReferences(javascript, key, files, pending);
+                boolean[] code = new JavascriptCode(javascript).positions();
+                collectJavascript(JS_IMPORT, javascript, code, key, files, pending);
+                collectJavascript(JS_URL, javascript, code, key, files, pending);
+                validateJavascriptReferences(javascript, code, key, files, pending);
             } else if (key.endsWith(".css")) {
                 collectCss(utf8(bytes), key, files, pending);
             }
@@ -127,6 +128,19 @@ public final class WorkbenchDistValidator {
         while (references.find()) reference(references.group(2), owner, files, pending, dataAllowed);
     }
 
+    private static void collectJavascript(Pattern pattern, String text, boolean[] code, String owner, Map<String, byte[]> files, ArrayDeque<String> pending) {
+        var references = pattern.matcher(text);
+        while (findCode(references, code)) reference(references.group(2), owner, files, pending, false);
+    }
+
+    private static boolean findCode(java.util.regex.Matcher matcher, boolean[] code) {
+        boolean found = matcher.find();
+        // A pseudo-match starting inside data can span a real following keyword.
+        // Resume after its start, rather than consuming that real reference too.
+        while (found && !code[matcher.start()]) found = matcher.find(matcher.start() + 1);
+        return found;
+    }
+
     private static void collectCss(String text, String owner, Map<String, byte[]> files, ArrayDeque<String> pending) {
         String css = text.replaceAll("(?s)/\\*.*?\\*/", " ");
         collect(CSS_IMPORT, css, owner, files, pending, false);
@@ -135,11 +149,11 @@ public final class WorkbenchDistValidator {
     }
 
     /** Supported Vite constant forms only; unknown dynamic imports/Worker inputs fail closed. */
-    private static void validateJavascriptReferences(String javascript, String owner, Map<String, byte[]> files, ArrayDeque<String> pending) {
+    private static void validateJavascriptReferences(String javascript, boolean[] code, String owner, Map<String, byte[]> files, ArrayDeque<String> pending) {
         var urls = JS_URL.matcher(javascript);
-        while (urls.find()) if (!VITE_URL_BASE.matcher(javascript).region(urls.end(), javascript.length()).lookingAt()) throw invalid("Build resource URL bases must be import.meta.url");
+        while (findCode(urls, code)) if (!VITE_URL_BASE.matcher(javascript).region(urls.end(), javascript.length()).lookingAt()) throw invalid("Build resource URL bases must be import.meta.url");
         var imports = JS_DYNAMIC_IMPORT.matcher(javascript);
-        while (imports.find()) {
+        while (findCode(imports, code)) {
             var literal = LITERAL.matcher(javascript).region(imports.end(), javascript.length());
             if (!literal.lookingAt()) throw invalid("Dynamic module references must use supported constant Vite paths");
             int end = afterGap(javascript, literal.end());
@@ -147,7 +161,7 @@ public final class WorkbenchDistValidator {
             reference(literal.group(2), owner, files, pending, false);
         }
         var workers = JS_WORKER.matcher(javascript);
-        while (workers.find()) {
+        while (findCode(workers, code)) {
             int start = workers.end(); var nested = NEW_URL.matcher(javascript).region(start, javascript.length());
             if (!nested.lookingAt()) throw invalid("Only the Vite nested new URL Worker form is supported");
             start = nested.end();
@@ -163,6 +177,93 @@ public final class WorkbenchDistValidator {
     }
 
     private static int afterGap(String text, int start) { var gap = JS_GAP.matcher(text).region(start, text.length()); gap.lookingAt(); return gap.end(); }
+
+    /** Locate executable starts without changing the original literal resource arguments.
+     * Template text is data, but its ${...} expressions are still inspected. */
+    private static final class JavascriptCode {
+        private final String text;
+        private final boolean[] code;
+        JavascriptCode(String text) { this.text = text; code = new boolean[text.length()]; }
+        boolean[] positions() { scan(0, false); return code; }
+        private int scan(int start, boolean expression) {
+            ArrayDeque<Boolean> braces = new ArrayDeque<>(), parentheses = new ArrayDeque<>();
+            boolean operand = true; String previous = "";
+            for (int index = start; index < text.length();) {
+                char value = text.charAt(index);
+                if (Character.isWhitespace(value)) { index++; continue; }
+                if (value == '\'' || value == '"') { index = quoted(index, value); operand = false; previous = "literal"; continue; }
+                if (value == '`') { index = template(index); operand = false; previous = "literal"; continue; }
+                if (value == '/' && index + 1 < text.length()) {
+                    char next = text.charAt(index + 1);
+                    if (next == '/') { index += 2; while (index < text.length() && text.charAt(index) != '\n' && text.charAt(index) != '\r') index++; continue; }
+                    if (next == '*') { int end = text.indexOf("*/", index + 2); if (end < 0) throw invalid("Unterminated JavaScript comment"); index = end + 2; continue; }
+                    if (operand) { index = regularExpression(index); operand = false; previous = "literal"; continue; }
+                }
+                if (Character.isJavaIdentifierStart(value) || value == '$') {
+                    int end = index + 1; while (end < text.length() && (Character.isJavaIdentifierPart(text.charAt(end)) || text.charAt(end) == '$')) end++;
+                    java.util.Arrays.fill(code, index, end, true); previous = text.substring(index, end);
+                    operand = Set.of("return", "throw", "case", "delete", "void", "typeof", "instanceof", "in", "of", "yield", "await", "new", "else", "do").contains(previous);
+                    index = end; continue;
+                }
+                if (Character.isDigit(value)) {
+                    int end = index + 1; while (end < text.length() && (Character.isLetterOrDigit(text.charAt(end)) || text.charAt(end) == '.' || text.charAt(end) == '_')) end++;
+                    java.util.Arrays.fill(code, index, end, true); index = end; operand = false; previous = "literal"; continue;
+                }
+                code[index] = true;
+                if (value == '{') {
+                    braces.push(!operand || Set.of("", ";", "{", "}", ")", "=>", "else", "do").contains(previous));
+                    operand = true;
+                } else if (value == '}') {
+                    if (braces.isEmpty() && expression) return index + 1;
+                    operand = !braces.isEmpty() && braces.pop();
+                } else if (value == '(') {
+                    parentheses.push(Set.of("if", "while", "for", "with", "switch", "catch").contains(previous)); operand = true;
+                } else if (value == ')') { operand = !parentheses.isEmpty() && parentheses.pop(); }
+                else if (value == ']') operand = false;
+                else if (value == '.' ) operand = false;
+                else if (index + 1 < text.length() && (value == '+' || value == '-') && text.charAt(index + 1) == value) {
+                    code[++index] = true; previous = "increment"; index++; continue;
+                } else if (value == '=' && index + 1 < text.length() && text.charAt(index + 1) == '>') {
+                    code[++index] = true; previous = "=>"; operand = true; index++; continue;
+                } else operand = true;
+                previous = Character.toString(value); index++;
+            }
+            if (expression) throw invalid("Unterminated JavaScript template expression");
+            return text.length();
+        }
+        private int quoted(int start, char quote) {
+            for (int index = start + 1; index < text.length(); index++) {
+                char value = text.charAt(index);
+                if (value == '\\') index++;
+                else if (value == quote) return index + 1;
+            }
+            throw invalid("Unterminated JavaScript string");
+        }
+        private int template(int start) {
+            for (int index = start + 1; index < text.length();) {
+                char value = text.charAt(index);
+                if (value == '\\') index += 2;
+                else if (value == '`') return index + 1;
+                else if (value == '$' && index + 1 < text.length() && text.charAt(index + 1) == '{') index = scan(index + 2, true);
+                else index++;
+            }
+            throw invalid("Unterminated JavaScript template");
+        }
+        private int regularExpression(int start) {
+            boolean characterClass = false;
+            for (int index = start + 1; index < text.length(); index++) {
+                char value = text.charAt(index);
+                if (value == '\\') index++;
+                else if (value == '[') characterClass = true;
+                else if (value == ']') characterClass = false;
+                else if (value == '/' && !characterClass) {
+                    index++; while (index < text.length() && Character.isJavaIdentifierPart(text.charAt(index))) index++;
+                    return index;
+                } else if (value == '\n' || value == '\r') break;
+            }
+            throw invalid("Unsupported JavaScript regular expression syntax");
+        }
+    }
 
     private static void reference(String value, String owner, Map<String, byte[]> files, ArrayDeque<String> pending, boolean dataAllowed) {
         if (dataAllowed && (value.startsWith("data:") || value.startsWith("#"))) return;

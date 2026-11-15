@@ -11,6 +11,7 @@ dependencies = ["jsonschema>=4.23,<5", "httpx>=0.28,<1", "httpcore>=1,<2"]
 
 [project.scripts]
 livecut = "livecut.cli:main"
+livecut-import-worker = "livecut.source_import:main"
 
 [project.optional-dependencies]
 ocr = [
@@ -21,6 +22,7 @@ retrieval = ["onnxruntime>=1.20,<2", "tokenizers>=0.20,<1", "numpy>=1.26,<3"]
 kafka = [
     "kafka-python>=2.3.3,<3",
 ]
+source-import = ["yt-dlp[default]==2026.10.26"]
 
 [dependency-groups]
 dev = ["pytest>=8.3,<10", "ruff>=0.9,<1"]

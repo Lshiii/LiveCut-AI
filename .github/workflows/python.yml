@@ -32,8 +32,8 @@ jobs:
       - name: Install FFmpeg
         timeout-minutes: 5
         run: bash .github/scripts/install-ffmpeg.sh
-      - name: Install locked dependencies
-        run: uv sync --locked --dev --python 3.11
+      - name: Install locked dependencies including video imports
+        run: uv sync --locked --dev --extra source-import --python 3.11
       - name: Install pinned caption font
         timeout-minutes: 3
         run: python scripts/install-caption-font.py

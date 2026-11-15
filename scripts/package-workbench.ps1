@@ -79,7 +79,14 @@ function Invoke-BundleTool([string]$Program, [string[]]$ToolArguments, [string]$
         & $command @ToolArguments *> $LogPath
         $toolExit = $LASTEXITCODE
     } finally { $ErrorActionPreference = $savedPreference }
-    if ($toolExit -ne 0) { throw ('WORKBENCH_TOOL_FAILED: see ' + $LogPath) }
+    if ($toolExit -ne 0) {
+        # Host output preserves the script's single structured success result.
+        Write-Host ('Build tool exited with code ' + $toolExit + '; last 120 log lines: ' + $LogPath)
+        if (Test-Path -LiteralPath $LogPath -PathType Leaf) {
+            Get-Content -LiteralPath $LogPath -Tail 120 | ForEach-Object { Write-Host $_ }
+        }
+        throw ('WORKBENCH_TOOL_FAILED: see ' + $LogPath)
+    }
 }
 function Assert-BundleJar([string]$Path, $Inventory) {
     Add-Type -AssemblyName System.IO.Compression

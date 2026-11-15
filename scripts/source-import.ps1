@@ -1,0 +1,39 @@
+param(
+    [string]$EnvFile = '.env.java',
+    [string]$JavaUrl = 'http://127.0.0.1:8080',
+    [string]$WorkerId = 'source-import-local',
+    [switch]$Once
+)
+$ErrorActionPreference = 'Stop'
+if ($WorkerId -notmatch '^[A-Za-z0-9_-]{1,100}$') { throw 'Invalid import worker identifier.' }
+$repoRoot = Split-Path -Parent $PSScriptRoot
+$configPath = if ([IO.Path]::IsPathRooted($EnvFile)) { $EnvFile } else { Join-Path $repoRoot $EnvFile }
+if (-not (Test-Path -LiteralPath $configPath -PathType Leaf)) { throw 'Missing private Worker configuration.' }
+$original = @{}
+try {
+    foreach ($entry in [IO.File]::ReadAllLines($configPath)) {
+        if ([string]::IsNullOrWhiteSpace($entry) -or $entry.TrimStart().StartsWith('#')) { continue }
+        if ($entry -notmatch '^(LIVECUT_[A-Z0-9_]+)=(.*)$') { throw 'Only LIVECUT_ environment entries are accepted.' }
+        $entryName, $entryValue = $Matches[1], $Matches[2]
+        if ($original.ContainsKey($entryName)) { throw 'Duplicate environment variable.' }
+        $original[$entryName] = [Environment]::GetEnvironmentVariable($entryName, 'Process')
+        [Environment]::SetEnvironmentVariable($entryName, $entryValue, 'Process')
+    }
+    $storage = if ($env:LIVECUT_STORAGE_ROOT) { $env:LIVECUT_STORAGE_ROOT } else { '../storage' }
+    if (-not [IO.Path]::IsPathRooted($storage)) { $storage = [IO.Path]::GetFullPath((Join-Path (Join-Path $repoRoot 'backend-java') $storage)) }
+    # uv run uses an inexact sync by default; do not add --exact, which would
+    # remove the analysis Worker's already installed OCR/Kafka extras.
+    # Use the installed Python interpreter directly; generated console-script
+    # executables may be blocked by Windows application control.
+    $launchArgs = @('run', '--locked', '--no-env-file', '--extra', 'source-import', 'python', '-m', 'livecut.source_import',
+        '--java-url', $JavaUrl, '--worker-id', $WorkerId, '--storage-root', $storage,
+        '--journal-dir', (Join-Path $repoRoot "data/source-import-journals/$WorkerId"))
+    if ($Once) { $launchArgs += '--once' }
+    Push-Location $repoRoot
+    try {
+        & uv @launchArgs
+        if ($LASTEXITCODE -ne 0) { throw "Import worker exited with code $LASTEXITCODE." }
+    } finally { Pop-Location }
+} finally {
+    foreach ($entryName in $original.Keys) { [Environment]::SetEnvironmentVariable($entryName, $original[$entryName], 'Process') }
+}
