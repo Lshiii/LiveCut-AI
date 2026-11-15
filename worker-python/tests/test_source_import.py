@@ -151,14 +151,14 @@ def test_metadata_refuses_playlist_or_live(info):
 
 
 def test_metadata_prefers_bounded_direct_combined_and_requires_audio():
-    rows = [{"protocol": "https", "vcodec": "avc1", "acodec": "aac", "height": h} for h in [360, 720, 1080]]
+    rows = [{"protocol": "https", "url": "https://example.org/video", "vcodec": "avc1", "acodec": "aac", "height": h} for h in [360, 720, 1080]]
     assert dl._streams({"formats": rows})[0]["height"] == 720
     with pytest.raises(dl.ImportDownloadError, match="NO_HTTPS_AUDIO_VIDEO"):
-        dl._streams({"formats": [{"protocol": "https", "vcodec": "avc1", "acodec": "none"}]})
+        dl._streams({"formats": [{"protocol": "https", "url": "https://example.org/video", "vcodec": "avc1", "acodec": "none"}]})
 
 
 def test_metadata_downgrades_to_fit_total_input_budget():
-    rows = [{"protocol": "https", "vcodec": "avc1", "acodec": "aac", "height": h, "filesize": size}
+    rows = [{"protocol": "https", "url": "https://example.org/video", "vcodec": "avc1", "acodec": "aac", "height": h, "filesize": size}
             for h, size in [(360, 100), (720, 1000)]]
     assert dl._streams({"formats": rows}, 200)[0]["height"] == 360
 

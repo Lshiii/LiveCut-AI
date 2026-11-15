@@ -136,28 +136,28 @@ def test_urllib_network_denial_reason_has_fixed_public_code():
     assert dl._failure_code(error) == "SOURCE_IMPORT_NETWORK_DENIED"
 
 
-def test_anonymous_guest_cookies_remain_in_memory_and_retry_is_finite():
+def test_known_fresh_cookie_error_enters_anonymous_adapter_once(monkeypatch):
+    from livecut import source_import_douyin as adapter
+
     calls = []
-    class Response(io.BytesIO):
-        url = "https://www.douyin.com/"
     class Ydl:
-        cookiejar = []
         def extract_info(self, url, **kwargs):
             calls.append(("metadata", url))
-            if sum(k == "metadata" for k, _ in calls) == 1:
-                raise RuntimeError("Fresh cookies (not necessarily logged in) are needed")
-            return {"id": VIDEO_ID, "extractor_key": "Douyin"}
-        def urlopen(self, request):
-            calls.append(("guest", request.url))
-            self.cookiejar = [SimpleNamespace(domain=".douyin.com", name="guest", value="fixture")]
-            return Response(b"ordinary public home page")
-    def request_type(url, **kwargs):
-        return SimpleNamespace(url=url, **kwargs)
-    assert dl._extract_douyin(Ydl(), None, VIDEO, request_type)["id"] == VIDEO_ID
-    assert [kind for kind, _ in calls] == ["metadata", "guest", "metadata"]
+            raise RuntimeError("Fresh cookies (not necessarily logged in) are needed")
+    def fallback(*args):
+        calls.append(("anonymous", args[2]))
+        return {"id": VIDEO_ID, "extractor_key": "Douyin"}
+    monkeypatch.setattr(adapter, "anonymous_metadata", fallback)
+    assert dl._extract_douyin(Ydl(), None, VIDEO, None)["id"] == VIDEO_ID
+    assert calls == [("metadata", VIDEO), ("anonymous", VIDEO_ID)]
 
 
-def test_public_html_without_metadata_returns_auth_error_without_solving_challenge():
+def test_public_html_without_metadata_returns_auth_error_without_solving_challenge(monkeypatch):
+    from livecut import source_import_douyin as adapter
+
+    def no_metadata(*args):
+        raise dl.ImportDownloadError("SOURCE_IMPORT_AUTH_REQUIRED")
+    monkeypatch.setattr(adapter, "anonymous_metadata", no_metadata)
     calls = []
     class Response(io.BytesIO):
         url = VIDEO
@@ -171,11 +171,15 @@ def test_public_html_without_metadata_returns_auth_error_without_solving_challen
             return Response(b"<script>challenge()</script>")
     with pytest.raises(dl.ImportDownloadError, match="AUTH_REQUIRED"):
         dl._extract_douyin(Ydl(), None, VIDEO, lambda url, **kwargs: SimpleNamespace(url=url, **kwargs))
-    assert calls == ["metadata", "https://www.douyin.com/",
-                     "https://www.iesdouyin.com/share/video/" + VIDEO_ID + "/"]
+    assert calls == ["metadata", "https://www.iesdouyin.com/share/video/" + VIDEO_ID + "/"]
 
 
-def test_public_ssr_parser_is_used_only_after_same_source_binding():
+def test_public_ssr_parser_is_used_only_after_same_source_binding(monkeypatch):
+    from livecut import source_import_douyin as adapter
+
+    def no_metadata(*args):
+        raise dl.ImportDownloadError("SOURCE_IMPORT_AUTH_REQUIRED")
+    monkeypatch.setattr(adapter, "anonymous_metadata", no_metadata)
     captured = []
     class Response(io.BytesIO):
         url = VIDEO

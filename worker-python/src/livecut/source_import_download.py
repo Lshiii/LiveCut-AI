@@ -18,9 +18,9 @@ from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
+from .source_import_errors import ImportDownloadError
 
-class ImportDownloadError(Exception):
-    pass
+_WINDOWS = os.name == "nt"
 
 
 def validate_url(url: str) -> str:
@@ -136,8 +136,17 @@ def _streams(info: dict, max_bytes: int | None = None) -> list[dict]:
         raise ImportDownloadError("SOURCE_IMPORT_UNSUPPORTED_SOURCE")
     if info.get("availability") not in (None, "public", "unlisted"):
         raise ImportDownloadError("SOURCE_IMPORT_AUTH_REQUIRED")
-    formats = [item for item in info.get("formats", []) if isinstance(item, dict)
-               and item.get("protocol") == "https" and not item.get("has_drm")]
+    formats, blocked = [], False
+    for item in info.get("formats", []):
+        if not isinstance(item, dict) or item.get("protocol") != "https" or item.get("has_drm"):
+            continue
+        try:
+            _https(item.get("url"))
+            formats.append(item)
+        except ImportDownloadError:
+            blocked = True
+    if not formats and blocked:
+        raise ImportDownloadError("SOURCE_IMPORT_NETWORK_DENIED")
     def video(row):
         return row.get("vcodec") not in (None, "none")
     def audio(row):
@@ -171,7 +180,84 @@ def _streams(info: dict, max_bytes: int | None = None) -> list[dict]:
 def _atomic(path: Path, value) -> None:
     temporary = path.with_suffix(".tmp")
     temporary.write_text(json.dumps(value, ensure_ascii=True), encoding="utf-8")
-    os.replace(temporary, path)
+    # Windows readers/antivirus may briefly hold an otherwise valid destination.
+    # Retry only those local sharing/access errors, never hide a permanent write
+    # failure or retry a platform request. Total extra waiting is at most 375ms.
+    for delay in (0.025, 0.05, 0.1, 0.2, None):
+        try:
+            os.replace(temporary, path)
+            return
+        except PermissionError as error:
+            transient = (_WINDOWS and (getattr(error, "winerror", None) in {5, 32, 33}
+                         or getattr(error, "winerror", None) is None and error.errno == 13))
+            if not transient or delay is None:
+                raise
+            time.sleep(delay)
+
+
+class _DownloadProgress:
+    def __init__(self, path, *, interval=0.25, clock=time.monotonic):
+        self.path, self.interval, self.clock, self.last = path, interval, clock, None
+
+    def update(self, total, *, final=False):
+        now = self.clock()
+        if final or self.last is None or now - self.last >= self.interval:
+            _atomic(self.path, {"downloaded_bytes": total})
+            self.last = now
+
+
+def _bili_https_play_info(play_info):
+    """Select an actual supplied HTTPS:443 CDN URL before yt-dlp drops backups.
+
+    The locked Bili extractor keeps only baseUrl/base_url. No hostname, port,
+    query or signature is rewritten, and there is no extra platform request.
+    """
+    if not isinstance(play_info, dict):
+        return play_info
+    result = dict(play_info)
+    def rows(items):
+        if not isinstance(items, list):
+            return items
+        converted = []
+        for item in items:
+            if not isinstance(item, dict):
+                converted.append(item)
+                continue
+            value = dict(item)
+            candidates = [item.get(key) for key in ("baseUrl", "base_url", "url")]
+            for key in ("backupUrl", "backup_url"):
+                if isinstance(item.get(key), list):
+                    candidates.extend(item[key])
+            for candidate in candidates:
+                try:
+                    selected = _https(candidate)
+                except (ImportDownloadError, ValueError):
+                    continue
+                for key in ("baseUrl", "base_url", "url"):
+                    if key in item:
+                        value[key] = selected
+                break
+            converted.append(value)
+        return converted
+    if isinstance(play_info.get("dash"), dict):
+        result["dash"] = dict(play_info["dash"])
+        for key in ("audio", "video"):
+            if key in play_info["dash"]:
+                result["dash"][key] = rows(play_info["dash"][key])
+    if "durl" in play_info:
+        result["durl"] = rows(play_info["durl"])
+    return result
+
+
+def _bili_https_extractor(base_type):
+    class HttpsBiliExtractor(base_type):
+        @classmethod
+        def ie_key(cls):
+            return "BiliBili"
+
+        def extract_formats(self, play_info):
+            return super().extract_formats(_bili_https_play_info(play_info))
+    return HttpsBiliExtractor()
 
 
 def _failure_code(error: BaseException) -> str:
@@ -343,20 +429,13 @@ def _extract_douyin(ydl, extractor, url, request_type):
             raise
         if "fresh cookies" not in str(error).lower():
             raise
-    # Anonymous HTTP Set-Cookie responses are task-local in-memory state. No
-    # browser profile/cookie file is opened and no signature/challenge is solved.
-    before = {(c.domain, c.name, c.value) for c in ydl.cookiejar}
-    with ydl.urlopen(request_type("https://www.douyin.com/", headers={"User-Agent": _DOUYIN_MOBILE_UA})) as response:
-        response.read(512 * 1024 + 1)
-    after = {(c.domain, c.name, c.value) for c in ydl.cookiejar}
-    if after != before:
-        try:
-            return ydl.extract_info(url, download=False, ie_key="Douyin")
-        except Exception as error:
-            if _failure_code(error) == "SOURCE_IMPORT_NETWORK_DENIED":
-                raise
-            if "fresh cookies" not in str(error).lower():
-                raise
+    from .source_import_douyin import anonymous_metadata
+
+    try:
+        return anonymous_metadata(ydl, extractor, video_id, request_type)
+    except ImportDownloadError as error:
+        if str(error) != "SOURCE_IMPORT_AUTH_REQUIRED":
+            raise
     share = f"https://www.iesdouyin.com/share/video/{video_id}/"
     with ydl.urlopen(request_type(share, headers={"User-Agent": _DOUYIN_MOBILE_UA})) as response:
         if _douyin_redirect_target(response.url)[1] != video_id:
@@ -390,7 +469,8 @@ def download(url: str, directory: Path, max_bytes: int, *, metadata_only=False) 
     sys.addaudithook(_no_external_execution)
     directory.mkdir(parents=True, exist_ok=True)
     with YoutubeDL(options, auto_init=False) as ydl:
-        selected = {"Youtube": YoutubeIE, "BiliBili": BiliBiliIE, "Douyin": DouyinIE}[extractor]()
+        selected = (_bili_https_extractor(BiliBiliIE) if extractor == "BiliBili"
+                    else {"Youtube": YoutubeIE, "Douyin": DouyinIE}[extractor]())
         ydl.add_info_extractor(selected)
         # Pin the only HTTP implementation: optional requests/curl/websocket
         # handlers and their native networking cannot bypass Python sockets.
@@ -412,6 +492,7 @@ def download(url: str, directory: Path, max_bytes: int, *, metadata_only=False) 
             return {"extractor": extractor, "duration_seconds": duration, "streams": len(streams)}
         total = 0
         files = []
+        progress = _DownloadProgress(directory / "download-progress.json")
         for number, stream in enumerate(streams):
             known = stream.get("filesize")
             if known is not None and (type(known) is not int or known <= 0 or total + known > max_bytes):
@@ -432,10 +513,11 @@ def download(url: str, directory: Path, max_bytes: int, *, metadata_only=False) 
                         raise ImportDownloadError("SOURCE_IMPORT_TOO_LARGE")
                     output.write(chunk)
                     total += len(chunk)
-                    _atomic(directory / "download-progress.json", {"downloaded_bytes": total})
+                    progress.update(total)
             if not target.stat().st_size:
                 raise ImportDownloadError("SOURCE_IMPORT_EMPTY_DOWNLOAD")
             files.append(target.name)
+        progress.update(total, final=True)
         return {"files": files, "downloaded_bytes": total, "duration_seconds": duration}
 
 
