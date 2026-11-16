@@ -34,6 +34,8 @@ public class AgentController {
     public AgentModels.EvidenceCapability evidenceCapability(){return new AgentModels.EvidenceCapability(true);}
     @GetMapping("/api/agent-capabilities/speech-lookup")
     public AgentModels.SpeechLookupCapability speechLookupCapability(){return new AgentModels.SpeechLookupCapability(true,2);}
+    @GetMapping("/api/agent-capabilities/text-coverage")
+    public AgentModels.TextCoverageCapability textCoverageCapability(){return new AgentModels.TextCoverageCapability(true,6);}
     @GetMapping("/api/agent-capabilities/cached-answer-replay")
     public AgentModels.CachedAnswerReplayCapability cachedAnswerReplayCapability(){return new AgentModels.CachedAnswerReplayCapability(true,3);}
     @GetMapping("/api/agent-capabilities/screen-search")

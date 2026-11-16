@@ -122,8 +122,8 @@ public class ClipRequestService {
         List<String> fallbackModels=TextExecutionPolicy.configuredFallbacks(configuredFallbackModels);
         jdbc.update("INSERT INTO clip_request (id,job_id,video_id,idempotency_key,request_hash,instruction,text_model_id,source_hash,transcript_hash,transcript_key,source_json,duration_ms,max_text_calls,text_fallback_models_json,resumed_from_request_id,source_answer_json,source_answer_hash) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             id,parent,source.video(),key,fingerprint,instruction,source.model(),source.hash(),source.transcriptHash(),source.transcriptKey(),sourceJson,source.duration(),budget,TextExecutionPolicy.serialize(fallbackModels),resumedFrom,answerJson,answerJson==null?null:sha(answerJson));
-        jdbc.update("INSERT INTO job_stage (id,job_id,owner_type,owner_id,stage_type,shard_key,status,input_hash) VALUES (?,?,'CLIP_REQUEST',?,?,?,'READY',?)",
-            stage,parent,id,answer==null?"SEGMENT":AnswerClipSource.STAGE,"clip-"+id,sha(fingerprint+"\n"+source.hash()+"\n"+source.transcriptHash()+"\n"+source.model()+"\n"+TextExecutionPolicy.serialize(fallbackModels)+(answerJson==null?"":"\n"+answerJson)));
+        jdbc.update("INSERT INTO job_stage (id,job_id,owner_type,owner_id,stage_type,shard_key,status,input_hash,required_worker_protocol) VALUES (?,?,'CLIP_REQUEST',?,?,?,'READY',?,?)",
+            stage,parent,id,answer==null?"SEGMENT":AnswerClipSource.STAGE,"clip-"+id,sha(fingerprint+"\n"+source.hash()+"\n"+source.transcriptHash()+"\n"+source.model()+"\n"+TextExecutionPolicy.serialize(fallbackModels)+(answerJson==null?"":"\n"+answerJson)),AnswerClipSource.requiredProtocol(answer));
         wakeups.ready(stage);
         return snapshot(lockOwner(id,parent));
     }
@@ -163,7 +163,7 @@ public class ClipRequestService {
     public Map<String,Object> claimConfig(StageRow stage){
         var owner=jdbc.queryForMap("SELECT * FROM clip_request WHERE id=?",stage.ownerId());Map<String,Object> clip=new TreeMap<>();
         var answer=AnswerClipSource.stored(owner);String expected=answer==null?"SEGMENT":AnswerClipSource.STAGE;
-        if(!expected.equals(stage.stageType()))throw conflict("CLIP_STAGE_UNAVAILABLE","Clipping stage does not match its frozen answer mode");
+        if(!expected.equals(stage.stageType())||stage.requiredWorkerProtocol()!=AnswerClipSource.requiredProtocol(answer))throw conflict("CLIP_STAGE_UNAVAILABLE","Clipping stage does not match its frozen answer mode and protocol");
         if(answer!=null)clip.put("answer_source",answer.source());
         clip.put("request_id",stage.ownerId());clip.put("instruction",owner.get("instruction"));clip.put("source_job_id",stage.jobId());
         clip.put("source_transcript_key",owner.get("transcript_key"));clip.put("source_transcript_hash",owner.get("transcript_hash"));

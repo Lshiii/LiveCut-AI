@@ -35,6 +35,7 @@ async function mount(active = true) {
   const sample = evidenceSample(), session = { ...sample.session, turns: [] } as videoAgent.AgentSession, calls: Array<{ path: string; init: any; stored?: string | null }> = []
   let submitted: videoAgent.AgentTurn | null = null
   const defaultHandle = async (path: string, init: any = {}): Promise<unknown> => {
+    if (path === '/api/agent-capabilities/text-coverage') throw new HttpError('HTTP_404', undefined, 404)
     if (path === '/api/agent-capabilities') return { visual_mode: 'frames', visual_model_id: 'synthetic-vl', max_frames: 32, max_clip_duration_ms: 12000, clip_sample_interval_ms: 500 }
     if (path === '/api/agent-capabilities/focus') return { visual_focus_supported: true }
     if (path === '/api/agent-capabilities/evidence') return { structured_evidence_supported: true }
@@ -54,6 +55,7 @@ async function mount(active = true) {
       else if (body.evidence_mode !== 'structured') { delete turn.evidence_mode; turn.stage.stage_type = 'AGENT_VISUAL' }
       if (body.evidence_policy === 'speech_lookup_v1') turn.evidence_policy = 'speech_lookup_v1'
       if (body.evidence_policy === 'screen_search_v1') { turn.evidence_policy = 'screen_search_v1'; turn.screen_source = { ...screenSample().turn.screen_source!, duration_ms: session.source.duration_ms, frame_count: 1, text_frame_count: 1 }; turn.stage.required_worker_protocol = 4 }
+      if (body.qa_policy === 'coverage_v1') { turn.qa_policy = 'coverage_v1'; turn.stage.required_worker_protocol = 6 }
       submitted = turn; session.turns = [turn]; return cloneEvidence(turn)
     }
     throw Error(`Unexpected ${init.method ?? 'GET'} ${path}`)
@@ -94,6 +96,63 @@ test('production Agent panel makes only active capability reads and explicitly o
     const turnPost = ui.calls.find(call => call.init.method === 'POST' && call.path.endsWith('/turns'))!; assert.ok(turnPost,hostText(ui.root)+JSON.stringify(ui.calls.map(v=>v.path)))
     assert.equal(JSON.parse(turnPost.init.body).evidence_mode, 'structured'); assert.equal(JSON.parse(turnPost.stored!).input, turnPost.init.body)
     assert.equal(ui.question().value, ''); assert.equal(ui.exposed.value.dirty, false)
+  } finally { ui.close() }
+})
+
+test('plain text preflights exact coverage capability before any write and durably sends the explicit policy without a user switch', async () => {
+  const ui = await mount()
+  try {
+    ui.setHandle(async (path, init) => path === '/api/agent-capabilities/text-coverage' ? { text_coverage_supported: true, worker_protocol: 6 } : ui.defaultHandle(path, init))
+    await ui.fill('分别说明输入输出与处理顺序'); await ui.submit(); await settle(() => !ui.exposed.value.pending)
+    const writes = ui.calls.filter(call => call.init.method === 'POST'), turnPost = writes.find(call => call.path.endsWith('/turns'))!
+    assert.ok(turnPost, hostText(ui.root)); assert.equal(JSON.parse(turnPost.init.body).qa_policy, 'coverage_v1'); assert.equal(JSON.parse(turnPost.stored!).input, turnPost.init.body)
+    assert.ok(ui.calls.findIndex(call => call.path === '/api/agent-capabilities/text-coverage') < ui.calls.indexOf(writes[0]!))
+    assert.equal(ui.question().value, ''); assert.equal(ui.session.turns[0]!.stage.required_worker_protocol, 6)
+  } finally { ui.close() }
+})
+test('only actual coverage capability404 allows legacy plain text;503 malformed200 and network errors keep a draft with no writes', async () => {
+  for (const kind of ['404', '503', 'malformed', 'network', 'code-only404']) {
+    const ui = await mount()
+    try {
+      ui.setHandle(async (path, init) => {
+        if (path === '/api/agent-capabilities/text-coverage') {
+          if (kind === 'malformed') return { text_coverage_supported: true, worker_protocol: 6, extra: true }
+          throw new HttpError(kind === 'network' ? 'NETWORK_UNAVAILABLE' : 'HTTP_404', undefined, kind === '404' ? 404 : kind === '503' ? 503 : 0)
+        }
+        return ui.defaultHandle(path, init)
+      })
+      await ui.fill('保留原问题'); await ui.submit(); await settle(() => !ui.exposed.value.pending)
+      const writes = ui.calls.filter(call => call.init.method === 'POST')
+      if (kind === '404') { const post = writes.find(call => call.path.endsWith('/turns'))!; assert.ok(post); assert.ok(!Object.hasOwn(JSON.parse(post.init.body), 'qa_policy')) }
+      else { assert.equal(writes.length, 0); assert.equal(ui.storage.length, 0); assert.equal(ui.question().value, '保留原问题'); assert.match(hostText(ui.root), /暂不能核对文本问答能力/) }
+    } finally { ui.close() }
+  }
+})
+test('late coverage capability after hiding cannot create entries and returning performs a fresh preflight', async () => {
+  const ui = await mount(), reply = deferred<unknown>()
+  try {
+    let reads = 0
+    ui.setHandle(async (path, init) => path === '/api/agent-capabilities/text-coverage' && ++reads === 1 ? reply.promise : ui.defaultHandle(path, init))
+    await ui.fill('不让迟到能力复活'); await ui.submit(); await settle(() => reads === 1)
+    ui.document.hidden = true; ui.document.dispatchEvent(new Event('visibilitychange')); reply.resolve({ text_coverage_supported: true, worker_protocol: 6 }); await settle(() => !ui.exposed.value.pending)
+    assert.equal(ui.storage.length, 0); assert.equal(ui.calls.filter(call => call.init.method === 'POST').length, 0)
+    ui.document.hidden = false; ui.document.dispatchEvent(new Event('visibilitychange')); await flushHost(); await ui.submit(); await settle(() => !ui.exposed.value.pending)
+    assert.equal(reads, 2); const post = ui.calls.find(call => call.init.method === 'POST' && call.path.endsWith('/turns'))!; assert.ok(post); assert.ok(!Object.hasOwn(JSON.parse(post.init.body), 'qa_policy'))
+  } finally { reply.resolve(null); ui.close() }
+})
+test('unknown coverage submission recovers the original policy and bytes without current capability or altering a new question', async () => {
+  const ui = await mount()
+  try {
+    ui.setHandle(async (path, init) => {
+      if (path === '/api/agent-capabilities/text-coverage') return { text_coverage_supported: true, worker_protocol: 6 }
+      const value = await ui.defaultHandle(path, init); if (init.method === 'POST' && path.endsWith('/turns')) throw new HttpError('NETWORK_UNAVAILABLE'); return value
+    })
+    await ui.fill('旧的覆盖问题'); await ui.submit(); await settle(() => !ui.exposed.value.pending)
+    const original = ui.calls.find(call => call.init.method === 'POST' && call.path.endsWith('/turns'))!; assert.equal(JSON.parse(original.init.body).qa_policy, 'coverage_v1'); assert.ok(ui.storage.length)
+    await ui.fill('现在另一个问题'); ui.setHandle(async (path, init) => { if (path.includes('/capabilities')) throw new HttpError('HTTP_503', undefined, 503); return ui.defaultHandle(path, init) })
+    const before = ui.calls.length; await ui.click('核对原提交'); await settle(() => !ui.exposed.value.pending && ui.storage.length === 0)
+    assert.equal(ui.question().value, '现在另一个问题'); assert.ok(ui.calls.slice(before).every(call => !call.init.method && !call.path.includes('/capabilities')))
+    assert.equal(ui.calls.filter(call => call.init.method === 'POST' && call.path.endsWith('/turns')).length, 1)
   } finally { ui.close() }
 })
 

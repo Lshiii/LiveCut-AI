@@ -16,6 +16,7 @@ import tools.jackson.databind.JsonNode;
 public final class AnswerClipSource {
     private AnswerClipSource() {}
     public static final String STAGE="ANCHOR_CLIP",PROMPT="anchor-clips-v1";
+    public static final String CONTEXT_PROMPT="anchor-clips-v2";
     public static final int MAX_TEXT=12000;
     private static final Set<String> FIELDS=Set.of("schema_version","turn_id","session_id","answer_hash","job_id","video_id","source_hash","transcript_hash","duration_ms","question","answer","utterance_ids","citations","context_utterance_ids");
     public record Frozen(JsonNode source,JsonNode answer) {}
@@ -45,11 +46,15 @@ public final class AnswerClipSource {
             var artifact=manifest.artifacts().stream().filter(item->item.kind().equals("agent_answer")).findFirst().orElseThrow();
             if(!answer.equals(artifacts.readJsonArtifact(artifact,identity)))throw invalid();
             if(AgentFocus.visualStage(expectedStage))AgentVisualArtifacts.verify(jdbc,artifacts,job,owner,answer,manifest,identity);
-            return new Frozen(project(answer,utterances,duration,selection.path("utterance_ids")),answer);
+            return new Frozen(project(answer,utterances,duration,selection.path("utterance_ids"),"1.1"),answer);
         }catch(JobException error){if(Set.of("INVALID_ANSWER_SOURCE","ANSWER_SOURCE_UNAVAILABLE").contains(error.getCode()))throw error;throw invalid();}
         catch(RuntimeException error){throw invalid();}
     }
     static JsonNode project(JsonNode answer,JsonNode utterances,long duration,JsonNode selected){
+        return project(answer,utterances,duration,selected,"1.0");
+    }
+    static JsonNode project(JsonNode answer,JsonNode utterances,long duration,JsonNode selected,String version){
+        if(!Set.of("1.0","1.1").contains(version))throw invalid();
         List<String> ids=ids(JSON.valueToTree(Map.of("utterance_ids",selected)),"utterance_ids");
         Map<String,Integer> order=new HashMap<>();Map<String,JsonNode> originals=new HashMap<>(),cited=new HashMap<>();
         for(JsonNode row:utterances){String id=row.path("utterance_id").asText();order.put(id,order.size());originals.put(id,row);}
@@ -60,8 +65,20 @@ public final class AnswerClipSource {
             characters+=original.path("text").asText().length();if(characters>MAX_TEXT)throw bad("Selected citation text exceeds 12000 UTF-16 units");citations.add(citation);context.add(id);
             if(index>0)neighbors.add(index-1);if(index+1<utterances.size())neighbors.add(index+1);
         }
-        for(int index:neighbors){JsonNode original=utterances.get(index);String id=original.path("utterance_id").asText();int size=original.path("text").asText().length();if(!context.contains(id)&&characters+size<=MAX_TEXT){characters+=size;context.add(id);}}
-        Map<String,Object> source=new TreeMap<>();source.put("schema_version","1.0");
+        if(version.equals("1.0")){
+            for(int index:neighbors){JsonNode original=utterances.get(index);String id=original.path("utterance_id").asText();int size=original.path("text").asText().length();if(!context.contains(id)&&characters+size<=MAX_TEXT){characters+=size;context.add(id);}}
+        }else{
+            Set<String> blocked=new HashSet<>();
+            for(int distance=1;distance<=8;distance++)for(String id:ids)for(int direction:List.of(-1,1)){
+                String side=id+"/"+direction;if(blocked.contains(side))continue;int index=order.get(id)+distance*direction;
+                if(index<0||index>=utterances.size()){blocked.add(side);continue;}
+                JsonNode original=utterances.get(index),anchor=originals.get(id);long span=direction<0?anchor.path("start_ms").asLong()-original.path("start_ms").asLong():original.path("end_ms").asLong()-anchor.path("end_ms").asLong();
+                if(span>120000){blocked.add(side);continue;}String neighbor=original.path("utterance_id").asText();if(context.contains(neighbor))continue;
+                int size=original.path("text").asText().length();if(context.size()>=72||characters+size>MAX_TEXT){blocked.add(side);continue;}
+                characters+=size;context.add(neighbor);
+            }
+        }
+        Map<String,Object> source=new TreeMap<>();source.put("schema_version",version);
         for(String key:List.of("turn_id","session_id","job_id","video_id","source_hash","transcript_hash","question","answer"))source.put(key,answer.path(key));
         source.put("answer_hash",ClipRequestService.sha(ClipRequestService.canonicalJson(answer)));source.put("duration_ms",duration);source.put("utterance_ids",ids);source.put("citations",citations);source.put("context_utterance_ids",context.stream().sorted(Comparator.comparingInt(order::get)).toList());return JSON.valueToTree(source);
     }
@@ -70,18 +87,19 @@ public final class AnswerClipSource {
         if(raw==null){if(hash!=null||frozen.has("answer_result"))throw invalid();return null;}
         try{
             JsonNode source=JSON.readTree(String.valueOf(raw)),answer=frozen.path("answer_result");fields(source,FIELDS);
-            if(!ClipRequestService.sha(ClipRequestService.canonicalJson(source)).equals(hash)||!source.path("schema_version").asText().equals("1.0"))throw invalid();
+            if(!ClipRequestService.sha(ClipRequestService.canonicalJson(source)).equals(hash)||!Set.of("1.0","1.1").contains(source.path("schema_version").asText()))throw invalid();
             ClipRequestService.uuid(text(source,"turn_id",36));ClipRequestService.uuid(text(source,"session_id",36));
             for(String key:List.of("job_id","video_id","source_hash","transcript_hash"))if(!source.path(key).asText().equals(String.valueOf(owner.get(key))))throw invalid();
             long duration=((Number)owner.get("duration_ms")).longValue();if(number(source,"duration_ms")!=duration)throw invalid();
             Map<String,Object> frame=new HashMap<>(owner);frame.put("id",source.path("turn_id").asText());frame.put("session_id",source.path("session_id").asText());frame.put("question",source.path("question").asText());frame.put("text_model_id",answer.path("provenance").path("text_model_id").asText());
+            if(answer.path("provenance").path("prompt_version").asText().equals("video-agent-coverage-v1"))frame.put("qa_policy","coverage_v1");else frame.remove("qa_policy");
             frame.put("visual_mode",Set.of("1.1","1.2","1.3","1.4","1.5").contains(answer.path("schema_version").asText())?"frames":"none");
             if(Set.of("1.3","1.4","1.5").contains(answer.path("schema_version").asText()))frame.put("evidence_mode","structured");else frame.remove("evidence_mode");
             if(answer.path("schema_version").asText().equals("1.4"))frame.put("evidence_policy",AgentSpeechLookup.POLICY);else frame.remove("evidence_policy");
             if(answer.path("schema_version").asText().equals("1.2")||Set.of("1.3","1.4","1.5").contains(answer.path("schema_version").asText())&&answer.has("focus_timestamp_ms")){
                 JsonNode focus=answer.path("focus_timestamp_ms");if(!focus.isIntegralNumber()||!focus.canConvertToLong())throw invalid();frame.put("focus_timestamp_ms",focus.longValue());
             }else frame.remove("focus_timestamp_ms");
-            if(answer.path("schema_version").asText().equals("1.5"))io.livecut.agent.AgentScreenSearchAnswerValidator.validateFrozenAnswer(answer,frame);else AgentAnswerValidator.validate(answer,frame);if(!answer.path("answer_scope").asText().equals("VIDEO")||!ClipRequestService.canonicalJson(project(answer,frozen.path("utterances"),duration,source.path("utterance_ids"))).equals(ClipRequestService.canonicalJson(source)))throw invalid();
+            if(answer.path("schema_version").asText().equals("1.5"))io.livecut.agent.AgentScreenSearchAnswerValidator.validateFrozenAnswer(answer,frame);else AgentAnswerValidator.validate(answer,frame);if(!answer.path("answer_scope").asText().equals("VIDEO")||!ClipRequestService.canonicalJson(project(answer,frozen.path("utterances"),duration,source.path("utterance_ids"),source.path("schema_version").asText())).equals(ClipRequestService.canonicalJson(source)))throw invalid();
             return new Frozen(source,answer);
         }catch(RuntimeException error){throw invalid();}
     }
@@ -104,8 +122,10 @@ public final class AnswerClipSource {
         List<JsonNode> selected=new ArrayList<>();List<Map<String,String>> ranges=new ArrayList<>();int previous=-2;String first=null,last=null;
         for(JsonNode id:source.path("context_utterance_ids")){String key=id.asText();int index=order.get(key);selected.add(byId.get(key));if(index!=previous+1){if(first!=null)ranges.add(Map.of("start_utterance_id",first,"end_utterance_id",last));first=key;}last=key;previous=index;}
         if(first!=null)ranges.add(Map.of("start_utterance_id",first,"end_utterance_id",last));
-        return ClipRequestService.sha(ClipRequestService.canonicalJson(JSON.valueToTree(Map.of("version","answer-anchor-context-v1","source_hash",owner.get("source_hash"),"transcript_hash",owner.get("transcript_hash"),"answer_hash",source.path("answer_hash").asText(),"retrieval_mode","anchor_context","pinned_utterance_ids",source.path("utterance_ids"),"utterances",selected,"context_ranges",ranges))));
+        return ClipRequestService.sha(ClipRequestService.canonicalJson(JSON.valueToTree(Map.of("version",source.path("schema_version").asText().equals("1.1")?"answer-anchor-context-v2":"answer-anchor-context-v1","source_hash",owner.get("source_hash"),"transcript_hash",owner.get("transcript_hash"),"answer_hash",source.path("answer_hash").asText(),"retrieval_mode","anchor_context","pinned_utterance_ids",source.path("utterance_ids"),"utterances",selected,"context_ranges",ranges))));
     }
+    public static String prompt(JsonNode source){return source.path("schema_version").asText().equals("1.1")?CONTEXT_PROMPT:PROMPT;}
+    public static int requiredProtocol(Frozen source){return source!=null&&source.source().path("schema_version").asText().equals("1.1")?5:1;}
     private static List<String> ids(JsonNode value,String key){JsonNode list=value.path(key);if(!list.isArray()||list.isEmpty()||list.size()>24)throw bad("Select 1..24 original citations");Set<String> unique=new HashSet<>();List<String> result=new ArrayList<>();for(JsonNode id:list){if(!id.isString()||!id.asText().matches("[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}")||!unique.add(id.asText()))throw bad("Invalid or repeated citation ID");result.add(id.asText());}return result;}
     private static JobException bad(String message){return new JobException(HttpStatus.BAD_REQUEST,"INVALID_ANSWER_SOURCE",message);}
     private static JobException invalid(){return new JobException(HttpStatus.CONFLICT,"ANSWER_SOURCE_INVALID","Frozen answer evidence failed provenance validation");}

@@ -16,7 +16,7 @@ export interface AgentResult {
   schema_version: '1.0' | '1.1' | '1.2' | '1.3' | '1.4' | '1.5'; session_id: string; turn_id: string; job_id: string; video_id: string
   source_hash: string; transcript_hash: string; question: string; answer: string
   answer_scope: 'VIDEO' | 'GENERAL' | 'INSUFFICIENT'; citations: AgentCitation[]; tool_calls: AgentToolCall[]
-  provenance: { text_model_id: string; prompt_version: 'video-agent-v1' | 'video-agent-visual-v1' | 'video-agent-visual-focus-v1' | 'video-agent-evidence-v1' | 'video-agent-evidence-speech-v1' | 'video-agent-evidence-screen-v1'; retrieval_mode: 'none' | 'bm25' | 'bm25_dense_rrf' }
+  provenance: { text_model_id: string; prompt_version: 'video-agent-v1' | 'video-agent-coverage-v1' | 'video-agent-visual-v1' | 'video-agent-visual-focus-v1' | 'video-agent-evidence-v1' | 'video-agent-evidence-speech-v1' | 'video-agent-evidence-screen-v1'; retrieval_mode: 'none' | 'bm25' | 'bm25_dense_rrf' }
   suggested_clip_instruction: string | null
   visual_evidence?: AgentVisualFrame[]; visual_citations?: AgentVisualCitation[]
   focus_timestamp_ms?: number
@@ -30,10 +30,11 @@ export interface AgentTurn {
   visual_mode?: 'none' | 'frames'
   evidence_mode?: 'structured'
   evidence_policy?: 'speech_lookup_v1' | 'screen_search_v1'
+  qa_policy?: 'coverage_v1'
   screen_source?: AgentScreenSource
   focus_timestamp_ms?: number
   replay_source_turn_id?: string; replay_snapshot_hash?: string
-  stage: { id: string; stage_type: 'SEGMENT' | 'AGENT_VISUAL' | 'AGENT_VISUAL_FOCUS' | 'AGENT_EVIDENCE'; status: string; attempt: number; error_code: string | null; diagnostic?: StageDiagnostic; text_progress?: TextProgress; required_worker_protocol?: 3 | 4 }
+  stage: { id: string; stage_type: 'SEGMENT' | 'AGENT_VISUAL' | 'AGENT_VISUAL_FOCUS' | 'AGENT_EVIDENCE'; status: string; attempt: number; error_code: string | null; diagnostic?: StageDiagnostic; text_progress?: TextProgress; required_worker_protocol?: 3 | 4 | 6 }
   result: AgentResult | null
 }
 export interface AgentSession { id: string; job_id: string; video_id: string; created_at: string; source: AgentSource; turns: AgentTurn[] }
@@ -55,6 +56,10 @@ function date(v: unknown) { return typeof v === 'string' && Number.isFinite(Date
 function invalid(): never { throw new AgentResponseError() }
 function fields(value: Row, expected: string[]) { return Object.keys(value).length === expected.length && expected.every(key => Object.hasOwn(value, key)) }
 export function agentTurnActive(turn: Pick<AgentTurn, 'status'>) { return turn.status === 'QUEUED' || turn.status === 'RUNNING' }
+export function parseAgentTextCoverageCapability(raw: unknown): true {
+  if (!row(raw) || !fields(raw, ['text_coverage_supported', 'worker_protocol']) || raw.text_coverage_supported !== true || raw.worker_protocol !== 6) invalid()
+  return true
+}
 
 function tool(raw: unknown, index: number, visual: boolean, duration: number, focus: boolean): AgentToolCall {
   if (!row(raw) || raw.step !== index + 1 || !row(raw.arguments) || !Array.isArray(raw.result_utterance_ids)
@@ -137,12 +142,14 @@ function result(raw: unknown, turn: AgentTurn, session: AgentSessionIdentity, ev
     || raw.transcript_hash !== session.source.transcript_hash || raw.question !== turn.question || !text(raw.answer, 6000)
     || !['VIDEO', 'GENERAL', 'INSUFFICIENT'].includes(raw.answer_scope as string)
     || !Array.isArray(raw.citations) || raw.citations.length > 24 || !Array.isArray(raw.tool_calls) || raw.tool_calls.length > 4
-    || !row(raw.provenance) || !text(raw.provenance.text_model_id, 128) || raw.provenance.prompt_version !== (focus ? 'video-agent-visual-focus-v1' : visual ? 'video-agent-visual-v1' : 'video-agent-v1')
+    || !row(raw.provenance) || !text(raw.provenance.text_model_id, 128) || raw.provenance.prompt_version !== (focus ? 'video-agent-visual-focus-v1' : visual ? 'video-agent-visual-v1' : turn.qa_policy === 'coverage_v1' ? 'video-agent-coverage-v1' : 'video-agent-v1')
     || !['none', 'bm25', 'bm25_dense_rrf'].includes(raw.provenance.retrieval_mode as string)
     || !(raw.suggested_clip_instruction === null || text(raw.suggested_clip_instruction, 2000))) invalid()
   if (visual && (!fields(raw, ['schema_version', 'session_id', 'turn_id', 'job_id', 'video_id', 'source_hash', 'transcript_hash', 'question', 'answer', 'answer_scope', 'citations', 'tool_calls', 'provenance', 'suggested_clip_instruction', 'visual_evidence', 'visual_citations', ...(focus ? ['focus_timestamp_ms'] : [])])
     || !fields(raw.provenance, ['text_model_id', 'prompt_version', 'retrieval_mode']) || !identifier(raw.provenance.text_model_id))) invalid()
   if (!visual && (Object.hasOwn(raw, 'visual_evidence') || Object.hasOwn(raw, 'visual_citations'))) invalid()
+  if (turn.qa_policy === 'coverage_v1' && (!fields(raw, ['schema_version', 'session_id', 'turn_id', 'job_id', 'video_id', 'source_hash', 'transcript_hash', 'question', 'answer', 'answer_scope', 'citations', 'tool_calls', 'provenance', 'suggested_clip_instruction'])
+    || !fields(raw.provenance, ['text_model_id', 'prompt_version', 'retrieval_mode']))) invalid()
   if (focus ? raw.focus_timestamp_ms !== turn.focus_timestamp_ms : Object.hasOwn(raw, 'focus_timestamp_ms')) invalid()
   const calls = raw.tool_calls.map((value, index) => tool(value, index, visual, session.source.duration_ms, focus)), ids = new Set<string>(); let previous = 0
   const citations = raw.citations.map(value => {
@@ -188,6 +195,7 @@ function result(raw: unknown, turn: AgentTurn, session: AgentSessionIdentity, ev
   if (raw.answer_scope === 'VIDEO' && !citations.length && !visualCitations.length) invalid()
   const search = calls.some(call => call.tool_name === 'search_transcript')
   if (search === (raw.provenance.retrieval_mode === 'none')) invalid()
+  if (turn.qa_policy === 'coverage_v1' && citations.some(citation => !calls.some(call => call.result_utterance_ids.includes(citation.utterance_id)))) invalid()
   return { ...raw, tool_calls: calls, citations, ...(visual ? { visual_evidence: frames, visual_citations: visualCitations } : {}) } as unknown as AgentResult
 }
 export function parseAgentTurn(raw: unknown, session: AgentSessionIdentity, turnId?: string): AgentTurn {
@@ -201,6 +209,7 @@ export function parseAgentTurn(raw: unknown, session: AgentSessionIdentity, turn
     || Object.hasOwn(raw, 'evidence_mode') && (raw.evidence_mode !== 'structured' || raw.visual_mode !== 'frames')
     || Object.hasOwn(raw, 'evidence_policy') && (!['speech_lookup_v1', 'screen_search_v1'].includes(String(raw.evidence_policy)) || raw.visual_mode !== 'frames' || raw.evidence_mode !== 'structured' || !evidenceTextValid(raw.question, 2000))
     || Object.hasOwn(raw, 'focus_timestamp_ms') && (raw.visual_mode !== 'frames' || !integer(raw.focus_timestamp_ms, 0, session.source.duration_ms - 1))
+    || Object.hasOwn(raw, 'qa_policy') && (raw.qa_policy !== 'coverage_v1' || raw.visual_mode === 'frames' || Object.hasOwn(raw, 'focus_timestamp_ms') || Object.hasOwn(raw, 'evidence_mode') || Object.hasOwn(raw, 'evidence_policy') || replay)
     || !row(raw.stage) || !uuid(raw.stage.id) || raw.stage.stage_type !== (raw.evidence_mode === 'structured' ? 'AGENT_EVIDENCE' : Object.hasOwn(raw, 'focus_timestamp_ms') ? 'AGENT_VISUAL_FOCUS' : raw.visual_mode === 'frames' ? 'AGENT_VISUAL' : 'SEGMENT') || !STAGES.has(raw.stage.status as string)
     || !integer(raw.stage.attempt) || !(raw.stage.error_code === null || (typeof raw.stage.error_code === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(raw.stage.error_code)))) invalid()
   if (replay && (!uuid(raw.replay_source_turn_id) || raw.replay_source_turn_id === raw.id || !hash(raw.replay_snapshot_hash)
@@ -208,6 +217,8 @@ export function parseAgentTurn(raw: unknown, session: AgentSessionIdentity, turn
   if (raw.evidence_policy === 'screen_search_v1') {
     if (replay || raw.stage.required_worker_protocol !== 4) invalid()
     try { parseAgentScreenSource(raw.screen_source, session.source.duration_ms) } catch { invalid() }
+  } else if (raw.qa_policy === 'coverage_v1') {
+    if (raw.stage.required_worker_protocol !== 6 || Object.hasOwn(raw, 'screen_source')) invalid()
   } else if (Object.hasOwn(raw, 'screen_source') || !replay && Object.hasOwn(raw.stage, 'required_worker_protocol')) invalid()
   const { diagnostic: rawDiagnostic, text_progress: rawProgress, ...stage } = raw.stage
   const diagnostic = parseDiagnostic(rawDiagnostic, raw.stage.attempt, raw.stage.error_code)
@@ -246,7 +257,7 @@ export function newestAgentTurn(known: AgentTurn | undefined, incoming: AgentTur
   if (known.id !== incoming.id || known.session_id !== incoming.session_id || known.job_id !== incoming.job_id
     || known.sequence !== incoming.sequence || known.question !== incoming.question || known.created_at !== incoming.created_at
     || known.stage.id !== incoming.stage.id || known.stage.stage_type !== incoming.stage.stage_type || known.focus_timestamp_ms !== incoming.focus_timestamp_ms
-    || known.replay_source_turn_id !== incoming.replay_source_turn_id || known.replay_snapshot_hash !== incoming.replay_snapshot_hash || known.stage.required_worker_protocol !== incoming.stage.required_worker_protocol
+    || known.replay_source_turn_id !== incoming.replay_source_turn_id || known.replay_snapshot_hash !== incoming.replay_snapshot_hash || known.stage.required_worker_protocol !== incoming.stage.required_worker_protocol || known.qa_policy !== incoming.qa_policy
     || (known.visual_mode ?? 'none') !== (incoming.visual_mode ?? 'none') || known.budget.max_text_calls !== incoming.budget.max_text_calls) invalid()
   if (known.evidence_mode !== incoming.evidence_mode || known.evidence_policy !== incoming.evidence_policy || !sameAgentScreenSource(known.screen_source, incoming.screen_source)) invalid()
   if (incoming.state_version < known.state_version || (!agentTurnActive(known) && incoming.status !== known.status)

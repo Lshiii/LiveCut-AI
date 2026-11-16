@@ -224,11 +224,11 @@ def validate_clip_plan(plan: dict, utterances: list[dict], *, expected: dict | N
         provenance = plan["provenance"]
         if (not isinstance(provenance, dict) or set(provenance) != {"text_model_id", "prompt_version", "retrieval_mode", "index_hash"}
                 or not isinstance(provenance["text_model_id"], str) or not _ID.fullmatch(provenance["text_model_id"])
-                or provenance["prompt_version"] not in {PROMPT_VERSION, "anchor-clips-v1"}
-                or provenance["retrieval_mode"] not in ({"anchor_context"} if provenance["prompt_version"] == "anchor-clips-v1" else {"bm25", "bm25_dense_rrf"})
+                or provenance["prompt_version"] not in {PROMPT_VERSION, "anchor-clips-v1", "anchor-clips-v2"}
+                or provenance["retrieval_mode"] not in ({"anchor_context"} if provenance["prompt_version"] in {"anchor-clips-v1", "anchor-clips-v2"} else {"bm25", "bm25_dense_rrf"})
                 or not isinstance(provenance["index_hash"], str) or not _HASH.fullmatch(provenance["index_hash"])):
             raise _InvalidOutput("PROVENANCE")
-        if provenance["prompt_version"] == "anchor-clips-v1":
+        if provenance["prompt_version"] in {"anchor-clips-v1", "anchor-clips-v2"}:
             if answer_source is None:
                 raise _InvalidOutput("ANCHOR_SOURCE_REQUIRED")
             from .anchor_clip import validate_anchor_outputs

@@ -50,6 +50,55 @@ class AgentIntegrationTests {
     @AfterEach void cleanup(){for(String id:ownJobs)jdbc.update("DELETE FROM analysis_job WHERE id=?",id);for(String id:ownVideos)jdbc.update("DELETE FROM video_asset WHERE id=?",id);for(String id:ownWorkers)jdbc.update("DELETE FROM worker_instance WHERE worker_id=?",id);ownJobs.clear();ownVideos.clear();ownWorkers.clear();}
     @AfterAll void stop(){if(app!=null)app.close();}
 
+    @Test void textCoverageKeepsLegacySubmissionIdentityAndRequiresProtocolSix()throws Exception{
+        var f=fixture();var session=session(f);String key="coverage-legacy-"+UUID.randomUUID();
+        var oldBody=JSON.valueToTree(Map.of("question","比较两种缓存策略的输入输出与原因","max_text_calls",8));
+        var old=agents.createTurn(session.id(),oldBody,key);assertNull(old.qaPolicy());assertFalse(JSON.valueToTree(old).has("qa_policy"));
+        agents.cancel(old.id());assertEquals(old.id(),agents.createTurn(session.id(),oldBody,key).id());
+        var body=oldBody.deepCopy();((ObjectNode)body).put("qa_policy",AgentTextCoverage.POLICY);
+        assertEquals("IDEMPOTENCY_CONFLICT",failure(()->agents.createTurn(session.id(),body,key)));
+        var turn=agents.createTurn(session.id(),body,"coverage-new-"+UUID.randomUUID());
+        assertEquals(AgentTextCoverage.POLICY,turn.qaPolicy());assertEquals(6,turn.stage().requiredWorkerProtocol());
+        assertTrue(jobs.ready("SEGMENT",100,f.job()).stream().noneMatch(s->s.id().equals(turn.stage().id())));
+        assertEquals("{\"text_coverage_supported\":true,\"worker_protocol\":6}",new String(send("GET","/api/agent-capabilities/text-coverage",null,null).body(),StandardCharsets.UTF_8));
+        String oldWorker="coverage-old-"+UUID.randomUUID(),oldSession=UUID.randomUUID().toString();ownWorkers.add(oldWorker);
+        app.getBean(WorkerCapacityService.class).register(new WorkerModels.Registration(oldWorker,oldSession,List.of("SEGMENT"),1,f.job(),List.of(1)));
+        assertThrows(VideoApiException.class,()->jobs.claim(new ClaimRequest(turn.stage().id(),oldWorker,UUID.randomUUID().toString(),f.job(),oldSession)));
+        assertEquals(0,agents.getTurn(turn.id()).stage().attempt());
+        var lease=claimCoverage(turn);assertEquals(6,lease.requiredWorkerProtocol());
+        assertEquals(AgentTextCoverage.POLICY,((Map<?,?>)lease.config().get("agent_turn")).get("qa_policy"));
+        assertEquals("SEGMENT",lease.stageType());assertEquals(0,jobs.get(f.job()).budget().textCallsReserved());
+    }
+    @Test void textCoveragePublishesOnlyItsBoundPromptAndRetainsExactLookup()throws Exception{
+        var f=fixture();var session=session(f);String key="coverage-publish-"+UUID.randomUUID();
+        var body=JSON.valueToTree(Map.of("question","分别说明策略的定义和限制","max_text_calls",2,"qa_policy",AgentTextCoverage.POLICY));
+        var turn=agents.createTurn(session.id(),body,key);var lease=claimCoverage(turn);
+        var legacy=publish(f,turn,lease,null);assertEquals("INVALID_AGENT_ANSWER",failure(()->jobs.complete(lease.stageId(),legacy)));
+        var completion=publish(f,turn,lease,a->((ObjectNode)a.path("provenance")).put("prompt_version",AgentTextCoverage.PROMPT));
+        jobs.complete(lease.stageId(),completion);var done=agents.getTurn(turn.id());assertEquals("SUCCEEDED",done.status());
+        assertEquals("1.0",done.result().path("schema_version").asText());assertEquals(AgentTextCoverage.PROMPT,done.result().path("provenance").path("prompt_version").asText());
+        assertEquals(turn.id(),agents.findTurnSubmission(session.id(),key).id());assertEquals(turn.id(),agents.createTurn(session.id(),body,key).id());
+        assertEquals(200,send("GET","/api/agent-turns/"+turn.id()+"/note",null,null).statusCode());
+        jdbc.update("UPDATE job_stage SET required_worker_protocol=1 WHERE id=?",turn.stage().id());
+        assertEquals("AGENT_STAGE_UNAVAILABLE",failure(()->agents.getTurn(turn.id())));
+        jdbc.update("UPDATE job_stage SET required_worker_protocol=6 WHERE id=?",turn.stage().id());
+        jdbc.update("UPDATE agent_turn SET request_hash=? WHERE id=?","f".repeat(64),turn.id());
+        assertEquals("AGENT_SUBMISSION_INVALID",failure(()->agents.findTurnSubmission(session.id(),key)));
+    }
+    @Test void textCoverageRejectsUnknownOrVisualPolicyCombinations()throws Exception{
+        var f=fixture();var session=session(f);
+        for(String policy:List.of("none","unknown",""))assertEquals("INVALID_AGENT_TURN",failure(()->agents.createTurn(session.id(),JSON.valueToTree(Map.of("question","问题","qa_policy",policy)),UUID.randomUUID().toString())));
+        for(String field:List.of("visual_mode","evidence_mode","evidence_policy")){
+            var body=JSON.createObjectNode().put("question","问题").put("qa_policy",AgentTextCoverage.POLICY).put("visual_mode","frames");
+            if(field.equals("evidence_mode"))body.put(field,"structured");if(field.equals("evidence_policy"))body.put("evidence_mode","structured").put(field,AgentSpeechLookup.POLICY);
+            assertEquals("INVALID_AGENT_TURN",failure(()->agents.createTurn(session.id(),body,UUID.randomUUID().toString())));
+        }
+    }
+    private ClaimResult claimCoverage(AgentModels.Turn turn){
+        String worker="coverage-synthetic-"+UUID.randomUUID(),session=UUID.randomUUID().toString();ownWorkers.add(worker);
+        app.getBean(WorkerCapacityService.class).register(new WorkerModels.Registration(worker,session,List.of("SEGMENT"),1,turn.jobId(),List.of(6)));
+        return jobs.claim(new ClaimRequest(turn.stage().id(),worker,UUID.randomUUID().toString(),turn.jobId(),session));
+    }
     @Test void structuredModeHasItsOwnCapabilityWhileNoneKeepsLegacyWireAndFingerprints()throws Exception{
         var f=fixture();configureVisual();var session=session(f);String before=scopedState(f.job());
         var capability=send("GET","/api/agent-capabilities/evidence",null,null);assertEquals(200,capability.statusCode());assertEquals(JSON.readTree("{\"structured_evidence_supported\":true}"),JSON.readTree(capability.body()));assertEquals(before,scopedState(f.job()));

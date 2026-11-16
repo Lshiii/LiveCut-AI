@@ -36,7 +36,7 @@
       "required": ["text_model_id", "prompt_version", "retrieval_mode"],
       "properties": {
         "text_model_id": {"$ref": "#/$defs/id"},
-        "prompt_version": {"const": "video-agent-v1"},
+        "prompt_version": {"enum": ["video-agent-v1", "video-agent-coverage-v1"]},
         "retrieval_mode": {"enum": ["none", "bm25", "bm25_dense_rrf"]}
       }
     }

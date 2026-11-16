@@ -386,6 +386,60 @@ def _publish(
         raise MediaError("OUTPUT_WRITE_FAILED", f"Cannot publish completed output: {exc}") from exc
 
 
+def _declared_audio_duration_ms(
+    source: Path, *, ffprobe_path: str | Path, timeout_seconds: float,
+    guard: Callable[[], None] | None,
+) -> int:
+    # Only needed for an audio tail shorter than the container. Keep this private:
+    # adding probe fields to MediaInfo would change published media-info hashes.
+    result = _run_process(
+        [str(ffprobe_path), "-v", "error", "-select_streams", "a:0",
+         "-show_entries", "stream=duration", "-of", "json", str(source)],
+        timeout_seconds=timeout_seconds, failure_code="PROBE_FAILED", guard=guard,
+    )
+    try:
+        streams = json.loads(result.stdout)["streams"]
+        if not isinstance(streams, list) or len(streams) != 1:
+            raise ValueError
+        return _duration_ms(streams[0]["duration"])
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError, MediaError) as exc:
+        raise MediaError(
+            "OUTPUT_VALIDATION_FAILED", "Cannot verify the source audio stream duration",
+        ) from exc
+
+
+def _pad_audio_tail(
+    audio_path: Path, expected_ms: int, *, guard: Callable[[], None] | None,
+) -> int:
+    """Append silence to a verified PCM WAV, without changing decoded samples."""
+    padded = _temporary_output(audio_path)
+    try:
+        with wave.open(str(audio_path), "rb") as source, wave.open(str(padded), "wb") as output:
+            output.setparams(source.getparams())
+            expected_frames = expected_ms * 16  # The extraction profile is exactly 16kHz.
+            remaining = source.getnframes()
+            while remaining:
+                if guard is not None:
+                    guard()
+                frames = source.readframes(min(remaining, 16384))
+                if not frames or len(frames) % 2:
+                    raise MediaError("OUTPUT_VALIDATION_FAILED", "Extracted WAV samples are truncated")
+                output.writeframesraw(frames)
+                remaining -= len(frames) // 2
+            silence_frames = expected_frames - source.getnframes()
+            if not 0 < silence_frames <= 32000:
+                raise MediaError("OUTPUT_VALIDATION_FAILED", "Audio tail exceeds the two-second limit")
+            if guard is not None:
+                guard()
+            output.writeframesraw(b"\x00\x00" * silence_frames)
+        # Both WAV handles must close before atomic replacement on Windows.
+        _publish(padded, audio_path, guard=guard)
+        with wave.open(str(audio_path), "rb") as completed:
+            return round(completed.getnframes() * 1000 / completed.getframerate())
+    finally:
+        padded.unlink(missing_ok=True)
+
+
 def extract_audio(
     source: str | Path,
     output: str | Path,
@@ -416,6 +470,22 @@ def extract_audio(
                 if (audio.getnchannels(), audio.getframerate(), audio.getsampwidth()) != (1, 16000, 2):
                     raise MediaError("OUTPUT_VALIDATION_FAILED", "Extracted audio is not 16kHz mono PCM16")
                 actual_ms = round(audio.getnframes() * 1000 / audio.getframerate())
+            try:
+                _check_duration(actual_ms, info.duration_ms)
+            except MediaError:
+                # A valid MP4 can end in video-only frames. Never conceal decode
+                # truncation: verify against the declared audio duration first,
+                # and only repair a known trailing gap bounded to two seconds.
+                if not 0 < info.duration_ms - actual_ms <= 2000:
+                    raise
+                declared_ms = _declared_audio_duration_ms(
+                    info.path, ffprobe_path=ffprobe_path,
+                    timeout_seconds=timeout_seconds, guard=guard,
+                )
+                if not 0 < info.duration_ms - declared_ms <= 2000:
+                    raise MediaError("OUTPUT_VALIDATION_FAILED", "Source audio tail is not safely bounded")
+                _check_duration(actual_ms, declared_ms)
+                actual_ms = _pad_audio_tail(temporary, info.duration_ms, guard=guard)
                 _check_duration(actual_ms, info.duration_ms)
         except (wave.Error, EOFError, OSError) as exc:
             raise MediaError("OUTPUT_VALIDATION_FAILED", "Extracted audio is missing or invalid WAV") from exc

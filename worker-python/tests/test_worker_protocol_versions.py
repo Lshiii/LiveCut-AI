@@ -2,7 +2,7 @@
 import copy
 import json
 import threading
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from uuid import uuid4
 
 import httpx
@@ -11,6 +11,66 @@ from livecut.worker import Lease, WorkerError
 from livecut.worker_client import WorkerClient, WorkerClientError
 from test_worker import claim
 from test_worker_presence import PresenceClient, worker
+
+
+@pytest.mark.parametrize("new_protocols", [(), (5,), (6,), (5, 6)])
+def test_context_bootstrap_advertises_only_exact_supported_versions(new_protocols):
+    paths = []
+    def receive(request):
+        paths.append(request.url.path)
+        routes = {"/api/agent-capabilities/speech-lookup": ("speech_lookup_supported", 2),
+                  "/api/clip-capabilities/anchor-context": ("anchor_context_supported", 5),
+                  "/api/agent-capabilities/text-coverage": ("text_coverage_supported", 6)}
+        entry = routes.get(request.url.path)
+        if entry and entry[1] in (2, *new_protocols):
+            return httpx.Response(200, json={entry[0]: True, "worker_protocol": entry[1]})
+        return httpx.Response(404)
+    with closing(WorkerClient("http://localhost", "synthetic-key", transport=httpx.MockTransport(receive))) as client:
+        assert client.worker_protocol_versions() == (1, 2, *new_protocols)
+    assert "/api/clip-capabilities/anchor-context" in paths
+
+
+@pytest.mark.parametrize("status,body", [(503, {}), (200, {"anchor_context_supported": False, "worker_protocol": 5}),
+    (200, {"anchor_context_supported": True, "worker_protocol": True}),
+    (200, {"anchor_context_supported": True, "worker_protocol": 6}),
+    (200, {"anchor_context_supported": True, "worker_protocol": 5, "extra": 1})])
+def test_context_capability_failures_do_not_downgrade_or_advertise_version(status, body):
+    def receive(request):
+        if request.url.path.endswith("speech-lookup"):
+            return httpx.Response(200, json={"speech_lookup_supported": True, "worker_protocol": 2})
+        return httpx.Response(status, json=body) if request.url.path.endswith("anchor-context") else httpx.Response(404)
+    with closing(WorkerClient("http://localhost", "synthetic-key", transport=httpx.MockTransport(receive))) as client:
+        with pytest.raises(WorkerClientError):
+            client.worker_protocol_versions()
+
+
+@pytest.mark.parametrize("stage", ["ANCHOR_CLIP", "SEGMENT"])
+def test_context_only_worker_sessions_negotiate_new_versions(tmp_path, stage):
+    client = ProtocolClient()
+    client.worker_protocol_versions = lambda: (1, 2, 5, 6)
+    runner = worker(tmp_path, client, [])
+    with runner._registered(stage) as registered:
+        assert registered and runner._protocol_versions == (1, 2, 5, 6)
+    assert client.registrations[-1][3]["supported_protocol_versions"] == [1, 2, 5, 6]
+
+
+@pytest.mark.parametrize("protocol,stage,config,accepted", [
+    (5, "ANCHOR_CLIP", {"clip_request": {"answer_source": {"schema_version": "1.1"}}}, True),
+    (1, "ANCHOR_CLIP", {"clip_request": {"answer_source": {"schema_version": "1.1"}}}, False),
+    (5, "ANCHOR_CLIP", {"clip_request": {"answer_source": {"schema_version": "1.0"}}}, False),
+    (5, "SEGMENT", {"clip_request": {"answer_source": {"schema_version": "1.1"}}}, False),
+    (6, "SEGMENT", {"agent_turn": {"qa_policy": "coverage_v1"}}, True),
+    (1, "SEGMENT", {"agent_turn": {"qa_policy": "coverage_v1"}}, False),
+    (6, "SEGMENT", {"agent_turn": {"qa_policy": "coverage_v1", "visual_mode": "frames"}}, False),
+    (6, "AGENT_EVIDENCE", {"agent_turn": {"qa_policy": "coverage_v1"}}, False),
+])
+def test_context_protocols_are_bound_to_exact_execution_policy(protocol, stage, config, accepted):
+    value = claim(stage_type=stage, config=config, **({"required_worker_protocol": protocol} if protocol != 1 else {}))
+    if accepted:
+        assert Lease.parse(value).required_worker_protocol == protocol
+    else:
+        with pytest.raises(WorkerError, match="INVALID_WORKER_PROTOCOL"):
+            Lease.parse(value)
 
 
 @pytest.mark.parametrize("supported", [False, True])
@@ -24,6 +84,8 @@ def test_bootstrap_controls_exact_legacy_or_versioned_register_and_ready_wire(su
         if request.url.path == "/api/agent-capabilities/cached-answer-replay":
             return httpx.Response(404, text="old server")
         if request.url.path == "/api/agent-capabilities/screen-search":
+            return httpx.Response(404, text="old server")
+        if request.url.path in {"/api/clip-capabilities/anchor-context", "/api/agent-capabilities/text-coverage"}:
             return httpx.Response(404, text="old server")
         if request.url.path == "/internal/workers/register":
             return httpx.Response(200, json={"worker_id": worker_id, "session_id": session_id, "outcome": "REGISTERED",
@@ -67,7 +129,7 @@ def test_only_actual_http_404_can_select_old_protocol(status, body):
     assert requests == ["/api/agent-capabilities/speech-lookup"]
 
 
-@pytest.mark.parametrize("versions", [[], [True], [1, 1], [5], [None], "1,2"])
+@pytest.mark.parametrize("versions", [[], [True], [1, 1], [7], [None], "1,2"])
 def test_invalid_registration_versions_are_rejected_before_dispatch(versions):
     client = WorkerClient("http://localhost", "synthetic-key", transport=httpx.MockTransport(lambda _: pytest.fail("No register dispatch")))
     try:
@@ -147,7 +209,7 @@ def test_bootstrap_uses_cancellation_guard_before_any_registration(tmp_path, mon
     assert client.registrations == client.ready_calls == client.claims == []
 
 
-@pytest.mark.parametrize("stage", ["MEDIA", "ASR", "SEGMENT", "CAPTION_PROOFREAD", "ANCHOR_CLIP", "AGENT_VISUAL", "AGENT_VISUAL_FOCUS", "TIMELINE", "EXPORT_CLIP"])
+@pytest.mark.parametrize("stage", ["MEDIA", "ASR", "CAPTION_PROOFREAD", "AGENT_VISUAL", "AGENT_VISUAL_FOCUS", "TIMELINE", "EXPORT_CLIP"])
 def test_non_evidence_sessions_never_depend_on_speech_capability(tmp_path, monkeypatch, stage):
     monkeypatch.setenv("LIVECUT_AGENT_VISUAL_API_KEY", "synthetic-key")
     monkeypatch.setenv("LIVECUT_AGENT_VISUAL_BASE_URL", "https://visual.invalid/v1")

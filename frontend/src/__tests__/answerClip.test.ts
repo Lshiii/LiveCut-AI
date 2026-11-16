@@ -90,6 +90,40 @@ test('anchor snapshots pair their dedicated stage and provenance and keep every 
   assert.match(intentOutputValidation(multiple, saved.utterances, 4000, undefined, saved.source_answer), /一个剪辑目标/)
 })
 
+test('expanded context keeps its version and binds v2 provenance without upgrading old receipts', async () => {
+  const chosen = await selection(), legacy = clip(chosen), expanded = clone(legacy)
+  expanded.source_answer!.schema_version = '1.1'
+  expanded.source_answer!.context_utterance_ids = ['u1', 'u2', 'u3', 'u4']
+  expanded.plan!.provenance.prompt_version = 'anchor-clips-v2'
+  assert.equal(parseIntentSnapshot(expanded, JOB).source_answer!.schema_version, '1.1')
+  assert.equal(parseIntentSnapshot(legacy, JOB).plan!.provenance.prompt_version, 'anchor-clips-v1')
+  const payload = intentCreatePayload(chosen.instruction, 6, chosen.binding)
+  assert.equal(intentCreateResponseMatches(expanded, payload, chosen.binding), true)
+  assert.throws(() => newestIntentSnapshot(legacy, expanded), IntentResponseError)
+  for (const version of ['1.2', null, 1.1]) {
+    const invalid = clone(expanded) as any; invalid.source_answer.schema_version = version
+    assert.throws(() => parseIntentSnapshot(invalid, JOB), IntentResponseError)
+  }
+  for (const snapshot of [legacy, expanded]) {
+    const swapped = clone(snapshot); swapped.plan!.provenance.prompt_version = snapshot === legacy ? 'anchor-clips-v2' : 'anchor-clips-v1'
+    assert.throws(() => parseIntentSnapshot(swapped, JOB), IntentResponseError)
+  }
+})
+
+test('expanded context preserves NEEDS_REVIEW permission and continuation identity', async () => {
+  const saved = clip(await selection())
+  saved.source_answer!.schema_version = '1.1'
+  saved.plan!.provenance.prompt_version = 'anchor-clips-v2'
+  saved.plan!.outputs[0]!.status = 'NEEDS_REVIEW'
+  assert.equal(parseIntentSnapshot(saved, JOB).plan!.outputs[0]!.enabled, false)
+  const enabled = clone(saved); enabled.plan!.outputs[0]!.enabled = true
+  assert.throws(() => parseIntentSnapshot(enabled, JOB), IntentResponseError)
+  const resumed = clone(saved); resumed.id = NEXT; resumed.resumed_from_request_id = saved.id; resumed.plan = null; resumed.plan_hash = null; resumed.status = 'QUEUED'; resumed.utterances = []
+  assert.equal(parseResumedIntentSnapshot(resumed, saved, 6).source_answer!.schema_version, '1.1')
+  resumed.source_answer!.schema_version = '1.0'
+  assert.throws(() => parseResumedIntentSnapshot(resumed, saved, 6), IntentResponseError)
+})
+
 test('merging, continuation, and acknowledged POST responses cannot strip or swap their frozen answer', async () => {
   const chosen = await selection(), saved = clip(chosen), payload = intentCreatePayload(chosen.instruction, 6, chosen.binding)
   assert.equal(intentCreateResponseMatches(saved, payload, chosen.binding), true)

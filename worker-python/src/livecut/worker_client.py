@@ -177,7 +177,25 @@ class WorkerClient:
                 or type(capability["worker_protocol"]) is not int or capability["worker_protocol"] != 2):
             raise WorkerClientError("INVALID_WORKER_PROTOCOL_CAPABILITY")
         versions = (1, 2, 3) if self.cached_answer_replay_supported() else (1, 2)
-        return (*versions, 4) if self.screen_search_supported() else versions
+        if self.screen_search_supported():
+            versions = (*versions, 4)
+        if self._context_capability("/api/clip-capabilities/anchor-context", "anchor_context_supported", 5):
+            versions = (*versions, 5)
+        if self._context_capability("/api/agent-capabilities/text-coverage", "text_coverage_supported", 6):
+            versions = (*versions, 6)
+        return versions
+
+    def _context_capability(self, path: str, field: str, protocol: int) -> bool:
+        try:
+            capability = self._request("GET", path)
+        except WorkerClientError as error:
+            if error.status_code == 404:
+                return False
+            raise
+        if (set(capability) != {field, "worker_protocol"} or capability[field] is not True
+                or type(capability["worker_protocol"]) is not int or capability["worker_protocol"] != protocol):
+            raise WorkerClientError("INVALID_WORKER_PROTOCOL_CAPABILITY")
+        return True
 
     def screen_search_supported(self) -> bool:
         try:
@@ -267,7 +285,7 @@ class WorkerClient:
                    "session_id": self._session_id(session_id), "stage_types": stage_types, "slots": 1}
         if supported_protocol_versions is not None:
             if (not isinstance(supported_protocol_versions, list) or not supported_protocol_versions
-                    or any(type(v) is not int or v not in {1, 2, 3, 4} for v in supported_protocol_versions)
+                    or any(type(v) is not int or v not in {1, 2, 3, 4, 5, 6} for v in supported_protocol_versions)
                     or len(set(supported_protocol_versions)) != len(supported_protocol_versions)):
                 raise WorkerClientError("INVALID_WORKER_PROTOCOL_VERSIONS")
             payload["supported_protocol_versions"] = sorted(supported_protocol_versions)

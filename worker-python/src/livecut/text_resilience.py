@@ -292,6 +292,10 @@ def _digest(value):
 
 
 class ResilientTextTransport(httpx.BaseTransport):
+    def coverage_text_budget(self) -> int | None:
+        read = getattr(self.inner, "coverage_text_budget", None)
+        return read() if callable(read) else None
+
     def visual_text_budget(self) -> int | None:
         read = getattr(self.inner, "visual_text_budget", None)
         return read() if callable(read) else None
