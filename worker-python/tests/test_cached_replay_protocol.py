@@ -26,7 +26,8 @@ def test_independent_replay_cap_does_not_change_original_speech_endpoint(status,
             return httpx.Response(200, json={"speech_lookup_supported": True, "worker_protocol": 2})
         if request.url.path == "/api/agent-capabilities/screen-search":
             return httpx.Response(404, json={})
-        if request.url.path in {"/api/clip-capabilities/anchor-context", "/api/agent-capabilities/text-coverage"}:
+        if request.url.path in {"/api/clip-capabilities/anchor-context", "/api/agent-capabilities/text-coverage",
+                                "/api/clip-capabilities/single-montage"}:
             return httpx.Response(404, json={})
         assert request.url.path == "/api/agent-capabilities/cached-answer-replay"
         return httpx.Response(status, json=body)
@@ -34,7 +35,7 @@ def test_independent_replay_cap_does_not_change_original_speech_endpoint(status,
         assert client.worker_protocol_versions() == expected
     assert seen == ["/api/agent-capabilities/speech-lookup", "/api/agent-capabilities/cached-answer-replay",
                     "/api/agent-capabilities/screen-search", "/api/clip-capabilities/anchor-context",
-                    "/api/agent-capabilities/text-coverage"]
+                    "/api/agent-capabilities/text-coverage", "/api/clip-capabilities/single-montage"]
 
 
 @pytest.mark.parametrize("status,body", [(503, {}), (403, {"error_code": "NOT_FOUND"}),

@@ -52,7 +52,8 @@ public class ClipRequestService {
             if(!existing.isEmpty())return existingCreate(existing.getFirst(),fingerprint);
             FrozenSource source=source(job);
             AnswerClipSource.Frozen answer=selection==null?null:AnswerClipSource.resolve(jdbc,artifacts,job,source.hash(),source.transcriptHash(),source.duration(),source.utterances(),selection);
-            return insertRequest(parent,source,instruction,budget,key,fingerprint,null,answer);
+            String outputPolicy = answer == null ? ClipOutputPolicy.detect(instruction) : null;
+            return insertRequest(parent,source,instruction,budget,key,fingerprint,null,answer,outputPolicy);
         });}catch(DuplicateKeyException collision){return tx.execute(status->{lockAnalysis(parent);var rows=jdbc.queryForList("SELECT * FROM clip_request WHERE idempotency_key=? FOR UPDATE",key);if(rows.isEmpty())throw collision;return existingCreate(rows.getFirst(),fingerprint);});}
     }
     private Snapshot existingCreate(Map<String,Object> existing,String fingerprint){
@@ -112,18 +113,19 @@ public class ClipRequestService {
             if(!Set.of("FAILED","CANCELLED").contains(prior.get("status")))throw conflict("CLIP_REQUEST_NOT_RESUMABLE","Only failed or cancelled requests may start a new recovery round");
             FrozenSource source=source(lockAnalysis(parent));
             if(!source.video().equals(prior.get("video_id"))||!source.hash().equals(prior.get("source_hash"))||!source.transcriptHash().equals(prior.get("transcript_hash"))||source.duration()!=((Number)prior.get("duration_ms")).longValue())throw conflict("CLIP_RESUME_SOURCE_CHANGED","The frozen source no longer matches this clipping request");
-            return insertRequest(parent,source,String.valueOf(prior.get("instruction")),budget,key,fingerprint,requestId,AnswerClipSource.stored(prior));
+            return insertRequest(parent,source,String.valueOf(prior.get("instruction")),budget,key,fingerprint,requestId,AnswerClipSource.stored(prior),(String)prior.get("output_policy"));
         });}catch(DuplicateKeyException collision){return tx.execute(status->{lockPublicOwner(requestId);var rows=jdbc.queryForList("SELECT * FROM clip_request WHERE idempotency_key=? FOR UPDATE",key);if(rows.isEmpty())throw collision;return existingCreate(rows.getFirst(),fingerprint);});}
     }
-    private Snapshot insertRequest(String parent,FrozenSource source,String instruction,int budget,String key,String fingerprint,String resumedFrom,AnswerClipSource.Frozen answer){
+    private Snapshot insertRequest(String parent,FrozenSource source,String instruction,int budget,String key,String fingerprint,String resumedFrom,AnswerClipSource.Frozen answer,String outputPolicy){
         String id=UUID.randomUUID().toString(),stage=UUID.randomUUID().toString();
         Map<String,Object> frozen=new TreeMap<>();frozen.put("utterances",source.utterances());if(answer!=null)frozen.put("answer_result",answer.answer());
         String sourceJson=canonicalJson(JSON.valueToTree(frozen)),answerJson=answer==null?null:canonicalJson(answer.source());
         List<String> fallbackModels=TextExecutionPolicy.configuredFallbacks(configuredFallbackModels);
-        jdbc.update("INSERT INTO clip_request (id,job_id,video_id,idempotency_key,request_hash,instruction,text_model_id,source_hash,transcript_hash,transcript_key,source_json,duration_ms,max_text_calls,text_fallback_models_json,resumed_from_request_id,source_answer_json,source_answer_hash) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            id,parent,source.video(),key,fingerprint,instruction,source.model(),source.hash(),source.transcriptHash(),source.transcriptKey(),sourceJson,source.duration(),budget,TextExecutionPolicy.serialize(fallbackModels),resumedFrom,answerJson,answerJson==null?null:sha(answerJson));
+        jdbc.update("INSERT INTO clip_request (id,job_id,video_id,idempotency_key,request_hash,instruction,text_model_id,source_hash,transcript_hash,transcript_key,source_json,duration_ms,max_text_calls,text_fallback_models_json,resumed_from_request_id,source_answer_json,source_answer_hash,output_policy) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            id,parent,source.video(),key,fingerprint,instruction,source.model(),source.hash(),source.transcriptHash(),source.transcriptKey(),sourceJson,source.duration(),budget,TextExecutionPolicy.serialize(fallbackModels),resumedFrom,answerJson,answerJson==null?null:sha(answerJson),outputPolicy);
+        String policySuffix = outputPolicy == null ? "" : "\n" + outputPolicy;
         jdbc.update("INSERT INTO job_stage (id,job_id,owner_type,owner_id,stage_type,shard_key,status,input_hash,required_worker_protocol) VALUES (?,?,'CLIP_REQUEST',?,?,?,'READY',?,?)",
-            stage,parent,id,answer==null?"SEGMENT":AnswerClipSource.STAGE,"clip-"+id,sha(fingerprint+"\n"+source.hash()+"\n"+source.transcriptHash()+"\n"+source.model()+"\n"+TextExecutionPolicy.serialize(fallbackModels)+(answerJson==null?"":"\n"+answerJson)),AnswerClipSource.requiredProtocol(answer));
+            stage,parent,id,answer==null?"SEGMENT":AnswerClipSource.STAGE,"clip-"+id,sha(fingerprint+"\n"+source.hash()+"\n"+source.transcriptHash()+"\n"+source.model()+"\n"+TextExecutionPolicy.serialize(fallbackModels)+(answerJson==null?"":"\n"+answerJson)+policySuffix),ClipOutputPolicy.requiredProtocol(outputPolicy,answer));
         wakeups.ready(stage);
         return snapshot(lockOwner(id,parent));
     }
@@ -163,7 +165,9 @@ public class ClipRequestService {
     public Map<String,Object> claimConfig(StageRow stage){
         var owner=jdbc.queryForMap("SELECT * FROM clip_request WHERE id=?",stage.ownerId());Map<String,Object> clip=new TreeMap<>();
         var answer=AnswerClipSource.stored(owner);String expected=answer==null?"SEGMENT":AnswerClipSource.STAGE;
-        if(!expected.equals(stage.stageType())||stage.requiredWorkerProtocol()!=AnswerClipSource.requiredProtocol(answer))throw conflict("CLIP_STAGE_UNAVAILABLE","Clipping stage does not match its frozen answer mode and protocol");
+        String outputPolicy = (String)owner.get("output_policy");
+        if(!expected.equals(stage.stageType())||stage.requiredWorkerProtocol()!=ClipOutputPolicy.requiredProtocol(outputPolicy,answer))throw conflict("CLIP_STAGE_UNAVAILABLE","Clipping stage does not match its frozen policy and protocol");
+        if(outputPolicy!=null)clip.put("output_policy",outputPolicy);
         if(answer!=null)clip.put("answer_source",answer.source());
         clip.put("request_id",stage.ownerId());clip.put("instruction",owner.get("instruction"));clip.put("source_job_id",stage.jobId());
         clip.put("source_transcript_key",owner.get("transcript_key"));clip.put("source_transcript_hash",owner.get("transcript_hash"));

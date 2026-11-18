@@ -34,6 +34,20 @@ test('a two-goal plan retains disjoint parts and maps non-lexicographic source I
   assert.deepEqual(intentPartIds(value.plan!.outputs[0]!.parts[0]!, value.utterances), ['u10', 'u2'])
   assert.equal(intentOutputValidation(value.plan!.outputs, value.utterances, 6000, value.plan!.goals), '')
 })
+test('a montage keeps one output with ordered source ranges and accepts only ordinary retrieval modes', () => {
+  const value = snapshot(), plan = value.plan!
+  plan.provenance.prompt_version = 'montage-clips-v1'
+  assert.throws(() => parseIntentSnapshot(value, JOB), IntentResponseError)
+  plan.goals.pop()
+  assert.throws(() => parseIntentSnapshot(value, JOB), IntentResponseError)
+  plan.outputs.pop()
+  for (const retrieval of ['bm25', 'bm25_dense_rrf']) {
+    plan.provenance.retrieval_mode = retrieval
+    assert.deepEqual(parseIntentSnapshot(value, JOB).plan?.outputs[0]?.parts, plan.outputs[0]?.parts)
+  }
+  plan.provenance.retrieval_mode = 'anchor_context'
+  assert.throws(() => parseIntentSnapshot(value, JOB), IntentResponseError)
+})
 test('optional recovery metadata preserves clip plan and dirty-draft identity even when malformed', () => {
   const value = snapshot()
   const progress: TextProgress = { state: 'RETRY_WAIT', attempt_number: 2, max_attempts: 3, provider: 'primary',
@@ -133,6 +147,18 @@ test('late snapshots cannot regress revisions, confirmed history or request stat
   assert.equal(newestIntentSnapshot(known, wrongHistory), known)
   const wrongSource = snapshot(); wrongSource.source.video_sha256 = 'f'.repeat(64)
   assert.throws(() => newestIntentSnapshot(known, wrongSource), IntentResponseError)
+})
+test('polling a pending revision zero accepts its first plan and keeps the published hash immutable', () => {
+  const ready = parseIntentSnapshot(snapshot(), JOB, REQUEST)
+  for (const status of ['QUEUED', 'RUNNING'] as const) {
+    const pending = parseIntentSnapshot({ ...ready, status, state_version: ready.state_version - 1,
+      plan: null, plan_hash: null, utterances: [], stage: { ...ready.stage, status: status === 'QUEUED' ? 'READY' : 'RUNNING' } }, JOB, REQUEST)
+    assert.equal(newestIntentSnapshot(pending, ready), ready)
+    assert.equal(newestIntentSnapshot(ready, pending), ready)
+    assert.equal(newestIntentSnapshot(pending, { ...ready, state_version: pending.state_version }), pending)
+    assert.throws(() => newestIntentSnapshot({ ...pending, status: 'CANCELLED' }, ready), IntentResponseError)
+  }
+  assert.throws(() => newestIntentSnapshot(ready, { ...ready, state_version: ready.state_version + 1, plan_hash: 'e'.repeat(64) }), IntentResponseError)
 })
 test('confirmation requires saved selection, while export additionally requires that exact confirmed revision', () => {
   const value = snapshot(), outputs = value.plan!.outputs

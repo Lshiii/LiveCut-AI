@@ -78,7 +78,7 @@ class WorkerProtocolIntegrationTests {
     @Test void registrationPreservesMissingVersionOneAndRejectsMalformedExplicitLists()throws Exception{
         var old=identity();var body=JSON.createObjectNode().put("worker_id",old.id()).put("session_id",old.session()).put("slots",1);body.putArray("stage_types").add("MEDIA");
         assertEquals(200,send("POST","/internal/workers/register",JSON.writeValueAsString(body)).statusCode());assertEquals(JSON.readTree("[1]"),JSON.readTree(jdbc.queryForObject("SELECT supported_protocol_versions FROM worker_instance WHERE worker_id=?",String.class,old.id())));
-        for(String invalid:List.of("null","true","1","\"1\"","[]","[null]","[true]","[1.0]","[\"1\"]","[1,1]","[7]","[0]","[-1]","[1,2,7]")){
+        for(String invalid:List.of("null","true","1","\"1\"","[]","[null]","[true]","[1.0]","[\"1\"]","[1,1]","[8]","[0]","[-1]","[1,2,8]")){
             var worker=identity();body.put("worker_id",worker.id()).put("session_id",worker.session());body.set("supported_protocol_versions",JSON.readTree(invalid));
             assertEquals(400,send("POST","/internal/workers/register",JSON.writeValueAsString(body)).statusCode(),invalid);assertEquals(0,jdbc.queryForObject("SELECT COUNT(*) FROM worker_instance WHERE worker_id=?",Integer.class,worker.id()),invalid);
         }
