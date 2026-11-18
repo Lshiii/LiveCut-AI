@@ -44,6 +44,23 @@ function step(direction: 'undo' | 'redo') {
   error.value = ''; selected.value.clear()
 }
 function stopPlayback() { preview.cancel(); player.value?.pause() }
+function isCurrentVideo(video: HTMLVideoElement) {
+  if (stopped || video !== player.value || !props.videoUrl) return false
+  try { return video.currentSrc === new URL(props.videoUrl, document.baseURI).href }
+  catch { return false }
+}
+function showFirstFrame() {
+  const video = player.value, firstMs = cut.value.parts[0]?.start_ms
+  if (!video || !isCurrentVideo(video) || !ready.value || !enabled.value || document.hidden || !dialog.value?.open
+    || playback.value || !video.paused || firstMs === undefined || Math.abs(video.currentTime * 1000 - firstMs) < 1) return
+  try { video.currentTime = firstMs / 1000 }
+  catch { error.value = '暂时无法定位预览，仍可按原句剪辑。' }
+}
+function metadata(event: Event) {
+  if (!isCurrentVideo(event.currentTarget as HTMLVideoElement)) return
+  ready.value = true; mediaError.value = false
+  showFirstFrame()
+}
 function audition() {
   if (playback.value) { stopPlayback(); return }
   if (!enabled.value || !ready.value || !player.value || !dialog.value?.open) return
@@ -69,8 +86,10 @@ function syncOpen() {
   if (stopped) return
   if (!props.active || !visible.value) { stopPlayback(); dialog.value?.close(); return }
   if (dialog.value && !dialog.value.open) dialog.value.showModal()
+  showFirstFrame()
 }
 watch(history, stopPlayback, { flush: 'sync' })
+watch(() => cut.value.parts[0]?.start_ms, showFirstFrame, { flush: 'post' })
 watch(() => props.stale, stale => { if (stale) stopPlayback() }, { flush: 'sync' })
 watch([() => props.active, visible], syncOpen, { flush: 'post' })
 onMounted(() => { document.addEventListener('visibilitychange', visibility); void nextTick(syncOpen) })
@@ -85,7 +104,7 @@ onBeforeUnmount(() => { stopped = true; document.removeEventListener('visibility
     <div class="paper-body">
       <section class="paper-monitor" aria-label="草稿预览">
         <video ref="player" :src="videoUrl" preload="metadata" playsinline
-          @loadedmetadata="ready = true; mediaError = false" @error="ready = false; mediaError = true; stopPlayback()"
+          @loadedmetadata="metadata" @error="ready = false; mediaError = true; stopPlayback()"
           @play="guardPlay" @playing="guardPlay" @timeupdate="preview.timeUpdate($event.currentTarget as HTMLVideoElement)"
           @seeking="preview.seeking($event.currentTarget as HTMLVideoElement)" @seeked="preview.seeked($event.currentTarget as HTMLVideoElement)"
           @pause="preview.pause($event.currentTarget as HTMLVideoElement)" @ended="preview.ended($event.currentTarget as HTMLVideoElement)"
