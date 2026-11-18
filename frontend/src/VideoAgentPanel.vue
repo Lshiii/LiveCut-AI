@@ -1199,8 +1199,9 @@ onBeforeUnmount(() => { scanSubmissions(); stopped = true; mounted = false; clea
   .agent-answer-text { font-size: 14px; }
   .agent-answer { padding-top: 16px; }
   .agent-evidence-item { gap: 8px; }
-  .agent-input-box { padding: 9px 10px; }
-  .agent-compose-actions { gap: 8px; }
+  .agent-compose { padding-block: 4px 8px; }
+  .agent-input-box { padding: 8px 10px; }
+  .agent-compose-actions { gap: 8px; margin-top: 4px; }
   .agent-sessions { top: 60px; right: 12px; }
 }
 @media (max-height:650px) {
