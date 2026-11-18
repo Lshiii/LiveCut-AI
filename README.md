@@ -32,11 +32,13 @@ LiveCut AI 是面向课程、访谈和录播的单视频剪辑工作台。例如
 
 确认后可直接下载选中目标的 OTIO 时间线，在其他支持 OTIO 的工具里链接原视频继续精剪。需要交付成片时，可生成独立 MP4、选择画幅、校对并烧录字幕，以及批量下载视频或素材包。
 
-截图取自实际运行的开发样例，输入框与本机草稿用于演示填写方式。仓库不附带这些视频、转写或模型响应；首次启动后，请先上传自己的视频。
+截图取自实际运行的开发样例，输入框与本机草稿用于演示填写方式。仓库不附带这些视频、转写或模型响应。按照[本地启动](#本地启动)打开工作台后，上传 MP4 或导入一条公开视频链接即可开始。
 
 ```mermaid
 flowchart LR
     A[上传 MP4] --> B[语音转写与话题解析]
+    L[粘贴公开视频链接] --> R[下载、格式校验与选用视频]
+    R --> B
     B --> C[按话题选择章节]
     B --> S[原句搜索 / 时间回看 / 复制引用]
     S --> M[明确起止原句 / 独立人工方案]
@@ -60,6 +62,7 @@ flowchart LR
 
 | 你想做什么 | 使用入口 | 指南 |
 | --- | --- | --- |
+| 已有本地视频或公开视频链接 | **上传视频 / 链接导入** | [选择视频并创建分析](#1-选择视频并创建分析) |
 | 先看整段视频讲了哪些内容 | **话题切分**：选择、编辑、拆分或补充章节 | [按章节剪辑](#2-按章节浏览与剪辑) |
 | 记得某个词，想直接回到那句话 | **原句搜索**：文字 / 时间搜索、分页、前后文和复制引用 | [搜索与回看原句](#原句搜索直接找词与时间) |
 | 已选好起止原句，直接保留这一段 | **原句搜索 → 人工剪辑**：核对连续范围、保存和确认 | [按原句人工剪辑](#manual-asr-clips) |
@@ -73,14 +76,22 @@ flowchart LR
 
 ## 本地启动
 
-默认使用 Windows PowerShell，在仓库根目录操作。准备 **JDK 21、Python 3.11、uv、Node.js 24.12+、Docker Desktop、FFmpeg / ffprobe**；FFmpeg 工具需加入 PATH，并支持 MP4 导出使用的 `libx264`。Java 使用仓库中的 Maven Wrapper，无需另装全局 Maven。已有原生 MySQL 的配置方式见下方文档，这里使用 Compose 准备数据库。
+### Windows 桌面快捷方式
+
+已在电脑上配置 **LiveCut AI** 桌面快捷方式时，双击后等待启动窗口显示 `Ready`。启动器会检查独立 MySQL、Java API、分析 Worker、链接导入 Worker 和前端，并打开 [工作台](http://127.0.0.1:5173/)。重复启动会复用已运行的服务，关闭启动窗口后后台服务继续运行。
+
+快捷方式和它依赖的启动器是本机配置。首次克隆仓库时，按下面的步骤准备依赖、数据库与模型凭证。
+
+### 首次配置
+
+在 Windows PowerShell 中从仓库根目录执行启动命令。需要 **JDK 21、Python 3.11、uv、Node.js 24.12+、MySQL 8 和 FFmpeg / ffprobe**。将 FFmpeg 工具加入 PATH，确认支持 MP4 编码所用的 `libx264`。Java 构建使用仓库自带的 Maven Wrapper。
+
+数据库可用下面的 Compose 启动（需要 Docker Desktop），也可按[原生 MySQL 配置](docs/13-MVP集成与验收.md)准备独立实例。原生实例的 `.env.java` 应填写其实际库名、端口和应用账号。
 
 ```powershell
 git clone https://github.com/Lshiii/LiveCut-AI.git
 cd LiveCut-AI
 ```
-
-**首次准备：**
 
 ```powershell
 uv sync --locked --extra ocr --dev --python 3.11
@@ -99,18 +110,26 @@ LIVECUT_DB_PASSWORD=替换为与.env.compose相同的应用密码
 LIVECUT_STORAGE_ROOT=../storage
 LIVECUT_WORKER_API_KEY=替换为自行设置的随机本地口令
 LIVECUT_API_PORT=8080
+LIVECUT_DISPATCH_MODE=poll
 ```
 
 > Compose 创建的业务库是 `livecut`；`.env.java.example` 原地址中的 `livecut_dev` 需要按上面改成 `livecut`。配置使用字面的 `NAME=value`，不要给整个值加 shell 引号，也不要把 `DASHSCOPE_API_KEY` 放进只接受 `LIVECUT_` 项的 `.env.java`。
 
-启动 Docker Desktop，确认本机 `13306` 和 `19092` 端口可用，再启动数据库、Kafka 与通知 topic：
+使用 Compose 时，启动 Docker Desktop，确认本机 `13306` 端口可用。以 `poll` 模式启动数据库并等待 MySQL 显示 `healthy`。
+
+```powershell
+docker compose --env-file .env.compose -f infra/compose.yml up -d mysql
+docker compose --env-file .env.compose -f infra/compose.yml ps mysql
+```
+
+如需体验 Kafka 阶段通知，将 `.env.java` 的 `LIVECUT_DISPATCH_MODE` 改为 `kafka`，按 [Kafka 调度指南](docs/80-Kafka阶段通知与可靠调度.md)核对 broker 与 topic 配置。确认 `19092` 端口可用，再启动 Kafka 和 topic 初始化容器。
 
 ```powershell
 docker compose --env-file .env.compose -f infra/compose.yml --profile kafka up -d mysql kafka kafka-init
 docker compose --env-file .env.compose -f infra/compose.yml --profile kafka ps -a
 ```
 
-新配置示例启用 **Kafka 阶段通知**：Java 在阶段就绪事务内写 Outbox，消息唤醒 Worker 后由原领取协议执行下一阶段。等 Kafka healthy、`kafka-init` exited(0) 后再启动 Worker。已有私有配置按 [Kafka 调度指南](docs/80-Kafka阶段通知与可靠调度.md) 加入配置；未设置时保留旧 poll 模式。
+等 Kafka 显示 `healthy` 且 `kafka-init` 以状态码 `0` 退出，再启动 Java 与分析 Worker。两个模式均可执行分析、问答与剪辑，链接导入使用自己的 Worker。
 
 ### 用单个 JAR 运行网页与 API
 
@@ -121,11 +140,11 @@ $package = .\scripts\package-workbench.ps1
 .\scripts\run-workbench.ps1 -PackageDirectory $package.PackageDirectory -EnvFile '.env.java'
 ```
 
-数据库健康后打开 **http://127.0.0.1:8080/**，无需单独启动前端；需要新分析时再另开终端运行 Python Worker。已打好的 `package/` 目录可单独携带，运行网页/API不需要 Node 或 Maven。完整构建、外置配置和限制见[单 JAR 工作台指南](docs/76-单JAR工作台交付.md)。
+数据库健康后打开 **<http://127.0.0.1:8080/>**，网页由 JAR 提供。分析与链接导入仍使用下文各自的 Worker。已打好的 `package/` 目录可单独携带，运行网页与 API 无需 Node 或 Maven。完整构建、外置配置和限制见[单 JAR 工作台指南](docs/76-单JAR工作台交付.md)。
 
 原来 `5173` 入口的本机草稿和未决回执不会自动迁到 `8080`。切换前先核对或导出；也可关闭 Vite 后明确以 `-Port 5173` 使用同一 origin，并核对仍指向原业务来源。
 
-### 保留三终端开发模式
+### 开发模式与计算 Worker
 
 等待数据库健康后，分别打开三个 PowerShell 终端，均从仓库根目录执行：
 
@@ -145,9 +164,17 @@ $env:DASHSCOPE_API_KEY = [Net.NetworkCredential]::new('', (Read-Host 'DashScope 
 npm --prefix frontend run dev
 ```
 
-打开 **<http://127.0.0.1:5173/>**。API 健康检查为 <http://127.0.0.1:8080/actuator/health>。Worker 默认接收完整流程所需的阶段，保持该终端运行；不加 `-Once`，它只用于单次阶段执行。
+打开 **<http://127.0.0.1:5173/>**，并在 [API 健康检查](http://127.0.0.1:8080/actuator/health)确认状态为 `UP`。日常使用时保持 Worker 终端运行，`-Once` 用于单次阶段执行。
 
 如果使用其他 OpenAI-compatible 文本服务，在本地 `.env.java` 配置 `LIVECUT_TEXT_API_STYLE`、`LIVECUT_TEXT_BASE_URL`、`LIVECUT_TEXT_API_KEY`、`LIVECUT_TEXT_MODEL`；ASR 仍需自己的 DashScope 凭证。详见[文本服务与备用平台配置](docs/38-文本请求自动恢复.md)。
+
+**需要从链接导入视频时**，等 Java API 就绪后另开一个 PowerShell 终端，在仓库根目录执行。
+
+```powershell
+.\scripts\source-import.ps1
+```
+
+该脚本从 `.env.java` 读取共享存储和 Worker 凭证。若 Java 使用自定义端口，用 `-JavaUrl` 指定实际地址。支持的平台、链接格式和失败条件见[视频链接导入指南](docs/81-视频链接导入.md)。
 
 <details>
 <summary>需要生成带字幕 MP4 时：安装固定字体</summary>
@@ -166,11 +193,13 @@ uv run --frozen --no-sync python scripts/install-caption-font.py
 
 ## 图文使用指南
 
-### 1. 上传视频，创建分析
+### 1. 选择视频并创建分析
 
-**入口：左侧或右上角「上传视频」，然后进入「创建分析 / 任务详情」。**
+**入口为左侧的「上传视频」或「链接导入」。**
 
-1. 选择本地 MP4，等待文件校验、分片上传与合并。需要中断时点击「暂停上传」，之后使用原文件「继续上传」。
+1. 通过以下任一方式准备视频。
+   - **本地 MP4**。选择文件，等待分片上传与合并。可暂停并用原文件继续。
+   - **公开视频链接**。粘贴一条完整链接，点击「导入链接」，完成后点击「使用此视频」。
 2. 选择「视频来源」。画面证据默认是「仅使用语音转写」；需要识别画面上的文字时，可选「本地 OCR · 识别画面文字」。
 3. 核对「文本请求上限」，点击「创建分析任务」。默认上限为 24 次，自动重试与格式修复也会计入次数。
 4. 等待任务显示解析完成，再进入「视频对话」「原句搜索」「话题切分」或「按需剪辑」。
@@ -674,6 +703,8 @@ docs/           设计、操作细节与验收记录
 | 视频对话与引用剪辑 | [视频 Agent](docs/45-视频对话Agent.md) · [回答原句联动剪辑](docs/58-回答原句联动剪辑.md) |
 | 直接搜索和回听转写 | [只读分页、原句前后文和播放定位](docs/70-全文原句搜索与回看.md) |
 | 从起止原句直接剪辑 | [独立人工方案、原提交恢复与版本交付](docs/71-按原句人工剪辑.md) |
+| 粘贴链接导入视频 | [支持的来源、启动方式与真实样例](docs/81-视频链接导入.md) |
+| 逐句粗剪与跨工具交接 | [时长建议、剪点试听与 OTIO 时间线](docs/83-逐句粗剪与可编辑时间线.md) |
 | 按需看图与视觉证据 | [多图工具、采样边界与部署配置](docs/63-Agent按需画面观察.md) |
 | 找课件、代码和图表中的字 | [画面文字检索、实际截图与来源记录](docs/78-Agent画面文字定位.md) |
 | 对照文字与画面方案的必要证据 | [离线参考模板、取得与引用覆盖评测](docs/79-Agent必要证据覆盖评测.md) |
