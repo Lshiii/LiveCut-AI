@@ -104,7 +104,7 @@ const resultsAvailable = computed(() => selectedJob.value?.status === 'REVIEW_RE
 const topicResultsAvailable = computed(() => resultsAvailable.value && topicMode.value)
 watch(() => selectedJob.value?.id, (id, previous) => {
   if (id === previous) return
-  activeTab.value = id && selectedJob.value?.status === 'REVIEW_READY' ? topicMode.value ? 'agent' : 'topics' : 'task'
+  activeTab.value = id && selectedJob.value?.status === 'REVIEW_READY' ? topicMode.value ? 'clips' : 'topics' : 'task'
   closeTasks()
 })
 watch(activeTab, value => { if (value !== 'task') taskPreview.value?.pause() }, { flush: 'sync' })
@@ -115,7 +115,7 @@ function setTab(tab: WorkbenchTab) {
 }
 function tabKey(event: KeyboardEvent) {
   if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return
-  const tabs: WorkbenchTab[] = topicResultsAvailable.value ? ['agent', 'transcript', 'topics', 'clips', 'task'] : resultsAvailable.value ? ['topics', 'task'] : ['task']
+  const tabs: WorkbenchTab[] = topicResultsAvailable.value ? ['clips', 'agent', 'transcript', 'topics', 'task'] : resultsAvailable.value ? ['topics', 'task'] : ['task']
   event.preventDefault()
   const index = tabs.indexOf(activeTab.value)
   const next = event.key === 'Home' ? tabs[0]! : event.key === 'End' ? tabs.at(-1)! : tabs[(index + (event.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length]!
@@ -447,10 +447,10 @@ onUnmounted(() => { stopped = true; compactQuery.removeEventListener('change', u
         <div class="current-video"><h1 :title="selectedJob ? videoName(selectedJob.video_id) : ''">{{ selectedJob ? videoName(selectedJob.video_id) : '新建视频分析' }}</h1><div class="current-video-meta"><p v-if="selectedJob">第 {{ selectedJob.generation }} 次分析<span v-if="!resultsAvailable" class="header-stage-progress">{{ completeCount }}/{{ selectedJob.stages.length }} 阶段完成</span></p><div class="header-state"><span v-if="selectedJob" class="status" :class="selectedJob.status.toLowerCase()">{{ resultsAvailable ? '解析完成' : names[selectedJob.status] ?? selectedJob.status }}</span><span class="connection"><i :class="{ online }"></i>{{ online ? '服务已连接' : '服务未连接' }}</span></div></div></div>
       </header>
       <div class="workspace-tabs" role="tablist" aria-label="视频工作区" @keydown="tabKey">
+        <button id="workbench-tab-clips" role="tab" aria-controls="workbench-pane-clips" :aria-selected="activeTab === 'clips'" :tabindex="activeTab === 'clips' ? 0 : -1" :disabled="!topicResultsAvailable" @click="setTab('clips')"><svg class="workspace-tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="m8.5 7.5 12 13m-12-4 12-13"/></svg>按需剪辑<span v-if="intentEditor?.dirty" class="draft-dot" aria-label="有未提交修改"></span></button>
         <button id="workbench-tab-agent" role="tab" aria-controls="workbench-pane-agent" :aria-selected="activeTab === 'agent'" :tabindex="activeTab === 'agent' ? 0 : -1" :disabled="!topicResultsAvailable" @click="setTab('agent')"><svg class="workspace-tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M5 4h14a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H9l-6 3V6a2 2 0 0 1 2-2Z"/><path d="M7 9h10M7 13h6"/></svg>视频对话<span v-if="agentEditor?.dirty" class="draft-dot" aria-label="有未提交输入"></span></button>
         <button id="workbench-tab-transcript" role="tab" aria-controls="workbench-pane-transcript" :aria-selected="activeTab === 'transcript'" :tabindex="activeTab === 'transcript' ? 0 : -1" :disabled="!topicResultsAvailable" @click="setTab('transcript')"><svg class="workspace-tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5M7 9h7M7 12h5"/></svg>原句搜索</button>
         <button id="workbench-tab-topics" role="tab" aria-controls="workbench-pane-topics" :aria-selected="activeTab === 'topics'" :tabindex="activeTab === 'topics' ? 0 : -1" :disabled="!resultsAvailable" @click="setTab('topics')"><svg class="workspace-tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M8 4v16M15 4v16"/></svg>{{ selectedJob && !topicMode ? '片段审核' : '话题切分' }}<span v-if="reviewEditor?.dirty" class="draft-dot" aria-label="有未保存修改"></span></button>
-        <button id="workbench-tab-clips" role="tab" aria-controls="workbench-pane-clips" :aria-selected="activeTab === 'clips'" :tabindex="activeTab === 'clips' ? 0 : -1" :disabled="!topicResultsAvailable" @click="setTab('clips')"><svg class="workspace-tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="m8.5 7.5 12 13m-12-4 12-13"/></svg>按需剪辑<span v-if="intentEditor?.dirty" class="draft-dot" aria-label="有未提交修改"></span></button>
         <button id="workbench-tab-task" role="tab" aria-controls="workbench-pane-task" :aria-selected="activeTab === 'task'" :tabindex="activeTab === 'task' ? 0 : -1" @click="setTab('task')"><svg class="workspace-tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M5 4h14v16H5zM8 8h8M8 12h8M8 16h5"/></svg>{{ selectedJob ? '任务详情' : '创建分析' }}</button>
       </div>
       <div id="workbench-material-actions" class="workspace-material-actions" role="group" aria-label="视频素材操作"><button class="header-upload secondary" aria-label="上传视频" title="上传视频" :disabled="!!pending" @click="chooseUpload"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M12 16V4m-4 4 4-4 4 4M5 15v4a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-4"/></svg><span class="header-upload-label">上传视频</span><span class="header-upload-short">上传</span></button></div>

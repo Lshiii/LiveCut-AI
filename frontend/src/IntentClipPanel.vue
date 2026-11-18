@@ -9,6 +9,8 @@ import { IntentCreateError, intentCreatePayload, intentCreateReceipt, intentCrea
 import CaptionPanel from './CaptionPanel.vue'
 import VideoPackagePanel from './VideoPackagePanel.vue'
 import TranscriptRangePicker from './TranscriptRangePicker.vue'
+import PaperCutEditor from './PaperCutEditor.vue'
+import { compilePaperCut, preparePaperCut, type PaperCutSource } from './paperCut'
 import DraftBackupPanel from './DraftBackupPanel.vue'
 import IntentManualReviewPanel from './IntentManualReviewPanel.vue'
 import { effectiveIntentSelection, IntentManualReviewError, manualReviewConfirmation, manualReviewFreshConfirmation, manualReviewSelectedIds, manualReviewVerified, verifyIntentManualReviewSnapshot } from './intentManualReview'
@@ -17,6 +19,8 @@ import { CaptionBatchError, prepareCaptionBatch } from './captions'
 import { newestSnapshot, parseExportSnapshot, SnapshotError } from './snapshotStream'
 import { topicTime } from './topics'
 import { intentPreviewParts } from './intentPreviewParts'
+import EditJoinTimeline from './EditJoinTimeline.vue'
+import { editJoins } from './editTimeline'
 import { SequencePreview, type SequencePreviewPart, type SequencePreviewState } from './sequencePreview'
 import { validateTranscriptRange } from './transcriptRange'
 import { intentSaveRecovered } from './intentSaveRecovery'
@@ -46,6 +50,7 @@ const captionTarget = ref<{ exportId: string; clipId: string; contentUrl: string
 const captionEditor = ref<{ dirty: boolean; pending: boolean } | null>(null)
 const manualReviewEditor = ref<{ open: () => boolean; dirty: boolean; pending: boolean; needsCheck: boolean; opened: boolean } | null>(null)
 interface RangePickerTarget {
+  paperCut?: PaperCutSource
   token: number; requestId: string; selection: number; draftRevision: number | null; snapshotRevision: number
   planHash: string | null; videoUrl: string; videoHash: string; transcriptHash: string; durationMs: number
   outputId: string; partIndex: number; signature: string; output: IntentOutput; utterances: IntentUtterance[]
@@ -64,7 +69,7 @@ const intentPanel = ref<HTMLElement | null>(null), sourceContextOpen = ref(true)
 let contextObserver: ResizeObserver | undefined, compactContext = false
 let viewChosen = false, defaultViewRequest = '', navigationVersion = 0
 const sequenceState = ref<SequencePreviewState | null>(null), preparingSequence = ref(''), sequenceFeedback = ref('')
-const sequenceDescription = ref<{ id: string; title: string; partIndex?: number } | null>(null)
+const sequenceDescription = ref<{ id: string; title: string; partIndex?: number; joinIndex?: number; outputId: string } | null>(null)
 const previewPageVisible = ref(!document.hidden)
 interface PreparedSequence {
   generation: number; requestId: string; selection: number; navigation: number; sourceUrl: string
@@ -74,7 +79,10 @@ let preparedSequence: PreparedSequence | null = null, sequencePreparationVersion
 const sequence = new SequencePreview((state, reason) => {
   const previous = sequenceState.value
   sequenceState.value = state
-  if (reason === 'finished' && previous?.id === sequenceDescription.value?.id) sequenceFeedback.value = sequenceDescription.value?.partIndex === undefined ? '该目标的区间回看已结束。' : '本段回看已结束。'
+  if (reason === 'finished' && previous?.id === sequenceDescription.value?.id) {
+    sequenceFeedback.value = sequenceDescription.value?.joinIndex !== undefined ? '剪点试听已结束。'
+      : sequenceDescription.value?.partIndex === undefined ? '该目标的区间回看已结束。' : '本段回看已结束。'
+  }
   else if (reason === 'failed') sequenceFeedback.value = '区间预览暂时未能播放。可先点击原视频播放按钮，再重试预览。'
 })
 const scope = new IntentReadScope()
@@ -110,6 +118,16 @@ const canCancel = computed(() => intentCanCancel(snapshot.value, planDirty.value
 const canResume = computed(() => intentCanResume(snapshot.value, dirty.value, pending.value))
 const selectedCount = computed(() => snapshot.value ? effectiveIntentSelection(snapshot.value, outputs.value, planDirty.value || saveNeedsCheck.value || planRevisionConflict.value).length : 0)
 const manuallySelected = computed(() => new Set(manualReviewSelectedIds(snapshot.value, planDirty.value || saveNeedsCheck.value || planRevisionConflict.value)))
+const confirmedTimelines = computed(() => {
+  const value = snapshot.value
+  const urls = new Map<string, string>()
+  if (!canExport.value || !value?.plan_hash) return urls
+  const query = new URLSearchParams({ plan_hash: value.plan_hash, ...manualReviewConfirmation(value) })
+  for (const output of effectiveIntentSelection(value, outputs.value)) {
+    urls.set(output.output_id, `/api/clip-requests/${value.id}/revisions/${value.revision}/outputs/${encodeURIComponent(output.output_id)}/timeline.otio?${query}`)
+  }
+  return urls
+})
 const unresolved = computed(() => outputs.value.filter(value => value.status !== 'FOUND').length)
 const confirmed = computed(() => !!snapshot.value && snapshot.value.confirmed_revisions.includes(snapshot.value.revision))
 const completedClips = computed(() => batches.value.reduce((count, batch) => count + batch.clips.filter(clip => clip.status === 'SUCCEEDED').length, 0))
@@ -500,7 +518,7 @@ async function confirm() {
     const value = await verifyIntentManualReviewSnapshot(parseIntentSnapshot(raw, props.jobId, id))
     if (!validOperation(id, version) || !editorActive() || document.hidden) return
     accept(value, true)
-    notice.value = `方案 r${revision} 已确认，可将各目标分别生成独立 MP4。`
+    notice.value = `方案 r${revision} 已确认。可下载所选目标的剪辑时间线，或生成独立 MP4。`
   } catch (value) { if (validOperation(id, version)) fail(value) }
   finally { if (validOperation(id, version)) action.value = '' }
 }
@@ -635,9 +653,9 @@ function rangeContextCurrent(target: RangePickerTarget) {
     && draftRevision.value === target.draftRevision && value.revision === target.snapshotRevision && value.plan_hash === target.planHash
     && props.videoUrl === target.videoUrl && value.source.video_sha256 === target.videoHash
     && value.source.transcript_hash === target.transcriptHash && value.source.duration_ms === target.durationMs
-    && !!output?.parts[target.partIndex] && rangeSignature(output) === target.signature
+    && !!output?.parts[target.partIndex] && (target.paperCut ? JSON.stringify(intentPayload([output])) : rangeSignature(output)) === target.signature
 }
-function openRangePicker(output: IntentOutput, partIndex: number, initialField: 'start' | 'end', event: Event) {
+function openRangePicker(output: IntentOutput, partIndex: number, initialField: 'start' | 'end', event: Event, paperCut?: PaperCutSource) {
   const value = snapshot.value
   if (!value?.plan || pending.value || manualReviewProtected.value || rangePickerTarget.value || !mediaActive('review') || !output.parts[partIndex] || output.status === 'NOT_FOUND') return
   const initialTimeMs = sourcePlayer.value && sourcePlayer.value.currentTime > 0 ? sourcePlayer.value.currentTime * 1000 : undefined
@@ -647,9 +665,33 @@ function openRangePicker(output: IntentOutput, partIndex: number, initialField: 
     token: ++rangePickerVersion, requestId: selectedId.value, selection: selectionVersion,
     draftRevision: draftRevision.value, snapshotRevision: value.revision, planHash: value.plan_hash,
     videoUrl: props.videoUrl, videoHash: value.source.video_sha256, transcriptHash: value.source.transcript_hash, durationMs: value.source.duration_ms,
-    outputId: output.output_id, partIndex, signature: rangeSignature(output), output: intentPayload([output]).outputs[0]!,
-    utterances: value.utterances.map(utterance => ({ ...utterance })), initialField, initialTimeMs,
+    outputId: output.output_id, partIndex, paperCut, signature: paperCut ? JSON.stringify(intentPayload([output])) : rangeSignature(output), output: intentPayload([output]).outputs[0]!,
+    utterances: paperCut ? [] : value.utterances.map(utterance => ({ ...utterance })), initialField, initialTimeMs,
   }
+}
+function openPaperCut(output: IntentOutput, event: Event) {
+  const value = snapshot.value
+  if (!value?.plan || pending.value || saveNeedsCheck.value || planRevisionConflict.value || !mediaActive('review')) return
+  try {
+    openRangePicker(output, 0, 'start', event, preparePaperCut(output, value.utterances, value.source.duration_ms, value.source_answer?.utterance_ids))
+  } catch (cause) { error.value = cause instanceof Error ? cause.message : '请先核对候选区间。' }
+}
+function applyPaperCut(token: number, removedIds: ReadonlySet<string>) {
+  const target = rangePickerTarget.value
+  if (!target?.paperCut || target.token !== token || !removedIds.size || !mediaActive('review', true) || document.hidden
+    || pending.value || manualReviewProtected.value || saveNeedsCheck.value || planRevisionConflict.value) return
+  if (!rangeContextCurrent(target)) { rangePickerFailed.value = true; return }
+  const output = outputs.value.find(item => item.output_id === target.outputId)!
+  const value = snapshot.value!
+  try {
+    const { parts, evidenceIds } = compilePaperCut(target.paperCut, removedIds)
+    const revised = { ...output, parts, evidence_utterance_ids: evidenceIds }
+    const warning = intentOutputValidation([revised], value.utterances, value.source.duration_ms, undefined, value.source_answer)
+    if (warning) throw new Error(warning)
+    outputs.value = outputs.value.map(item => item.output_id === revised.output_id ? revised : item)
+    closeRangePicker()
+    notice.value = `已将 ${parts.length} 个保留区间应用到本页草稿，请核对并保存。`
+  } catch (cause) { error.value = cause instanceof Error ? cause.message : '粗剪草稿无效。' }
 }
 function closeRangePicker(restoreFocus = true) {
   const opener = rangePickerOpener, version = ++rangePickerVersion
@@ -717,11 +759,26 @@ async function startPreparedSequence(value: PreparedSequence) {
 }
 async function previewSequence(output: IntentOutput, partIndex?: number) {
   if (sequenceSelected(output, partIndex)) { stopSequencePreview('区间预览已停止。'); return }
-  const parts = partsForPreview(output, partIndex), player = sourcePlayer.value
-  if (!canPreviewSequence(output, partIndex) || !parts || !player) return
+  const parts = partsForPreview(output, partIndex)
+  if (!canPreviewSequence(output, partIndex) || !parts) return
+  await beginAudition(output, { id: sequenceId(output, partIndex), title: output.title, partIndex, outputId: output.output_id }, parts)
+}
+function activeJoin(output: IntentOutput) {
+  const detail = sequenceDescription.value
+  if (detail?.outputId === output.output_id && (detail.id === preparingSequence.value || detail.id === sequenceState.value?.id)) return detail.joinIndex
+}
+function previewJoin(output: IntentOutput, index: number) {
+  if (activeJoin(output) === index) { stopSequencePreview(); return }
+  const join = editJoins(partsForPreview(output) ?? [])[index]
+  if (!join || !canPreviewSequence(output)) return
+  void beginAudition(output, { id: `join:${output.output_id}:${index}`, title: `${output.title} · 剪点 ${index + 1}`, joinIndex: index, outputId: output.output_id }, join.audition)
+}
+async function beginAudition(output: IntentOutput, detail: NonNullable<typeof sequenceDescription.value>, parts: SequencePreviewPart[]) {
+  const player = sourcePlayer.value
+  if (!player) return
   stopSequencePreview(); sourceContextOpen.value = true
-  const id = sequenceId(output, partIndex)
-  sequenceDescription.value = { id, title: output.title, partIndex }
+  const id = detail.id
+  sequenceDescription.value = detail
   preparingSequence.value = id
   const prepared: PreparedSequence = {
     generation: sequencePreparationVersion, requestId: selectedId.value, selection: selectionVersion,
@@ -918,8 +975,15 @@ onBeforeUnmount(() => { stopped = true; historyVersion++; historyScope.dispose()
           <div class="intent-recovery-actions"><button class="secondary" :disabled="manualReviewBlocked && !manualReviewEditor?.needsCheck || pending" @click="openManualReview">{{ manualReviewEditor?.needsCheck ? '核对原人工选用结果' : '批量人工核对与选用' }}</button><p v-if="snapshot.manual_review" class="help">当前 r{{ snapshot.revision }} 有独立人工核对记录，人工选用 {{ snapshot.manual_review.outputs.length }} 个待复核目标。修改方案后须重新核对；普通保存新版本不继承此记录。</p><p v-if="manualReviewEditor?.needsCheck" class="intent-warning" role="status">人工核对操作结果待确认，请先打开窗口核对原操作。暂不能保存其他方案、确认或导出。</p><p v-else-if="snapshot.manual_review && planDirty" class="intent-warning" role="status">本页方案已修改，原人工核对暂不授权当前草稿。保存后需重新人工核对。</p></div>
           <article v-for="(output, index) in outputs" :key="output.output_id" class="intent-output">
             <div class="intent-output-heading"><label><input v-if="output.status === 'FOUND'" v-model="output.enabled" type="checkbox" :disabled="pending || manualReviewProtected" :aria-label="`选择剪辑目标 ${goal(output)}`">目标 {{ index + 1 }}：{{ goal(output) }}</label><div class="intent-output-actions"><span>{{ names[output.status] }}</span><span v-if="manuallySelected.has(output.output_id)" class="status">人工已选用 · r{{ snapshot.revision }}</span><button class="secondary" :disabled="!canPreviewSequence(output)" :aria-label="`${sequenceSelected(output) ? '停止预览' : '预览'}目标 ${index + 1} 全部区间`" @click="previewSequence(output)">{{ sequenceSelected(output) ? '停止预览' : '预览全部区间' }}</button></div></div>
+            <button v-if="output.status === 'FOUND'" class="secondary" :disabled="pending || manualReviewProtected || saveNeedsCheck || planRevisionConflict || !output.parts.length" @click="openPaperCut(output, $event)">逐句粗剪</button>
             <details class="intent-reason-details" :open="output.status !== 'FOUND'"><summary>AI 选段说明<span v-if="output.status !== 'FOUND'"> · 需要复核</span></summary><p class="intent-reason">{{ output.reason }}</p></details>
             <label class="intent-title-label">成片标题<input v-model="output.title" maxlength="120" :disabled="pending || manualReviewProtected" :aria-label="`剪辑标题 ${index + 1}`"></label>
+            <EditJoinTimeline :parts="partsForPreview(output) ?? []" :disabled="!canPreviewSequence(output)" :active-join="activeJoin(output)"
+              @audition="previewJoin(output, $event)" @stop="stopSequencePreview()" />
+            <div v-if="confirmedTimelines.has(output.output_id)" class="intent-part-actions">
+              <a class="text-button" :href="confirmedTimelines.get(output.output_id)" download>下载已确认时间线 (.otio)</a>
+              <small>在支持 OTIO 的剪辑器中打开，并链接原视频。</small>
+            </div>
             <div v-for="(part, partIndex) in output.parts" :key="partIndex" class="intent-part">
               <div class="intent-part-label"><b>保留第 {{ partIndex + 1 }} 段</b><div class="intent-part-actions"><button class="text-button" :disabled="!canPreviewSequence(output, partIndex)" :aria-label="`${sequenceSelected(output, partIndex) ? '停止预览' : '预览'}目标 ${index + 1} 第 ${partIndex + 1} 段`" @click="previewSequence(output, partIndex)">{{ sequenceSelected(output, partIndex) ? '停止本段' : '预览本段' }}</button><button class="text-button" :disabled="pending" @click="locate(part.start_utterance_id)">定位原视频 ↗</button></div></div>
               <div class="intent-boundaries"><button class="intent-boundary-button" :disabled="pending || manualReviewProtected || output.status === 'NOT_FOUND'" :aria-label="`调整目标 ${index + 1} 第 ${partIndex + 1} 段起始原句`" @click="openRangePicker(output, partIndex, 'start', $event)"><span>开始 <strong>{{ part.start_ms >= 0 ? topicTime(part.start_ms) : '未选择' }}</strong><small>调整 ↗</small></span><p>{{ part.start_utterance_id ? sourceText(part.start_utterance_id) : '选择要保留的第一句' }}</p></button><button class="intent-boundary-button" :disabled="pending || manualReviewProtected || output.status === 'NOT_FOUND'" :aria-label="`调整目标 ${index + 1} 第 ${partIndex + 1} 段结束原句`" @click="openRangePicker(output, partIndex, 'end', $event)"><span>结束 <strong>{{ part.end_ms >= 0 ? topicTime(part.end_ms) : '未选择' }}</strong><small>调整 ↗</small></span><p>{{ part.end_utterance_id ? sourceText(part.end_utterance_id) : '选择要保留的最后一句' }}</p></button></div>
@@ -938,7 +1002,30 @@ onBeforeUnmount(() => { stopped = true; historyVersion++; historyScope.dispose()
         <div v-show="intentView === 'deliveries'" :id="`intent-page-${jobId}-deliveries`" class="intent-delivery-view" role="tabpanel" :aria-labelledby="`intent-view-${jobId}-deliveries`">
           <div class="intent-delivery-heading"><h3>成片与字幕 <span>{{ completedClips }} 个成片完成 · {{ batches.length }} 个批次</span></h3><p class="help">这里展示本次请求已经冻结的成片。修改新方案不会改变已有文件。</p><p v-if="dirty" class="intent-draft-hint">其他页面的未提交要求与方案修改仍保留；下载只包含已确认版本。</p></div>
           <section v-if="previewUrl" ref="previewSection" class="intent-preview" aria-label="剪辑成片预览"><div class="intent-subheading"><h3>成片预览</h3><button class="text-button" @click="exportPlayer?.pause(); previewUrl = ''">收起预览</button></div><video ref="exportPlayer" :key="previewUrl" :src="previewUrl" controls preload="metadata" playsinline class="intent-source" @play="guardPlayback"></video></section>
-          <div v-if="batches.length" class="intent-exports"><article v-for="batch in batches" :key="batch.id" class="intent-batch"><p>确认版本 r{{ batch.approved_revision }} · {{ names[batch.status] ?? batch.status }} · {{ date(batch.created_at) }}</p><VideoPackagePanel :batch="batch" :source-key="`${jobId}:${selectedId}`" :active="mediaActive('deliveries')" :busy="pending || !!captionEditor?.pending" /><div class="caption-batch-actions"><button class="secondary" :disabled="!!packageBusyId || pending" @click="downloadBatchPackage(batch)">{{ packageBusyId === batch.id ? '正在核对字幕版本…' : '核对并准备素材包' }}</button><a v-if="packageUrls[batch.id]" class="text-button" :href="packageUrls[batch.id]" download target="_blank" rel="noopener">下载本批素材包</a><small>全部成片完成并确认字幕后，可打包原 MP4 与字幕。</small></div><div v-for="clip in batch.clips" :key="clip.id" class="intent-export-clip"><strong>{{ clip.title ?? '剪辑视频' }}</strong><span>{{ names[clip.status] ?? clip.status }}</span><FailureDiagnostic :diagnostic="clip.diagnostic" :error-code="clip.error_code" :attempt="clip.attempt" /><div v-if="clip.status === 'SUCCEEDED'" class="actions"><button class="text-button" @click="showExportPreview(clip.content_url ?? '')">预览成片</button><button class="text-button" :disabled="pending" @click="openCaptions(batch, clip)">校对字幕</button><a class="text-button" :href="clip.download_url ?? undefined" download target="_blank" rel="noopener">下载 MP4</a></div></div></article></div>
+          <div v-if="batches.length" class="intent-exports">
+            <article v-for="batch in batches" :key="batch.id" class="intent-batch">
+              <p>确认版本 r{{ batch.approved_revision }} · {{ names[batch.status] ?? batch.status }} · {{ date(batch.created_at) }}</p>
+              <VideoPackagePanel :batch="batch" :source-key="`${jobId}:${selectedId}`" :active="mediaActive('deliveries')" :busy="pending || !!captionEditor?.pending" />
+              <div class="caption-batch-actions">
+                <button class="secondary" :disabled="!!packageBusyId || pending" @click="downloadBatchPackage(batch)">{{ packageBusyId === batch.id ? '正在核对字幕版本…' : '核对并准备素材包' }}</button>
+                <a v-if="packageUrls[batch.id]" class="text-button" :href="packageUrls[batch.id]" download target="_blank" rel="noopener">下载本批素材包</a>
+                <small>全部成片完成并确认字幕后，可打包原 MP4 与字幕。</small>
+              </div>
+              <p v-if="batch.clip_request_id === selectedId" class="help">继续精剪时，将 OTIO 时间线与原视频放在同一目录，在支持 OTIO 的剪辑器中打开，必要时重新链接原视频。</p>
+              <div v-for="clip in batch.clips" :key="clip.id" class="intent-export-clip">
+                <strong>{{ clip.title ?? '剪辑视频' }}</strong><span>{{ names[clip.status] ?? clip.status }}</span>
+                <FailureDiagnostic :diagnostic="clip.diagnostic" :error-code="clip.error_code" :attempt="clip.attempt" />
+                <div class="actions">
+                  <template v-if="clip.status === 'SUCCEEDED'">
+                    <button class="text-button" @click="showExportPreview(clip.content_url ?? '')">预览成片</button>
+                    <button class="text-button" :disabled="pending" @click="openCaptions(batch, clip)">校对字幕</button>
+                    <a class="text-button" :href="clip.download_url ?? undefined" download target="_blank" rel="noopener">下载 MP4</a>
+                  </template>
+                  <a v-if="batch.clip_request_id === selectedId" class="text-button" :href="`/api/exports/${batch.id}/clips/${clip.id}/timeline.otio`" download>下载剪辑时间线 (.otio)</a>
+                </div>
+              </div>
+            </article>
+          </div>
           <div v-else class="intent-empty"><p>还没有生成成片。先核对并确认所选目标，再生成 MP4。</p><button class="secondary" @click="setView('review')">回到核对方案</button></div>
         </div>
       </div>
@@ -957,7 +1044,8 @@ onBeforeUnmount(() => { stopped = true; historyVersion++; historyScope.dispose()
       <div class="intent-history-pagination" role="group" aria-label="历史分页"><button class="secondary" :disabled="pending || historyLoading || !history.canNewer" @click="navigateHistory('newer')">较新一页</button><button class="secondary" :disabled="pending || historyLoading || !history.canOlder" @click="navigateHistory('older')">更早一页</button><button class="text-button" :disabled="pending || historyLoading" @click="navigateHistory('latest')">回到最新</button></div>
     </aside>
     <CaptionPanel v-if="captionTarget" :key="`${captionTarget.exportId}:${captionTarget.clipId}`" ref="captionEditor" :export-id="captionTarget.exportId" :clip-id="captionTarget.clipId" :content-url="captionTarget.contentUrl" :active="props.active !== false && intentView === 'deliveries' && !historyOpen" @close="captionTarget = null" />
-    <TranscriptRangePicker v-if="rangePickerTarget" :key="rangePickerTarget.token" ref="rangePickerEditor" :output="rangePickerTarget.output" :part-index="rangePickerTarget.partIndex" :utterances="rangePickerTarget.utterances" :duration-ms="rangePickerTarget.durationMs" :initial-field="rangePickerTarget.initialField" :initial-time-ms="rangePickerTarget.initialTimeMs" :active="props.active !== false && intentView === 'review' && !historyOpen" :stale="rangePickerStale" @close="rangePickerCloseHandler" @apply="rangePickerApplyHandler" />
+    <PaperCutEditor v-if="rangePickerTarget?.paperCut" :key="`paper-${rangePickerTarget.token}`" ref="rangePickerEditor" :source="rangePickerTarget.paperCut" :title="rangePickerTarget.output.title" :goal="goal(rangePickerTarget.output)" :token="rangePickerTarget.token" :video-url="rangePickerTarget.videoUrl" :active="props.active !== false && intentView === 'review' && !historyOpen" :stale="rangePickerStale || saveNeedsCheck || planRevisionConflict || pending || manualReviewProtected" @close="rangePickerCloseHandler" @apply="applyPaperCut" />
+    <TranscriptRangePicker v-else-if="rangePickerTarget" :key="rangePickerTarget.token" ref="rangePickerEditor" :output="rangePickerTarget.output" :part-index="rangePickerTarget.partIndex" :utterances="rangePickerTarget.utterances" :duration-ms="rangePickerTarget.durationMs" :initial-field="rangePickerTarget.initialField" :initial-time-ms="rangePickerTarget.initialTimeMs" :active="props.active !== false && intentView === 'review' && !historyOpen" :stale="rangePickerStale" @close="rangePickerCloseHandler" @apply="rangePickerApplyHandler" />
     <IntentManualReviewPanel v-if="snapshot?.plan" :key="snapshot.id" ref="manualReviewEditor" :snapshot="snapshot" :video-url="videoUrl" :active="props.active !== false && intentView === 'review' && !historyOpen" :blocked="manualReviewBlocked" @snapshot="adoptManualReview" @saved="notice = $event" />
   </section>
 </template>

@@ -200,18 +200,22 @@ test('transcript replaced video events cannot affect the current pending/playing
   } finally { ui.close() }
 })
 
-test('Workbench actual tab keyboard order includes transcript and preserves legacy commercial/task fallbacks', async () => {
+test('Workbench starts topic results in editing and keyboard navigation follows the visible tabs', async () => {
   const source = readFileSync(new URL('../Workbench.vue', import.meta.url), 'utf8'), script = parse(source).descriptor.scriptSetup!.content
   const ast = ts.createSourceFile('workbench.ts', script, ts.ScriptTarget.ES2022, true, ts.ScriptKind.TS)
   const fn = ast.statements.find(value => ts.isFunctionDeclaration(value) && value.name?.text === 'tabKey')!.getText(ast)
   const code = ts.transpileModule(`${fn}; exports.tabKey = tabKey`, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } }).outputText
-  const activeTab = { value: 'agent' }, topic = { value: true }, results = { value: true }, focused: string[] = [], exported: { tabKey?: (event: any) => void } = {}
+  const activeTab = { value: 'clips' }, topic = { value: true }, results = { value: true }, focused: string[] = [], exported: { tabKey?: (event: any) => void } = {}
   new Function('activeTab', 'topicResultsAvailable', 'resultsAvailable', 'setTab', 'nextTick', 'document', 'exports', code)(activeTab, topic, results,
     (value: string) => { activeTab.value = value }, (callback: () => void) => Promise.resolve().then(callback),
     { getElementById: (id: string) => ({ focus: () => focused.push(id) }) }, exported)
   const key = async (key: string) => { exported.tabKey!({ key, preventDefault() {} }); await flushHost(); return activeTab.value }
-  assert.equal(await key('ArrowRight'), 'transcript'); assert.equal(await key('ArrowRight'), 'topics'); assert.equal(await key('ArrowRight'), 'clips')
-  assert.equal(await key('End'), 'task'); assert.equal(await key('Home'), 'agent'); assert.equal(await key('ArrowLeft'), 'task')
+  const order = ['clips', 'agent', 'transcript', 'topics', 'task']
+  assert.match(script, /selectedJob\.value\?\.status === 'REVIEW_READY' \? topicMode\.value \? 'clips' : 'topics' : 'task'/)
+  assert.deepEqual([...source.matchAll(/<button id="workbench-tab-([a-z]+)" role="tab"/g)].map(match => match[1]), order)
+  for (const tab of order.slice(1)) assert.equal(await key('ArrowRight'), tab)
+  assert.equal(await key('ArrowRight'), 'clips')
+  assert.equal(await key('End'), 'task'); assert.equal(await key('Home'), 'clips'); assert.equal(await key('ArrowLeft'), 'task')
   assert.ok(focused.includes('workbench-tab-transcript'))
   topic.value = false; activeTab.value = 'topics'; assert.equal(await key('ArrowRight'), 'task'); assert.equal(await key('Home'), 'topics')
   results.value = false; activeTab.value = 'task'; assert.equal(await key('ArrowLeft'), 'task')
