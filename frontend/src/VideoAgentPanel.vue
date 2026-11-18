@@ -931,18 +931,18 @@ onBeforeUnmount(() => { scanSubmissions(); stopped = true; mounted = false; clea
         <nav class="agent-history-pagination" aria-label="视频对话历史分页"><span>第 {{ history.pageNumber }} 页</span><button class="text-button" :disabled="pending || historyLoading || !history.canNewer" @click="navigateHistory('newer')">上一页</button><button class="text-button" :disabled="pending || historyLoading || !history.canOlder" @click="navigateHistory('older')">下一页</button><button class="text-button" :disabled="pending || historyLoading" @click="navigateHistory('latest')">回到最新</button></nav>
       </aside>
       <aside v-show="compactReference || !conversationFocused" ref="referenceDock" class="agent-reference" :inert="sessionListOpen ? true : undefined" aria-label="视频参考">
-        <div class="agent-reference-heading"><h3><span class="agent-video-icon" aria-hidden="true">▶</span> 原视频</h3><span class="agent-reference-caption">点击原句，定位回看</span><button v-if="compactReference && referenceVisible" type="button" class="text-button agent-focus-compact" aria-label="附加当前画面位置" title="暂停并固定当前播放位置，仅作为查找提示，尚未取得截图。需结合画面且定位已完成。" :disabled="!canAttachFocus" @click="attachFocus">附加位置</button><button class="text-button agent-reference-toggle" :aria-expanded="referenceVisible" :aria-controls="`agent-reference-${jobId}`" @click="toggleReference">{{ referenceVisible ? '收起视频' : '展开视频' }}</button></div>
+        <div class="agent-reference-heading"><h3><svg class="agent-video-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="m10 9 5 3-5 3Z"/></svg>原视频</h3><span class="agent-reference-caption">点击原句，定位回看</span><button v-if="compactReference && referenceVisible" type="button" class="text-button agent-focus-compact" aria-label="附加当前画面位置" title="暂停并固定当前播放位置，仅作为查找提示，尚未取得截图。需结合画面且定位已完成。" :disabled="!canAttachFocus" @click="attachFocus">附加位置</button><button class="text-button agent-reference-toggle" :aria-expanded="referenceVisible" :aria-controls="`agent-reference-${jobId}`" @click="toggleReference">{{ referenceVisible ? '收起视频' : '展开视频' }}</button></div>
         <div v-show="referenceVisible" :id="`agent-reference-${jobId}`" class="agent-reference-body">
           <div class="agent-reference-video"><video :key="`${videoId}:${videoHash}`" ref="sourcePlayer" :src="videoUrl" controls preload="metadata" playsinline @loadedmetadata="touchFocusPlayer(); seekCitation()" @loadeddata="touchFocusPlayer" @canplay="touchFocusPlayer" @durationchange="touchFocusPlayer" @timeupdate="touchFocusPlayer(); evidenceSequence.timeUpdate($event.currentTarget as HTMLVideoElement)" @playing="evidenceSequence.timeUpdate($event.currentTarget as HTMLVideoElement)" @seeking="touchFocusPlayer(); evidenceSequence.seeking($event.currentTarget as HTMLVideoElement)" @seeked="touchFocusPlayer(); evidenceSequence.seeked($event.currentTarget as HTMLVideoElement)" @pause="touchFocusPlayer(); evidenceSequence.pause($event.currentTarget as HTMLVideoElement)" @ended="evidenceSequence.ended($event.currentTarget as HTMLVideoElement)" @ratechange="evidenceSequence.rateChange($event.currentTarget as HTMLVideoElement)" @play="touchFocusPlayer(); guardPlayback($event)" @error="pauseReference()"></video></div>
           <p v-if="playbackError" class="agent-reference-help" role="status">{{ playbackError }}</p>
           <div v-if="!compactReference" class="agent-focus-controls"><button type="button" class="secondary" :disabled="!canAttachFocus" @click="attachFocus">附加当前画面位置</button><small>暂停并固定当前播放位置，仅作为查找提示，不代表已经取得截图。需结合画面、视频可见且定位已完成。</small><small v-if="focusError" role="status">{{ focusError }}</small></div>
           <p v-if="frameLocation" class="agent-reference-help" role="status">{{ frameLocation.title }} · 原视频 {{ topicTime(frameLocation.time) }}。单帧定位保持暂停，区间回看由你明确触发。</p>
           <div class="agent-evidence-heading"><h4>原句引用 <span v-if="referenceAnswer">第 {{ referenceAnswer.sequence }} 轮 · </span><span>{{ recentCitations.length }}</span></h4><button v-if="recentCitations.length > 3" class="text-button" :aria-expanded="allEvidenceVisible" :aria-controls="`agent-evidence-${jobId}`" @click="allEvidenceVisible = !allEvidenceVisible">{{ allEvidenceVisible ? '收起列表' : `查看全部 ${recentCitations.length} 条` }}</button></div>
-          <div :id="`agent-evidence-${jobId}`" ref="referenceEvidence" class="agent-reference-evidence"><div v-if="citation" class="agent-current-citation"><strong>正在回看 {{ topicTime(citation.start_ms) }} → {{ topicTime(citation.end_ms) }}</strong><button class="text-button" @click="closePreview">关闭定位</button><p>{{ citation.text }}</p></div><p v-if="!recentCitations.length" class="agent-evidence-empty">{{ referenceAnswer ? '本轮未引用原句；可在回答下查看画面依据或回看原视频。' : '提问后，这里会列出回答引用的原句。' }}</p><button v-for="(source, index) in visibleCitations" :key="source.utterance_id" class="agent-evidence-item" :class="{ selected: citation?.utterance_id === source.utterance_id }" :title="source.text" @click="preview(source)"><span class="agent-evidence-number" aria-hidden="true">{{ String(index + 1).padStart(2, '0') }}</span><span class="agent-evidence-copy"><span class="agent-evidence-time">{{ topicTime(source.start_ms) }} → {{ topicTime(source.end_ms) }}</span><span class="agent-evidence-text">{{ source.text }}</span></span><span class="agent-evidence-play" aria-hidden="true">▶</span></button></div>
+          <div :id="`agent-evidence-${jobId}`" ref="referenceEvidence" class="agent-reference-evidence"><div v-if="citation" class="agent-current-citation"><strong>正在回看 {{ topicTime(citation.start_ms) }} → {{ topicTime(citation.end_ms) }}</strong><button class="text-button" @click="closePreview">关闭定位</button><p>{{ citation.text }}</p></div><p v-if="!recentCitations.length" class="agent-evidence-empty">{{ referenceAnswer ? '本轮未引用原句；可在回答下查看画面依据或回看原视频。' : '提问后，这里会列出回答引用的原句。' }}</p><button v-for="(source, index) in visibleCitations" :key="source.utterance_id" class="agent-evidence-item" :class="{ selected: citation?.utterance_id === source.utterance_id }" :title="source.text" @click="preview(source)"><span class="agent-evidence-number" aria-hidden="true">{{ String(index + 1).padStart(2, '0') }}</span><span class="agent-evidence-copy"><span class="agent-evidence-time">{{ topicTime(source.start_ms) }} → {{ topicTime(source.end_ms) }}</span><span class="agent-evidence-text">{{ source.text }}</span></span><svg class="agent-evidence-play" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="m9 5 10 7-10 7Z"/></svg></button></div>
         </div>
       </aside>
       <div class="agent-conversation" :inert="sessionListOpen ? true : undefined">
-        <div class="agent-toolbar"><h2><span class="agent-ai-icon" aria-hidden="true">✦</span> 视频助手</h2><div class="agent-toolbar-actions"><button class="secondary agent-focus-toggle" :aria-pressed="conversationFocused" @click="toggleConversationFocus">{{ conversationFocused ? '并排回看' : '专注对话' }}</button><button ref="historyToggle" class="secondary" :aria-expanded="sessionListOpen" :aria-controls="`agent-history-${jobId}`" @click="toggleHistory">对话记录 <span>本页 {{ history.items.length }}</span></button><button class="secondary" :disabled="pending || selectionUnavailable || dirty || submissionBlocked" @click="newSession">＋ 新对话</button></div></div>
+        <div class="agent-toolbar"><h2>视频助手</h2><div class="agent-toolbar-actions"><button class="secondary agent-focus-toggle" :aria-pressed="conversationFocused" @click="toggleConversationFocus">{{ conversationFocused ? '并排回看' : '专注对话' }}</button><button ref="historyToggle" class="secondary" :aria-expanded="sessionListOpen" :aria-controls="`agent-history-${jobId}`" @click="toggleHistory">对话记录 <span>本页 {{ history.items.length }}</span></button><button class="secondary" :disabled="pending || selectionUnavailable || dirty || submissionBlocked" @click="newSession">＋ 新对话</button></div></div>
         <div v-if="!selected?.turns.length" class="agent-welcome"><template v-if="selectionUnavailable || !history.loaded"><h3>正在核对会话内容</h3><p>完整会话读取并通过来源核对后，才能围绕本轮提问与使用证据。</p></template><template v-else><h3>从视频里找答案</h3><p>可以先概括内容，也可以沿着已有回答继续追问。证据不足时会明确说明。</p></template></div>
         <ol v-else ref="messageList" class="agent-turns" aria-label="对话记录" @scroll.passive="messageScroll"><li v-for="turn in selected.turns" :key="turn.id" class="agent-turn"><div class="agent-question"><span>你的问题 · 第 {{ turn.sequence }} 轮</span><p>{{ turn.question }}</p><small v-if="turn.focus_timestamp_ms !== undefined">附加定位提示 {{ topicTime(turn.focus_timestamp_ms) }}，不是已验证画面证据。</small></div><div class="agent-answer"><div class="agent-answer-heading"><strong>视频助手</strong><span class="agent-status">{{ turnStatus(turn) }}</span><button v-if="agentTurnActive(turn)" class="text-button" :disabled="pending" @click="cancel(turn)">{{ action === 'cancel' ? '正在取消…' : '取消本轮' }}</button></div><p v-if="turn.replay_source_turn_id" class="help agent-replay-origin">复用第 {{ selected?.turns.find(source => source.id === turn.replay_source_turn_id)?.sequence }} 轮已收回答 · 新增模型/ASR 请求 0；原失败和原预算保留。</p><TextRequestProgress :progress="turn.stage.text_progress" :terminal="!agentTurnActive(turn)" /><FailureDiagnostic :diagnostic="turn.stage.diagnostic" :error-code="turn.stage.error_code" :attempt="turn.stage.attempt" />
           <template v-if="turn.result"><span class="agent-scope" :class="turn.result.answer_scope.toLowerCase()">{{ scopes[turn.result.answer_scope] }}</span><AgentEvidenceAnswer v-if="turn.evidence_mode === 'structured'" :turn="turn" :active="active !== false && !sessionListOpen && !selectionUnavailable" @citation="preview($event, turn)" @locate="locateFrame(turn, $event)" /><AgentAnswer v-else class="agent-answer-text" :text="turn.result.answer" /><p v-if="turn.result.answer_scope === 'GENERAL'" class="help">这部分是通用知识补充，不能当作视频中已经说过的话。</p><p v-else-if="turn.result.answer_scope === 'INSUFFICIENT'" class="help">当前视频证据不足，可换个说法，或补充想找的具体内容。</p>
@@ -982,10 +982,10 @@ onBeforeUnmount(() => { scanSubmissions(); stopped = true; mounted = false; clea
 </template>
 
 <style scoped>
-.agent-evidence-strategy{margin:0;padding:8px 10px;border:1px solid #dbe4ed;border-radius:7px;min-width:0}.agent-evidence-strategy legend{font-size:12px;color:#475569}.agent-evidence-strategy label{max-width:100%;white-space:normal}.agent-evidence-strategy small,.agent-evidence-strategy span{overflow-wrap:anywhere}
-.agent-selection-status{flex:none;max-height:100px;overflow:auto;padding:8px 12px;margin-bottom:8px;border:1px solid #dfc8ae;border-radius:7px;background:#fff8ef;font-size:12px;line-height:1.6;overflow-wrap:anywhere}.agent-selection-status button{margin:5px 10px 0 0;font-size:12px}.agent-history-pagination{display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px;margin-top:10px;padding-top:9px;border-top:1px solid #e2e8f0;font-size:12px}.agent-history-pagination button{font-size:12px}
+.agent-evidence-strategy{margin:0;padding:8px 10px;border:1px solid var(--workspace-border, #e4e0d8);border-radius:7px;min-width:0}.agent-evidence-strategy legend{font-size:12px;color:var(--workspace-muted, #675f56)}.agent-evidence-strategy label{max-width:100%;white-space:normal}.agent-evidence-strategy small,.agent-evidence-strategy span{overflow-wrap:anywhere}
+.agent-selection-status{flex:none;max-height:100px;overflow:auto;padding:8px 12px;margin-bottom:8px;border:1px solid #dfc8ae;border-radius:7px;background:#fff8ef;font-size:12px;line-height:1.6;overflow-wrap:anywhere}.agent-selection-status button{margin:5px 10px 0 0;font-size:12px}.agent-history-pagination{display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px;margin-top:10px;padding-top:9px;border-top:1px solid var(--workspace-border, #e4e0d8);font-size:12px}.agent-history-pagination button{font-size:12px}
 .agent-frame-followup-proposal{margin:7px 0;padding:10px;border:1px solid #dcb48d;border-radius:7px;background:#fff8ee;color:#79583c;font-size:12px;line-height:1.7;overflow-wrap:anywhere}.agent-frame-followup-proposal>div{display:flex;flex-wrap:wrap;gap:8px;margin-top:7px}.agent-frame-followup-proposal button{max-width:100%;font-size:12px}
-.agent-panel { container: agent / inline-size; position: relative; display: flex; flex-direction: column; height: 100%; min-height: 0; min-width: 0; margin: 0; padding: 0; overflow: hidden; border: 0; border-radius: 0; background: transparent; color: #1e293b; font-size: 14px; }
+.agent-panel { container: agent / inline-size; position: relative; display: flex; flex-direction: column; height: 100%; min-height: 0; min-width: 0; margin: 0; padding: 0; overflow: hidden; border: 0; border-radius: 0; background: transparent; color: var(--workspace-text, #292621); font-size: 14px; }
 .agent-submission-recovery { flex: none; max-height: min(32vh, 260px); overflow-y: auto; padding: 12px; margin-bottom: 10px; border: 1px solid #e7c895; border-radius: 8px; background: #fff9ef; font-size: 12px; line-height: 1.6; }
 .agent-submission-recovery h3 { font-size: 14px; }.agent-submission-entry { border-top: 1px solid #ead7b7; padding: 10px 0; }.agent-submission-entry:last-child { padding-bottom: 0; }.agent-original-question { white-space: pre-wrap; overflow-wrap: anywhere; }.agent-submission-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; }.agent-submission-error, .agent-submission-limit { color: #985c32; overflow-wrap: anywhere; }
 .agent-panel h2, .agent-panel h3, .agent-panel h4, .agent-panel p { margin: 0; }
@@ -993,119 +993,118 @@ onBeforeUnmount(() => { scanSubmissions(); stopped = true; mounted = false; clea
 .agent-refresh-error { color: #9a5a37; }
 .agent-layout { display: grid; grid-template-columns: var(--workspace-preview-width, clamp(300px, 32%, 400px)) minmax(0, 1fr); gap: 20px; flex: 1; min-width: 0; min-height: 0; overflow: hidden; }
 .agent-layout.conversation-focused { grid-template-columns: minmax(0, 1fr); }
-.agent-reference, .agent-conversation { min-width: 0; min-height: 0; border: 1px solid #e2e8f0; border-radius: 10px; background: #fff; overflow: hidden; }
+.agent-reference, .agent-conversation { min-width: 0; min-height: 0; border: 1px solid var(--workspace-border, #e4e0d8); border-radius: 12px; background: var(--workspace-surface, #fff); overflow: hidden; }
 .agent-reference { display: flex; flex-direction: column; }
-.agent-reference-heading, .agent-toolbar { display: flex; flex: none; min-height: 48px; align-items: center; justify-content: space-between; gap: 8px 10px; padding: 7px 14px; border-bottom: 1px solid #edf1f5; }
+.agent-reference-heading, .agent-toolbar { display: flex; flex: none; min-height: 48px; align-items: center; justify-content: space-between; gap: 8px 12px; padding: 8px 16px; border-bottom: 1px solid var(--workspace-border, #e4e0d8); }
 .agent-toolbar { flex-wrap: wrap; }
-.agent-reference-heading h3, .agent-toolbar h2 { display: flex; align-items: center; gap: 7px; color: #1f2937; font-size: 16px; line-height: 1.6; font-weight: 650; white-space: nowrap; }
-.agent-video-icon { color: #7b8799; font-size: 11px; }
-.agent-ai-icon { display: inline-flex; align-items: center; justify-content: center; width: 26px; height: 26px; border-radius: 8px; background: #fff0e8; color: #d26a44; font-size: 20px; }
-.agent-reference-caption { margin-left: auto; color: #8491a2; font-size: 11px; }
-.agent-reference-toggle { display: none; align-items: center; min-height: 30px; color: #475569; font-size: 13px; }
-.agent-focus-compact { flex: none; margin-left: auto; min-height: 30px; padding: 3px 0; color: #475569; font-size: 12px; white-space: nowrap; }
+.agent-reference-heading h3, .agent-toolbar h2 { display: flex; align-items: center; gap: 8px; color: var(--workspace-text, #292621); font-size: 15px; line-height: 1.6; font-weight: 600; white-space: nowrap; }
+.agent-video-icon { flex: none; width: 16px; height: 16px; color: var(--workspace-muted, #675f56); }
+.agent-reference-caption { margin-left: auto; color: var(--workspace-muted, #675f56); font-size: 12px; }
+.agent-reference-toggle { display: none; align-items: center; min-height: 30px; color: var(--workspace-muted, #675f56); font-size: 13px; }
+.agent-focus-compact { flex: none; margin-left: auto; min-height: 30px; padding: 3px 0; color: var(--workspace-muted, #675f56); font-size: 12px; white-space: nowrap; }
 .agent-reference-body { display: flex; flex-direction: column; flex: 1; min-height: 0; min-width: 0; gap: 0; padding: 0; overflow: hidden; }
-.agent-reference-video { position: relative; flex: none; width: 100%; aspect-ratio: 16/9; background: #101520; overflow: hidden; }
+.agent-reference-video { position: relative; flex: none; width: 100%; aspect-ratio: 16/9; background: var(--workspace-video, #211f1b); overflow: hidden; }
 .agent-reference-video video { position: absolute; inset: 0; display: block; width: 100%; height: 100%; object-fit: contain; }
-.agent-current-citation { display: flex; flex: none; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 4px 10px; border: 1px solid #f0d8cc; border-radius: 5px; padding: 6px 9px; background: #fff7f2; }
-.agent-current-citation strong { color: #a85635; font-size: 13px; line-height: 1.6; font-weight: 500; }
-.agent-current-citation .text-button { min-height: 28px; color: #64748b; font-size: 12px; white-space: normal; }
-.agent-current-citation > p { flex-basis: 100%; color: #334155; font-size: 14px; line-height: 1.8; white-space: pre-wrap; overflow-wrap: anywhere; }
+.agent-current-citation { display: flex; flex: none; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 4px 10px; border: 1px solid var(--workspace-border, #e4e0d8); border-radius: 8px; padding: 6px 9px; background: var(--workspace-accent-soft, #f7ebe5); }
+.agent-current-citation strong { color: var(--workspace-accent, #a94424); font-size: 13px; line-height: 1.6; font-weight: 500; }
+.agent-current-citation .text-button { min-height: 28px; color: var(--workspace-muted, #675f56); font-size: 12px; white-space: normal; }
+.agent-current-citation > p { flex-basis: 100%; color: var(--workspace-text, #292621); font-size: 14px; line-height: 1.8; white-space: pre-wrap; overflow-wrap: anywhere; }
 .agent-reference-help { flex: none; color: #9a5a37; font-size: 13px; line-height: 1.7; overflow-wrap: anywhere; }
-.agent-evidence-heading { display: flex; flex: none; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 4px 8px; padding: 11px 12px 7px; }
-.agent-evidence-heading h4 { color: #334155; font-size: 13px; line-height: 1.6; font-weight: 600; }
-.agent-evidence-heading h4 > span { display: inline-block; min-width: 20px; margin-left: 4px; padding: 1px 5px; border-radius: 4px; color: #7b8799; background: #f1f4f8; font-size: 11px; text-align: center; }
+.agent-evidence-heading { display: flex; flex: none; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 4px 8px; padding: 12px 12px 8px; }
+.agent-evidence-heading h4 { color: var(--workspace-text, #292621); font-size: 13px; line-height: 1.6; font-weight: 600; }
+.agent-evidence-heading h4 > span { margin-left: 4px; color: var(--workspace-muted, #675f56); font-size: 12px; font-weight: 400; font-variant-numeric: tabular-nums; }
 .agent-evidence-heading .text-button { font-size: 12px; }
 .agent-reference-evidence { flex: 1; min-height: 0; min-width: 0; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; scrollbar-width: thin; padding: 0 12px 12px; }
-.agent-evidence-empty { padding: 12px 7px; color: #64748b; font-size: 13px; line-height: 1.8; }
-.agent-evidence-item { display: flex; align-items: flex-start; gap: 8px; width: 100%; min-width: 0; border: 1px solid #edf1f5; border-radius: 7px; margin-top: 7px; padding: 9px; background: #fff; text-align: left; color: #334155; }
-.agent-evidence-item:hover { background: #f8fafc; }
-.agent-evidence-item.selected, .agent-evidence-item.selected:hover { border-color: #efc6b5; background: #fff7f2; }
-.agent-evidence-number { flex: none; color: #a0aaba; font-size: 11px; line-height: 20px; font-variant-numeric: tabular-nums; }
+.agent-evidence-empty { padding: 12px 7px; color: var(--workspace-muted, #675f56); font-size: 13px; line-height: 1.8; }
+.agent-evidence-item { display: flex; align-items: flex-start; gap: 8px; width: 100%; min-width: 0; border: 1px solid var(--workspace-border, #e4e0d8); border-radius: 8px; margin-top: 8px; padding: 12px; background: var(--workspace-surface, #fff); text-align: left; color: var(--workspace-text, #292621); }
+.agent-evidence-item:hover { background: var(--workspace-canvas, #f4f3ef); }
+.agent-evidence-item.selected, .agent-evidence-item.selected:hover { border-color: var(--workspace-border, #e4e0d8); background: var(--workspace-accent-soft, #f7ebe5); }
+.agent-evidence-number { flex: none; color: var(--workspace-muted, #675f56); font-size: 12px; line-height: 20px; font-variant-numeric: tabular-nums; }
 .agent-evidence-copy { min-width: 0; flex: 1; }
-.agent-evidence-time { display: block; color: #a35d42; font-size: 11px; line-height: 20px; font-variant-numeric: tabular-nums; }
-.agent-evidence-text { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; margin-top: 4px; color: #475569; font-size: 14px; line-height: 1.7; overflow-wrap: anywhere; }
-.agent-evidence-play { flex: none; color: #bdc6d2; font-size: 10px; line-height: 20px; }
+.agent-evidence-time { display: block; color: var(--workspace-muted, #675f56); font-size: 12px; line-height: 20px; font-variant-numeric: tabular-nums; }
+.agent-evidence-text { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; margin-top: 4px; color: var(--workspace-muted, #675f56); font-size: 14px; line-height: 1.7; overflow-wrap: anywhere; }
+.agent-evidence-play { flex: none; width: 16px; height: 16px; margin-top: 2px; color: var(--workspace-muted, #675f56); }
 .agent-conversation { display: flex; flex-direction: column; }
 .agent-toolbar-actions { display: flex; flex: 0 1 auto; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 6px; min-width: 0; max-width: 100%; margin-left: auto; }
-.agent-toolbar-actions button { min-height: 36px; padding: 6px 10px; color: #475569; background: #fff; font-size: 13px; line-height: 1.6; white-space: nowrap; }
-.agent-toolbar-actions .agent-focus-toggle { border-color: transparent; background: #f5f7fa; }
-.agent-focus-toggle[aria-pressed=true] { color: #b95431; background: #fff0e8; }
-.agent-toolbar-actions button > span { margin-left: 4px; color: #64748b; }
-.agent-history-backdrop { position: absolute; inset: 0; z-index: 9; background: #0f172a20; }
-.agent-sessions { position: absolute; top: 65px; right: 24px; z-index: 10; width: min(340px, calc(100% - 32px)); max-height: min(420px, calc(100% - 90px)); overflow-y: auto; overscroll-behavior: contain; border: 1px solid #dce4ed; border-radius: 8px; background: #fff; padding: 14px; box-shadow: 0 12px 36px #0f172a20; }
+.agent-toolbar-actions button { min-height: 36px; padding: 6px 12px; border-radius: 8px; color: var(--workspace-muted, #675f56); background: var(--workspace-surface, #fff); font-size: 13px; line-height: 1.6; white-space: nowrap; }
+.agent-toolbar-actions .agent-focus-toggle { border-color: transparent; background: var(--workspace-hover, #eeebe4); }
+.agent-focus-toggle[aria-pressed=true] { color: var(--workspace-accent, #a94424); background: var(--workspace-accent-soft, #f7ebe5); }
+.agent-toolbar-actions button > span { margin-left: 4px; color: var(--workspace-muted, #675f56); }
+.agent-history-backdrop { position: absolute; inset: 0; z-index: 9; background: #211f1b20; }
+.agent-sessions { position: absolute; top: 64px; right: 24px; z-index: 10; width: min(340px, calc(100% - 32px)); max-height: min(420px, calc(100% - 88px)); overflow-y: auto; overscroll-behavior: contain; border: 1px solid var(--workspace-border, #e4e0d8); border-radius: 12px; background: var(--workspace-surface, #fff); padding: 16px; box-shadow: 0 8px 24px #211f1b14; }
 .agent-section-heading, .agent-answer-heading, .agent-compose-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
 .agent-section-heading { justify-content: space-between; }
 .agent-section-heading h3 { font-size: 14px; font-weight: 600; }
 .agent-history-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
-.agent-session { display: block; width: 100%; border: 1px solid transparent; border-radius: 6px; background: #fff; text-align: left; padding: 10px; margin-top: 8px; color: #334155; }
+.agent-session { display: block; width: 100%; border: 1px solid transparent; border-radius: 8px; background: var(--workspace-surface, #fff); text-align: left; padding: 10px; margin-top: 8px; color: var(--workspace-text, #292621); }
 .agent-session strong { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; font-size: 13px; font-weight: 500; line-height: 1.6; }
-.agent-session small { display: block; margin-top: 4px; color: #64748b; font-size: 12px; }
-.agent-session.selected, .agent-session.selected:hover { border-color: #f0c9ba; background: #fff4ee; }
+.agent-session small { display: block; margin-top: 4px; color: var(--workspace-muted, #675f56); font-size: 12px; }
+.agent-session.selected, .agent-session.selected:hover { border-color: var(--workspace-border, #e4e0d8); background: var(--workspace-accent-soft, #f7ebe5); }
 .agent-turns, .agent-welcome { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; padding: 20px max(24px, calc((100% - 760px) / 2)); margin: 0; list-style: none; scrollbar-width: thin; }
-.agent-welcome { display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; color: #64748b; }
-.agent-welcome h3 { margin-bottom: 10px; color: #1e293b; font-size: 20px; font-weight: 600; }
+.agent-welcome { display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; color: var(--workspace-muted, #675f56); }
+.agent-welcome h3 { margin-bottom: 12px; color: var(--workspace-text, #292621); font-size: 20px; font-weight: 500; }
 .agent-welcome p { max-width: 380px; font-size: 14px; line-height: 1.8; }
-.agent-turn { margin: 0 0 26px; }
+.agent-turn { margin: 0 0 24px; }
 .agent-turn:last-child { margin-bottom: 0; }
-.agent-question { width: fit-content; max-width: 94%; margin-left: auto; padding: 12px 16px; border-radius: 12px 12px 3px 12px; background: #f3f5f8; }
-.agent-question span { display: block; margin-bottom: 5px; color: #64748b; font-size: 12px; }
+.agent-question { width: fit-content; max-width: 94%; margin-left: auto; padding: 12px 16px; border-radius: 12px 12px 4px 12px; background: var(--workspace-canvas, #f4f3ef); }
+.agent-question span { display: block; margin-bottom: 5px; color: var(--workspace-muted, #675f56); font-size: 12px; }
 .agent-question p, .agent-clip-suggestion > p { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.85; font-size: 15px; }
-.agent-answer { padding-top: 18px; }
+.agent-answer { padding-top: 20px; }
 .agent-answer-text { font-size: 15px; line-height: 1.85; }
-.agent-answer-heading { margin-bottom: 10px; }
+.agent-answer-heading { margin-bottom: 12px; }
 .agent-answer-heading > strong { font-size: 14px; font-weight: 600; }
-.agent-status { color: #64748b; font-size: 12px; }
+.agent-status { color: var(--workspace-muted, #675f56); font-size: 12px; }
 .agent-scope { display: inline-block; margin-bottom: 8px; padding: 3px 7px; border-radius: 4px; color: #55745c; background: #edf5ef; font-size: 12px; }
 .agent-scope.general { background: #eff6ff; color: #526985; }
 .agent-scope.insufficient { background: #fff7ed; color: #9a6238; }
-.agent-citations, .agent-tools { margin: 8px 0; border: 1px solid #edf1f5; border-radius: 6px; color: #64748b; font-size: 12px; background: #fafbfc; }
-.agent-citations summary, .agent-tools summary { padding: 8px 10px; cursor: pointer; color: #64748b; }
-.agent-citation { display: block; width: calc(100% - 20px); padding: 9px 10px; margin: 0 10px 10px; border: 1px solid #e2e8f0; border-radius: 5px; background: #fff; text-align: left; color: #334155; }
-.agent-citation span { color: #64748b; font-size: 12px; }
+.agent-citations, .agent-tools { margin: 8px 0; border: 1px solid var(--workspace-border, #e4e0d8); border-radius: 8px; color: var(--workspace-muted, #675f56); font-size: 12px; background: var(--workspace-canvas, #f4f3ef); }
+.agent-citations summary, .agent-tools summary { padding: 8px 10px; cursor: pointer; color: var(--workspace-muted, #675f56); }
+.agent-citation { display: block; width: calc(100% - 20px); padding: 9px 10px; margin: 0 10px 10px; border: 1px solid var(--workspace-border, #e4e0d8); border-radius: 8px; background: var(--workspace-surface, #fff); text-align: left; color: var(--workspace-text, #292621); }
+.agent-citation span { color: var(--workspace-muted, #675f56); font-size: 12px; }
 .agent-citation p { margin-top: 5px; font-size: 14px; line-height: 1.8; overflow-wrap: anywhere; }
-.agent-citation.selected, .agent-citation.selected:hover { border-color: #e47650; background: #fff8f4; }
-.agent-citation-row { margin: 0 10px 10px; padding: 10px; border: 1px solid #e2e8f0; border-radius: 7px; background: #fff; }
+.agent-citation.selected, .agent-citation.selected:hover { border-color: var(--workspace-accent, #a94424); background: var(--workspace-accent-soft, #f7ebe5); }
+.agent-citation-row { margin: 0 10px 10px; padding: 10px; border: 1px solid var(--workspace-border, #e4e0d8); border-radius: 8px; background: var(--workspace-surface, #fff); }
 .agent-citation-row .agent-citation { width: 100%; margin: 0; padding: 8px 0; border: 0; background: transparent; }
-.agent-anchor-choice { display: inline-flex; min-height: 36px; align-items: center; gap: 8px; color: #475569; font-size: 13px; cursor: pointer; }
-.agent-anchor-choice input { width: 17px; height: 17px; margin: 0; accent-color: #e47650; }
-.agent-anchor-help { padding: 0 12px 10px; color: #64748b; font-size: 13px; line-height: 1.8; }
-.agent-anchor-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; padding: 2px 12px 12px; color: #64748b; font-size: 13px; }
+.agent-anchor-choice { display: inline-flex; min-height: 36px; align-items: center; gap: 8px; color: var(--workspace-muted, #675f56); font-size: 13px; cursor: pointer; }
+.agent-anchor-choice input { width: 17px; height: 17px; margin: 0; accent-color: var(--workspace-accent, #a94424); }
+.agent-anchor-help { padding: 0 12px 10px; color: var(--workspace-muted, #675f56); font-size: 13px; line-height: 1.8; }
+.agent-anchor-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; padding: 2px 12px 12px; color: var(--workspace-muted, #675f56); font-size: 13px; }
 .agent-anchor-actions button { min-height: 36px; margin-left: auto; }
 .agent-anchor-actions small { flex-basis: 100%; font-size: 12px; line-height: 1.8; }
 
 .agent-tools ol { padding: 0 11px 10px; margin: 0; list-style: none; }
-.agent-tools li { padding: 6px 0 9px 11px; border-left: 2px solid #e2e8f0; overflow-wrap: anywhere; }
-.agent-tools strong { color: #334155; font-weight: 500; }
+.agent-tools li { padding: 6px 0 9px 11px; border-left: 2px solid var(--workspace-border, #e4e0d8); overflow-wrap: anywhere; }
+.agent-tools strong { color: var(--workspace-text, #292621); font-weight: 500; }
 .agent-tools p { margin: 4px 0; line-height: 1.7; }
 .agent-tools small { font-size: 12px; }
-.agent-clip-suggestion { margin-top: 12px; border: 1px solid #e2e8f0; border-radius: 6px; padding: 11px; background: #f8fafc; }
+.agent-clip-suggestion { margin-top: 12px; border: 1px solid var(--workspace-border, #e4e0d8); border-radius: 8px; padding: 11px; background: var(--workspace-canvas, #f4f3ef); }
 .agent-clip-suggestion > p { margin-bottom: 9px; }
-.agent-clip-suggestion small { display: block; margin-top: 8px; color: #64748b; font-size: 12px; line-height: 1.7; }
-.agent-reading-actions { display: flex; flex: none; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 3px 8px; padding: 4px 20px; border-top: 1px solid #edf1f5; color: #64748b; font-size: 12px; }
-.agent-reading-actions .text-button { padding: 3px 0; color: #64748b; font-size: 12px; }
-.agent-compose { position: relative; flex: none; width: min(820px, 100%); margin: 0 auto; padding: 5px 16px 10px; background: #fff; }
-.agent-input-box { border: 1px solid #d8e0e9; border-radius: 9px; padding: 8px 10px; background: #fff; }
-.agent-input-box:focus-within { border-color: #d49a80; box-shadow: 0 0 0 2px #fcf0e9; }
-.agent-compose textarea { display: block; width: 100%; height: 38px; min-height: 36px; max-height: 100px; resize: vertical; margin: 0; border: 0; padding: 0; color: #1e293b; background: transparent; font: inherit; font-size: 14px; line-height: 1.7; }
+.agent-clip-suggestion small { display: block; margin-top: 8px; color: var(--workspace-muted, #675f56); font-size: 12px; line-height: 1.7; }
+.agent-reading-actions { display: flex; flex: none; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 4px 8px; padding: 4px 16px; border-top: 1px solid var(--workspace-border, #e4e0d8); color: var(--workspace-muted, #675f56); font-size: 12px; }
+.agent-reading-actions .text-button { padding: 3px 0; color: var(--workspace-muted, #675f56); font-size: 12px; }
+.agent-compose { position: relative; flex: none; width: min(820px, 100%); margin: 0 auto; padding: 8px 16px 12px; background: var(--workspace-surface, #fff); }
+.agent-input-box { border: 1px solid var(--workspace-border, #e4e0d8); border-radius: 12px; padding: 12px; background: var(--workspace-surface, #fff); }
+.agent-input-box:focus-within { border-color: var(--workspace-accent, #a94424); outline: 2px solid var(--workspace-accent, #a94424); outline-offset: 2px; }
+.agent-compose textarea { display: block; width: 100%; height: 38px; min-height: 36px; max-height: 100px; resize: vertical; margin: 0; border: 0; padding: 0; color: var(--workspace-text, #292621); background: transparent; font: inherit; font-size: 14px; line-height: 1.7; }
 .agent-compose textarea:focus { outline: 0; }
-.agent-compose textarea::placeholder { color: #8491a2; }
-.agent-compose-actions { position: relative; margin-top: 5px; gap: 6px 10px; }
-.agent-compose-actions .primary { min-height: 34px; margin-left: auto; padding: 7px 12px; font-size: 13px; line-height: 1.5; }
-.agent-character-count { color: #64748b; font-size: 12px; }
-.agent-options { position: relative; margin-right: auto; color: #64748b; font-size: 12px; }
+.agent-compose textarea::placeholder { color: var(--workspace-muted, #675f56); }
+.agent-compose-actions { position: relative; margin-top: 8px; gap: 8px 12px; }
+.agent-compose-actions .primary { min-height: 36px; margin-left: auto; padding: 8px 12px; border-radius: 8px; font-size: 13px; line-height: 1.5; }
+.agent-character-count { color: var(--workspace-muted, #675f56); font-size: 12px; }
+.agent-options { position: relative; margin-right: auto; color: var(--workspace-muted, #675f56); font-size: 12px; }
 .agent-options summary { padding: 5px 0; cursor: pointer; }
-.agent-options summary > span { color: #8491a2; }
-.agent-options-body { position: absolute; bottom: calc(100% + 16px); left: 0; z-index: 3; width: 270px; max-width: calc(100vw - 64px); border: 1px solid #dce4ed; border-radius: 7px; padding: 14px; background: #fff; box-shadow: 0 8px 32px #0f172a15; }
+.agent-options summary > span { color: var(--workspace-muted, #675f56); }
+.agent-options-body { position: absolute; bottom: calc(100% + 16px); left: 0; z-index: 3; width: 270px; max-width: calc(100vw - 64px); border: 1px solid var(--workspace-border, #e4e0d8); border-radius: 8px; padding: 14px; background: var(--workspace-surface, #fff); box-shadow: 0 8px 32px #211f1b15; }
 .agent-options-body label { display: flex; align-items: center; gap: 12px; font-size: 13px; }
-.agent-options-body input { width: 60px; min-width: 0; border: 1px solid #cbd5e1; border-radius: 5px; padding: 7px; color: #334155; }
+.agent-options-body input { width: 60px; min-width: 0; border: 1px solid var(--workspace-border, #e4e0d8); border-radius: 8px; padding: 7px; color: var(--workspace-text, #292621); }
 .agent-options-body p { margin-top: 9px; font-size: 12px; line-height: 1.7; }
-.agent-visual-option{display:flex;flex-wrap:wrap;align-items:center;gap:4px 9px;margin-bottom:6px;font-size:11px;line-height:1.6;color:#64748b}.agent-visual-option label{display:flex;align-items:center;gap:5px;white-space:nowrap;color:#334155}.agent-visual-option input{margin:0}.agent-visual-option small{flex-basis:100%;overflow-wrap:anywhere}.agent-visual-option .text-button{padding:2px 0}
-.agent-focus-controls{display:flex;flex-wrap:wrap;align-items:center;gap:6px;padding:8px 12px;font-size:11px;color:#64748b;line-height:1.6}.agent-focus-controls small{flex-basis:100%;overflow-wrap:anywhere}.agent-focus-chip{margin:5px 0 8px;padding:8px 10px;background:#eef6fb;border:1px solid #cbdfea;border-radius:7px;font-size:11px;line-height:1.6;overflow-wrap:anywhere}.agent-focus-chip strong{margin-right:8px;color:#334155}.agent-focus-chip>div{display:flex;gap:12px;flex-wrap:wrap}.agent-focus-chip p{color:#985c32}
+.agent-visual-option{display:flex;flex-wrap:wrap;align-items:center;gap:4px 9px;margin-bottom:6px;font-size:12px;line-height:1.6;color:var(--workspace-muted, #675f56)}.agent-visual-option label{display:flex;align-items:center;gap:5px;white-space:nowrap;color:var(--workspace-text, #292621)}.agent-visual-option input{margin:0}.agent-visual-option small{flex-basis:100%;overflow-wrap:anywhere}.agent-visual-option .text-button{padding:2px 0}
+.agent-focus-controls{display:flex;flex-wrap:wrap;align-items:center;gap:6px;padding:8px 12px;font-size:12px;color:var(--workspace-muted, #675f56);line-height:1.6}.agent-focus-controls small{flex-basis:100%;overflow-wrap:anywhere}.agent-focus-chip{margin:5px 0 8px;padding:8px 10px;background:#eef6fb;border:1px solid #cbdfea;border-radius:7px;font-size:12px;line-height:1.6;overflow-wrap:anywhere}.agent-focus-chip strong{margin-right:8px;color:var(--workspace-text, #292621)}.agent-focus-chip>div{display:flex;gap:12px;flex-wrap:wrap}.agent-focus-chip p{color:#985c32}
 .agent-examples { display: flex; gap: 8px; margin-bottom: 10px; padding-bottom: 3px; overflow-x: auto; scrollbar-width: thin; }
-.agent-examples button { flex: none; padding: 7px 9px; border-radius: 6px; color: #64748b; background: #fff; font-size: 12px; white-space: nowrap; }
-.agent-panel .help { color: #64748b; font-size: 13px; line-height: 1.7; }
+.agent-examples button { flex: none; padding: 7px 9px; border-radius: 8px; color: var(--workspace-muted, #675f56); background: var(--workspace-surface, #fff); font-size: 12px; white-space: nowrap; }
+.agent-panel .help { color: var(--workspace-muted, #675f56); font-size: 13px; line-height: 1.7; }
 .agent-compose > .help { margin-top: 8px; font-size: 12px; }
-.agent-panel :deep(.text-recovery) { color: #475569; background: #f8fafc; border-color: #cbd5e1; }
+.agent-panel :deep(.text-recovery) { color: var(--workspace-muted, #675f56); background: var(--workspace-canvas, #f4f3ef); border-color: var(--workspace-border, #e4e0d8); }
 @container agent (max-width:780px) {
   .agent-layout { display: flex; flex-direction: column; gap: 10px; overflow: hidden; }
   .agent-reference { flex: 0 1 auto; max-height: max(44px, min(220px, calc(100% - 340px))); }
@@ -1129,7 +1128,7 @@ onBeforeUnmount(() => { scanSubmissions(); stopped = true; mounted = false; clea
   .agent-toolbar { gap: 6px 10px; }
   .agent-toolbar h2 { font-size: 13px; }
   .agent-toolbar-actions { gap: 5px; }
-  .agent-toolbar-actions button { min-height: 30px; padding: 5px 7px; }
+  .agent-toolbar-actions button { min-height: 36px; padding: 6px 8px; }
   .agent-toolbar-actions button > span, .agent-character-count, .agent-options summary > span { display: none; }
   .agent-question p, .agent-answer-text { font-size: 14px; }
   .agent-input-box { padding: 9px 10px; }
@@ -1153,4 +1152,5 @@ onBeforeUnmount(() => { scanSubmissions(); stopped = true; mounted = false; clea
     .agent-compose { max-height: none; overflow: visible; }
   }
 }
+.agent-evidence-time { font-family: ui-monospace, SFMono-Regular, Consolas, 'Liberation Mono', monospace; font-variant-numeric: tabular-nums; }
 </style>

@@ -422,27 +422,29 @@ onUnmounted(() => { stopped = true; compactQuery.removeEventListener('change', u
   <div class="workbench-shell" :class="{ 'sidebar-collapsed': sidebarCollapsed }" @keydown.esc="closeTasks">
     <button v-if="mobileTasksOpen" class="task-backdrop" aria-label="关闭任务列表" @click="closeTasks"></button>
     <aside id="workbench-tasks" class="workbench-sidebar" :class="{ open: mobileTasksOpen }" :role="compactLayout && mobileTasksOpen ? 'dialog' : undefined" :aria-modal="compactLayout && mobileTasksOpen ? true : undefined" aria-label="视频与分析任务" @keydown="taskDrawerKey">
-      <a class="brand" href="/" aria-label="LiveCut AI 首页" @click.prevent="openNewAnalysis"><span class="brand-mark">L<span>✦</span></span><strong>LiveCut<span>AI</span></strong></a>
+      <a class="brand" href="/" aria-label="LiveCut AI 首页" @click.prevent="openNewAnalysis">
+        <span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M8 5v14m4-10 5 3-5 3Z"/></svg></span>
+        <strong>LiveCut <span>AI</span></strong>
+      </a>
       <button id="workbench-task-close" class="mobile-sidebar-close" aria-label="收起任务列表" @click="closeTasks">×</button>
-      <div class="sidebar-actions"><button class="primary" :disabled="!!pending" @click="chooseUpload">＋ 上传视频</button><button class="secondary" :disabled="!!pending" @click="chooseSourceImport">链接导入</button><button class="secondary" :disabled="!!pending" @click="openNewAnalysis">新建分析</button></div>
-      <div class="sidebar-heading"><h2>视频与任务 <span>{{ jobs.length }}</span></h2><button class="text-button" :disabled="loading" aria-label="刷新任务列表" @click="refresh">↻</button></div>
-      <div class="sidebar-counts"><span>分析中 {{ activeCount }}</span><span>待审核 {{ reviewCount }}</span></div>
-      <div class="task-scope" role="group" aria-label="任务列表范围"><button :aria-pressed="taskListScope === 'recent'" @click="taskListScope = 'recent'">最近视频</button><button :aria-pressed="taskListScope === 'all'" @click="taskListScope = 'all'">全部分析 <span>{{ jobs.length }}</span></button></div>
-      <div class="sidebar-filters"><label class="search sidebar-search"><span aria-hidden="true">⌕</span><input id="task-search" v-model="query" placeholder="搜索视频或任务" aria-label="搜索任务"></label>
+      <div class="sidebar-actions"><button class="secondary" :disabled="!!pending" @click="chooseUpload">上传视频</button><button class="secondary" :disabled="!!pending" @click="chooseSourceImport">链接导入</button><button class="secondary sidebar-new-analysis" :disabled="!!pending" @click="openNewAnalysis">新建分析</button></div>
+      <div class="sidebar-heading"><h2>视频与任务</h2><button class="text-button" :disabled="loading" aria-label="刷新任务列表" @click="refresh"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M20 10a8 8 0 1 0 .1 3M20 4v6h-6"/></svg></button></div>
+      <div v-if="activeCount || reviewCount" class="sidebar-counts"><span v-if="activeCount">分析中 {{ activeCount }}</span><span v-if="reviewCount">待审核 {{ reviewCount }}</span></div>
+      <div class="task-scope" role="group" aria-label="任务列表范围"><button :aria-pressed="taskListScope === 'recent'" @click="taskListScope = 'recent'">最近视频</button><button :aria-pressed="taskListScope === 'all'" @click="taskListScope = 'all'">全部分析 <span v-if="jobs.length">{{ jobs.length }}</span></button></div>
+      <div class="sidebar-filters"><label class="search sidebar-search"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/></svg><input id="task-search" v-model="query" placeholder="搜索视频或任务" aria-label="搜索任务"></label>
       <select v-model="filter" class="sidebar-filter" aria-label="筛选任务状态"><option value="ALL">全部状态</option><option value="RUNNING">正在分析</option><option value="QUEUED">等待执行</option><option value="REVIEW_READY">待人工审核</option><option value="FAILED">执行失败</option><option value="CANCELLED">已取消</option></select>
       </div><p class="task-list-caption">{{ query.trim() ? '搜索覆盖全部历史分析' : taskListScope === 'recent' ? '每个视频只显示最近一次分析' : '保留每一次分析与处理结果' }}</p>
       <div v-if="loading" class="sidebar-empty">正在读取任务…</div>
-      <div v-else-if="!visibleJobs.length" class="sidebar-empty">{{ jobs.length ? '没有匹配的任务' : '上传第一段视频，开始整理。' }}</div>
-      <div v-else class="task-list" aria-label="分析任务列表"><button v-for="job in visibleJobs" :key="job.id" class="task-row" :class="{ active: selectedJob?.id === job.id }" :aria-current="selectedJob?.id === job.id ? 'true' : undefined" :disabled="!!pending" @click="openTask(job.id)"><span class="video-tile" aria-hidden="true">▷</span><span class="task-info"><strong :title="videoName(job.video_id)">{{ videoName(job.video_id) }}</strong><span>第 {{ job.generation }} 次分析 · {{ date(job.created_at) }}</span><span class="task-row-bottom"><span class="status" :class="job.status.toLowerCase()">{{ names[job.status] ?? job.status }}</span><small>#{{ job.id.slice(0, 8) }}</small></span></span></button></div>
-      <div class="sidebar-footer"><span class="small-dot"></span>本地工作区 <span>{{ videos.length }} 个视频素材</span></div>
+      <div v-else-if="!visibleJobs.length" class="sidebar-empty">{{ jobs.length ? '没有匹配的任务' : '暂无分析任务' }}</div>
+      <div v-else class="task-list" aria-label="分析任务列表"><button v-for="job in visibleJobs" :key="job.id" class="task-row" :class="{ active: selectedJob?.id === job.id }" :aria-current="selectedJob?.id === job.id ? 'true' : undefined" :disabled="!!pending" @click="openTask(job.id)"><span class="video-tile" aria-hidden="true"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M8 5v14l11-7Z"/></svg></span><span class="task-info"><strong :title="videoName(job.video_id)">{{ videoName(job.video_id) }}</strong><span>第 {{ job.generation }} 次分析 · {{ date(job.created_at) }}</span><span class="task-row-bottom"><span class="status" :class="job.status.toLowerCase()">{{ names[job.status] ?? job.status }}</span><small>#{{ job.id.slice(0, 8) }}</small></span></span></button></div>
+      <div class="sidebar-footer"><span>本地工作区</span><span>{{ videos.length }} 个视频素材</span></div>
     </aside>
     <main class="workbench-main" :inert="compactLayout && mobileTasksOpen ? true : undefined">
       <header class="workbench-header">
-        <span class="workspace-brand" aria-label="LiveCut AI"><span aria-hidden="true">L</span><strong>LiveCut</strong></span>
         <button id="workbench-task-toggle" class="mobile-task-toggle secondary" :aria-label="taskListExpanded ? '收起任务列表' : '打开任务列表'" :title="taskListExpanded ? '收起任务列表' : '打开任务列表'" :aria-expanded="taskListExpanded" aria-controls="workbench-tasks" @click="toggleTasks"><svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16M13 9h4M13 13h4"/></svg><span>任务列表</span></button>
         <span class="header-divider" aria-hidden="true"></span>
         <div class="current-video"><h1 :title="selectedJob ? videoName(selectedJob.video_id) : ''">{{ selectedJob ? videoName(selectedJob.video_id) : '新建视频分析' }}</h1><p v-if="selectedJob">第 {{ selectedJob.generation }} 次分析<span v-if="!resultsAvailable" class="header-stage-progress">{{ completeCount }}/{{ selectedJob.stages.length }} 阶段完成</span></p></div>
-        <div class="header-state"><span v-if="selectedJob" class="status" :class="selectedJob.status.toLowerCase()">{{ resultsAvailable ? '解析完成' : names[selectedJob.status] ?? selectedJob.status }}</span><span class="connection"><i :class="{ online }"></i>{{ online ? '服务已连接' : '服务未连接' }}</span><button class="header-upload primary" aria-label="上传视频" title="上传视频" :disabled="!!pending" @click="chooseUpload"><svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M12 16V4m-4 4 4-4 4 4M5 15v4a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-4"/></svg><span class="header-upload-label">上传视频</span><span class="header-upload-short">上传</span></button></div>
+        <div class="header-state"><span v-if="selectedJob" class="status" :class="selectedJob.status.toLowerCase()">{{ resultsAvailable ? '解析完成' : names[selectedJob.status] ?? selectedJob.status }}</span><span class="connection"><i :class="{ online }"></i>{{ online ? '服务已连接' : '服务未连接' }}</span><button class="header-upload secondary" aria-label="上传视频" title="上传视频" :disabled="!!pending" @click="chooseUpload"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M12 16V4m-4 4 4-4 4 4M5 15v4a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-4"/></svg><span class="header-upload-label">上传视频</span><span class="header-upload-short">上传</span></button></div>
       </header>
       <div class="workspace-messages"><div v-if="errorMessage || connectionError" class="message error" role="alert"><span>{{ errorMessage || connectionError }}</span><button aria-label="关闭错误提示" @click="dismissErrors">×</button></div><div v-if="notice" class="message notice" role="status"><span>{{ notice }}</span><button aria-label="关闭操作提示" @click="notice = ''">×</button></div></div>
       <div class="upload-host"><UploadPanel ref="uploadPanel" :can-start="canStartUpload" @busy="uploadBusy" @started="uploadStarted" @complete="uploaded" /><SourceImportPanel ref="sourceImportPanel" :can-start="canStartSourceImport" @busy="sourceImportBusy" @started="uploadStarted" @complete="uploaded" /></div>
@@ -469,14 +471,21 @@ onUnmounted(() => { stopped = true; compactQuery.removeEventListener('change', u
         </div>
         <div id="workbench-pane-task" v-show="activeTab === 'task'" class="workbench-pane task-pane" role="tabpanel" aria-labelledby="workbench-tab-task"><div class="settings-grid">
           <section class="panel setup-panel">
-            <div class="panel-heading"><h2>{{ selectedJob ? '任务详情' : '新建分析' }}</h2><span class="subtle-number">{{ selectedJob ? streamLabels[streamMode] + ' · #' + selectedJob.id.slice(0, 8) : '01 — 04' }}</span></div>
+            <div v-if="selectedJob || videos.length" class="panel-heading"><h2>{{ selectedJob ? '任务详情' : '分析设置' }}</h2><span v-if="selectedJob" class="subtle-number">{{ streamLabels[streamMode] }} · #{{ selectedJob.id.slice(0, 8) }}</span></div>
             <div class="setup-body">
-              <div v-if="!videos.length" class="source-upload-empty"><strong>从一段视频开始</strong><p>上传视频后，解析话题、提问或按要求寻找片段。</p><button class="primary" :disabled="!!pending" @click="chooseUpload">上传第一段视频</button></div>
-              <label class="field-label" for="source-video">视频来源</label><select id="source-video" v-model="selectedVideoId" :disabled="!!pending" @change="selectVideo"><option value="" disabled>请先上传视频</option><option v-for="video in videos" :key="video.id" :value="video.id">{{ video.original_filename }}</option></select>
+              <div v-if="!videos.length && !selectedJob" class="source-upload-empty">
+                <h2>从一段视频开始</h2>
+                <p>导入本地 MP4 或公开视频链接。分析完成后，可按话题浏览、查找原句或剪成片段。</p>
+                <div class="source-empty-actions"><button class="primary" :disabled="!!pending" @click="chooseUpload">上传本地视频</button><button class="secondary" :disabled="!!pending" @click="chooseSourceImport">从链接导入</button></div>
+              </div>
+              <template v-else>
+                <label class="field-label" for="source-video">视频来源</label><select id="source-video" v-model="selectedVideoId" :disabled="!!pending" @change="selectVideo"><option value="" disabled>选择视频素材</option><option v-for="video in videos" :key="video.id" :value="video.id">{{ video.original_filename }}</option></select>
+              </template>
               <template v-if="selectedJob">
                 <p class="help" aria-label="画面取证策略">{{ samplingLabel(selectedJob.config) }}</p>
                 <p v-if="selectedJob.resumed_from_job_id" class="help">本次分析继续自任务 #{{ selectedJob.resumed_from_job_id.slice(0, 8) }}。将复用已完成的音频与转写，不新增 ASR 请求；文本分析与预算独立。</p>
                 <div class="detail-status"><span class="status" :class="selectedJob.status.toLowerCase()">{{ names[selectedJob.status] ?? selectedJob.status }}</span><span>{{ completeCount }} / {{ selectedJob.stages.length }} 阶段完成</span></div>
+                <progress v-if="selectedJob.stages.length" class="stage-progress" :value="completeCount" :max="selectedJob.stages.length" aria-label="分析阶段完成进度"></progress>
                 <ol class="stages"><li v-for="(stage, index) in orderedStages" :key="stage.id" :class="stage.status.toLowerCase()"><span class="step">{{ stage.status === 'SUCCEEDED' ? '✓' : index + 1 }}</span><div><b>{{ stageLabel(stage.stage_type) }}</b><small>{{ names[stage.status] ?? stage.status }}<template v-if="stage.attempt"> · 第 {{ stage.attempt }} 次执行</template></small><TextRequestProgress v-if="stage.stage_type === 'SEGMENT'" :progress="stage.text_progress" :terminal="['SUCCEEDED', 'FAILED', 'CANCELLED', 'SKIPPED'].includes(stage.status)" /><FailureDiagnostic :diagnostic="stage.diagnostic" :error-code="stage.error_code" :attempt="stage.attempt" /></div></li></ol>
                 <div class="budget"><span>已预留模型请求</span><b>文本 {{ selectedJob.budget.text_calls_reserved }}/{{ selectedJob.budget.max_text_calls }} <i>·</i> ASR {{ selectedJob.budget.asr_calls_reserved }}/{{ selectedJob.budget.max_asr_submissions }}</b><small>次数上限，不代表人民币费用</small></div>
                 <p v-if="selectedJob.status === 'REVIEW_READY'" class="review-note">自动结果已就绪。请前往“话题切分”核对内容与边界，勾选需要切分的片段，再保存并确认。</p>
@@ -492,7 +501,7 @@ onUnmounted(() => { stopped = true; compactQuery.removeEventListener('change', u
                 <div class="actions"><button v-if="selectedJob.actions?.can_cancel" class="secondary" :disabled="!!pending" @click="action('cancel')">取消任务</button><button v-if="selectedJob.actions?.can_retry" class="secondary" :disabled="!!pending" @click="action('retry')">重试失败阶段</button><button class="text-button" :disabled="!!pending || editorsDirty || editorsPending" @click="selectVideo">新建一次分析 →</button></div>
                 <p class="help">“新建一次分析”会从头处理视频，并重新提交 ASR。</p>
               </template>
-              <template v-else>
+              <template v-else-if="videos.length">
                 <p class="help">AI 从转写中识别连续话题，生成标题、摘要与时间区间。解析后由你勾选并调整。</p>
                 <label class="field-label" for="visual-provider">画面证据</label><select id="visual-provider" v-model="visualProvider"><option value="ocr">本地 OCR · 识别画面文字</option><option value="none">仅使用语音转写</option></select>
                 <template v-if="visualProvider === 'ocr'">
@@ -501,7 +510,7 @@ onUnmounted(() => { stopped = true; compactQuery.removeEventListener('change', u
                 </template>
                 <label class="field-label" for="text-budget">文本请求上限</label><div class="number-field"><input id="text-budget" v-model.number="maxTextCalls" type="number" min="1" max="100" step="1"><span>次 / 本次分析</span></div><p class="help">每 10 分钟语音窗口通常需要 1 次文本请求，格式修复最多再请求 1 次。短暂服务故障会自动恢复，恢复请求也计入次数。默认上限 24 次；超长视频可提高。ASR 默认最多提交 1 次。</p>
                 <button class="primary create-button" :disabled="!selectedVideoId || !!pending || !online" @click="createJob">{{ pending === 'create' ? '正在创建…' : '创建分析任务' }} <span>→</span></button>
-                <p class="footnote">任务保存到 MySQL，关闭页面后仍可查看进度。</p>
+                <p class="footnote">关闭页面后，任务仍在后台运行。</p>
               </template>
             </div>
           </section>
