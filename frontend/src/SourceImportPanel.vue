@@ -4,7 +4,7 @@ import { api, type VideoAsset } from './api'
 import { assertSourceReceipt, createSourceReceipt, finishSourceReceipt, loadSourceReceipts, newestSourceImport, parseSourceImport, parseSourceImports,
   sourceImportErrorText, sourceImportNotFound, sourceImportTerminal, sourceImportVideo, type ImportStorage, type SourceImportReceipt, type SourceImportSnapshot } from './sourceImports'
 
-const props = withDefaults(defineProps<{ canStart: () => boolean; active?: boolean }>(), { active: true })
+const props = withDefaults(defineProps<{ canStart: () => boolean; active?: boolean; toggleTarget?: string }>(), { active: true })
 const emit = defineEmits<{ busy: [value: boolean]; started: []; complete: [video: VideoAsset] }>()
 const expanded = ref(false), input = ref<HTMLInputElement | null>(null), url = ref(''), items = ref<SourceImportSnapshot[]>([])
 const receipts = ref<SourceImportReceipt[]>([]), error = ref(''), notice = ref(''), storageError = ref(''), reading = ref(false), action = ref(''), replayKey = ref('')
@@ -138,11 +138,14 @@ defineExpose({ open, pending, refresh })
 </script>
 
 <template>
-  <section class="source-import" aria-label="链接导入视频">
-    <button class="text-button source-toggle" :aria-expanded="expanded" aria-controls="source-import-content" @click="expanded = !expanded">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
-      <span>{{ expanded ? '收起链接导入' : '打开链接导入' }}</span><span v-if="receipts.length" class="source-receipt-count">有提交待核对</span>
-    </button>
+  <section class="source-import" :class="{ 'source-import-expanded': expanded, 'source-import-docked': !!toggleTarget }" aria-label="链接导入视频">
+    <Teleport :to="toggleTarget || null" :disabled="!toggleTarget" defer>
+      <button class="text-button source-toggle" :class="{ 'source-toggle-docked': !!toggleTarget }" :title="expanded ? '收起链接导入' : '打开链接导入'" :aria-expanded="expanded" aria-controls="source-import-content" @click="expanded = !expanded">
+        <svg v-if="toggleTarget" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="m10 13 4-4M7.5 14.5l-1 1a3.5 3.5 0 0 0 5 5l4-4a3.5 3.5 0 0 0 0-5M16.5 9.5l1-1a3.5 3.5 0 0 0-5-5l-4 4a3.5 3.5 0 0 0 0 5"/></svg>
+        <svg v-else viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
+        <span class="source-toggle-label">{{ expanded ? '收起链接导入' : '打开链接导入' }}</span><span v-if="receipts.length" class="source-receipt-count"><span class="source-receipt-prefix">有提交</span>待核对</span>
+      </button>
+    </Teleport>
     <div id="source-import-content" v-show="expanded" class="source-content">
       <p id="source-import-help" class="source-help">支持 YouTube、Bilibili、抖音的公开单条视频，仅限无需登录即可观看的内容</p>
       <form class="source-form" @submit.prevent="create">
@@ -178,17 +181,20 @@ defineExpose({ open, pending, refresh })
 
 <style scoped>
 .source-import { min-width: 0; margin-bottom: 12px; color: var(--workspace-text, #292621); }
-.source-import button { min-height: 36px; padding: 8px 12px; border-radius: 8px; font-size: 13px; font-weight: 500; line-height: 20px; }
-.source-import .text-button { color: var(--workspace-muted, #675f56); background: transparent; }
-.source-import .text-button:hover:not(:disabled) { color: var(--workspace-text, #292621); background: var(--workspace-hover, #eeece6); }
+.source-import-docked { margin-bottom: 0; }
+.source-import button, .source-toggle { min-height: 36px; padding: 8px 12px; border-radius: 8px; font-size: 13px; font-weight: 500; line-height: 20px; }
+.source-import .text-button, .source-toggle { color: var(--workspace-muted, #675f56); background: transparent; }
+.source-import .text-button:hover:not(:disabled), .source-toggle:hover { color: var(--workspace-text, #292621); background: var(--workspace-hover, #eeece6); }
 .source-import .primary { background: var(--workspace-accent, #a94424); color: #fff; box-shadow: none; }
 .source-import .primary:hover:not(:disabled) { background: #91391d; }
 .source-import .secondary { border: 1px solid var(--workspace-border, #e4e0d8); background: var(--workspace-surface, #fff); color: var(--workspace-text, #292621); }
 .source-import .secondary:hover:not(:disabled) { background: var(--workspace-hover, #eeece6); }
-.source-import button:focus-visible, .source-input-row input:focus-visible { outline: 2px solid var(--workspace-accent, #a94424); outline-offset: 3px; }
-.source-import .source-toggle { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 8px; padding-inline: 4px 8px; text-align: left; white-space: normal; }
+.source-import button:focus-visible, .source-toggle:focus-visible, .source-input-row input:focus-visible { outline: 2px solid var(--workspace-accent, #a94424); outline-offset: 3px; }
+.source-toggle { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 8px; padding-inline: 4px 8px; text-align: left; white-space: normal; }
 .source-toggle svg { flex: none; width: 16px; height: 16px; transition: transform 160ms ease-out; }
-.source-toggle[aria-expanded="true"] svg { transform: rotate(180deg); }
+.source-toggle:not(.source-toggle-docked)[aria-expanded="true"] svg { transform: rotate(180deg); }
+.source-toggle-docked { flex-wrap: nowrap; padding-inline: 8px; border: 1px solid var(--workspace-border, #e4e0d8); white-space: nowrap; }
+.source-toggle-docked[aria-expanded="true"] { color: var(--workspace-accent, #a94424); background: var(--workspace-accent-soft, #f9ede7); border-color: currentColor; }
 .source-receipt-count { padding-left: 8px; border-left: 1px solid var(--workspace-border, #e4e0d8); color: var(--workspace-accent, #a94424); font-size: 12px; }
 .source-content { padding: 16px 0; border-top: 1px solid var(--workspace-border, #e4e0d8); margin-top: 8px; }
 .source-help { max-width: 72ch; font-size: 14px; line-height: 24px; color: var(--workspace-muted, #675f56); }
@@ -227,6 +233,12 @@ defineExpose({ open, pending, refresh })
   .source-input-row input { flex-basis: 100%; font-size: 16px; }
   .source-input-row > button { width: 100%; }
   .source-list li, .source-receipt { padding: 12px; }
+}
+@media (max-width: 760px) {
+  .source-toggle-docked { min-width: 36px; height: 36px; justify-content: center; }
+  .source-toggle-docked .source-toggle-label { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  .source-toggle-docked .source-receipt-count { padding-left: 8px; }
+  .source-toggle-docked .source-receipt-prefix { display: none; }
 }
 @media (prefers-reduced-motion: reduce) { .source-toggle svg { transition: none; } }
 </style>

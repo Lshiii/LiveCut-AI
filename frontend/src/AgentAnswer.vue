@@ -33,17 +33,17 @@ function headingTag(level: number) { return `h${Math.min(6, level + 2)}` }
 </template>
 
 <style scoped>
-.agent-answer-body { min-width: 0; color: #1f2937; font-size: inherit; line-height: 1.85; white-space: normal; overflow-wrap: anywhere; }
+.agent-answer-body { min-width: 0; color: var(--workspace-text, #292621); font-size: inherit; line-height: 1.85; white-space: normal; overflow-wrap: anywhere; }
 .answer-paragraph { margin: 0; font: inherit; color: inherit; }
 .answer-line, .answer-heading { white-space: pre-wrap; }
-.answer-heading { margin: .9em 0 .35em; color: #1e293b; font-size: 15px; line-height: 1.65; font-weight: 650; }
+.answer-heading { margin: 16px 0 4px; color: var(--workspace-text, #292621); font-size: 15px; line-height: 1.65; font-weight: 600; }
 .answer-heading:first-child { margin-top: 0; }
 h3.answer-heading { font-size: 16px; }
 .answer-list { margin: .45em 0; padding: 0; list-style: none; }
 .answer-list > li { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 9px; align-items: start; margin: .35em 0; }
-.answer-list-marker { color: #64748b; font-variant-numeric: tabular-nums; }
+.answer-list-marker { color: var(--workspace-muted, #675f56); font-variant-numeric: tabular-nums; }
 .answer-list-content { min-width: 0; }
 .answer-space { min-height: 0; }
-.agent-answer-body :deep(strong) { color: #1e293b; font-weight: 650; }
-.agent-answer-body :deep(code) { border: 1px solid #e2e8f0; border-radius: 4px; padding: .08em .3em; background: #f1f5f9; color: #334155; font-family: Consolas, 'Courier New', monospace; font-size: .92em; white-space: break-spaces; overflow-wrap: anywhere; }
+.agent-answer-body :deep(strong) { color: var(--workspace-text, #292621); font-weight: 600; }
+.agent-answer-body :deep(code) { border: 1px solid var(--workspace-border, #e4e0d8); border-radius: 4px; padding: .08em .3em; background: var(--workspace-canvas, #f4f3ef); color: inherit; font-family: var(--workspace-mono, monospace); font-size: .92em; white-space: break-spaces; overflow-wrap: anywhere; }
 </style>
