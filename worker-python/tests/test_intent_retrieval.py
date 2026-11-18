@@ -32,6 +32,18 @@ def test_no_keyword_match_does_not_manufacture_lexical_candidates(tmp_path):
     assert not result["candidates"] and not result["utterances"]
 
 
+def test_montage_balances_asr_intro_and_later_exact_keyword(tmp_path):
+    rows = source()
+    rows[1]["text"] = "现在介绍 reran 是什么，它给问题与文档打分。"
+    rows[-1]["text"] = "reranker reranker 评测榜单。"
+    idx = build_index(rows, source_hash="a"*64, transcript_hash="b"*64, cache_dir=tmp_path, max_items=1)
+    first = retrieve(idx, ["reranker"], rows, top_k=1)
+    combined = retrieve(idx, ["reranker"], rows, top_k=2, montage_description="介绍 reranker")
+    assert first["candidates"][0]["utterance_ids"] == ["u5"]
+    assert [c["utterance_ids"] for c in combined["candidates"]] == [["u1"], ["u5"]]
+    assert rows[1] in combined["utterances"]
+
+
 def test_dense_queries_and_documents_are_both_encoded_and_index_is_reused(tmp_path):
     calls = []
     def encoder(texts):

@@ -137,7 +137,8 @@ export function parseIntentSnapshot(raw: unknown, jobId: string, requestId?: str
       || !Array.isArray(plan.constraints.exclude) || plan.constraints.exclude.length > 8 || new Set(plan.constraints.exclude).size !== plan.constraints.exclude.length || plan.constraints.exclude.some(value => !text(value, 120))
       || !row(plan.provenance) || !text(plan.provenance.text_model_id, 200) || !text(plan.provenance.prompt_version, 200)
       || (sourceAnswer ? plan.provenance.prompt_version !== (sourceAnswer.schema_version === '1.1' ? 'anchor-clips-v2' : 'anchor-clips-v1') || plan.provenance.retrieval_mode !== 'anchor_context'
-        : plan.provenance.prompt_version !== 'intent-clips-v1' || !['bm25', 'bm25_dense_rrf'].includes(plan.provenance.retrieval_mode as string))
+        : !['intent-clips-v1', 'montage-clips-v1'].includes(plan.provenance.prompt_version) || !['bm25', 'bm25_dense_rrf'].includes(plan.provenance.retrieval_mode as string))
+      || (plan.provenance.prompt_version === 'montage-clips-v1' && plan.goals.length !== 1)
       || !digest(plan.provenance.index_hash) || !Array.isArray(plan.outputs)) invalid()
     const goals = new Set<string>()
     for (const goal of plan.goals) {
@@ -197,7 +198,13 @@ export function newestIntentSnapshot(known: IntentSnapshot | null | undefined, i
     || (incoming.state_version === known.state_version && incoming.status !== known.status)
     || known.confirmed_revisions.some(value => !incoming.confirmed_revisions.includes(value))) return known
   if (incoming.revision === known.revision) {
-    if (incoming.plan_hash !== known.plan_hash) invalid()
+    // Both the pending request and the first published plan have revision zero.
+    if (incoming.plan_hash !== known.plan_hash) {
+      const firstPublication = known.revision === 0 && known.plan === null && known.plan_hash === null
+        && (known.status === 'QUEUED' || known.status === 'RUNNING') && incoming.status === 'PLAN_READY'
+        && incoming.plan !== null && incoming.plan_hash !== null && incoming.state_version > known.state_version
+      if (!firstPublication) invalid()
+    }
     // A late/old backend response must never erase or replace an observed immutable proof.
     if (known.manual_review && manualReviewCanonical(incoming.manual_review ?? null) !== manualReviewCanonical(known.manual_review)) return known
     if (Object.hasOwn(known, 'manual_review') && known.manual_review === null && incoming.manual_review) invalid()

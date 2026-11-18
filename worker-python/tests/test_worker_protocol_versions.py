@@ -13,14 +13,15 @@ from test_worker import claim
 from test_worker_presence import PresenceClient, worker
 
 
-@pytest.mark.parametrize("new_protocols", [(), (5,), (6,), (5, 6)])
+@pytest.mark.parametrize("new_protocols", [(), (5,), (6,), (5, 6), (7,), (5, 6, 7)])
 def test_context_bootstrap_advertises_only_exact_supported_versions(new_protocols):
     paths = []
     def receive(request):
         paths.append(request.url.path)
         routes = {"/api/agent-capabilities/speech-lookup": ("speech_lookup_supported", 2),
                   "/api/clip-capabilities/anchor-context": ("anchor_context_supported", 5),
-                  "/api/agent-capabilities/text-coverage": ("text_coverage_supported", 6)}
+                  "/api/agent-capabilities/text-coverage": ("text_coverage_supported", 6),
+                  "/api/clip-capabilities/single-montage": ("single_montage_supported", 7)}
         entry = routes.get(request.url.path)
         if entry and entry[1] in (2, *new_protocols):
             return httpx.Response(200, json={entry[0]: True, "worker_protocol": entry[1]})
@@ -63,6 +64,11 @@ def test_context_only_worker_sessions_negotiate_new_versions(tmp_path, stage):
     (1, "SEGMENT", {"agent_turn": {"qa_policy": "coverage_v1"}}, False),
     (6, "SEGMENT", {"agent_turn": {"qa_policy": "coverage_v1", "visual_mode": "frames"}}, False),
     (6, "AGENT_EVIDENCE", {"agent_turn": {"qa_policy": "coverage_v1"}}, False),
+    (7, "SEGMENT", {"clip_request": {"output_policy": "single_montage_v1"}}, True),
+    (1, "SEGMENT", {"clip_request": {"output_policy": "single_montage_v1"}}, False),
+    (7, "ASR", {"clip_request": {"output_policy": "single_montage_v1"}}, False),
+    (7, "SEGMENT", {"clip_request": {"output_policy": "single_montage_v1", "answer_source": {}}}, False),
+    (7, "SEGMENT", {"clip_request": {}}, False),
 ])
 def test_context_protocols_are_bound_to_exact_execution_policy(protocol, stage, config, accepted):
     value = claim(stage_type=stage, config=config, **({"required_worker_protocol": protocol} if protocol != 1 else {}))
@@ -85,7 +91,8 @@ def test_bootstrap_controls_exact_legacy_or_versioned_register_and_ready_wire(su
             return httpx.Response(404, text="old server")
         if request.url.path == "/api/agent-capabilities/screen-search":
             return httpx.Response(404, text="old server")
-        if request.url.path in {"/api/clip-capabilities/anchor-context", "/api/agent-capabilities/text-coverage"}:
+        if request.url.path in {"/api/clip-capabilities/anchor-context", "/api/agent-capabilities/text-coverage",
+                                "/api/clip-capabilities/single-montage"}:
             return httpx.Response(404, text="old server")
         if request.url.path == "/internal/workers/register":
             return httpx.Response(200, json={"worker_id": worker_id, "session_id": session_id, "outcome": "REGISTERED",
@@ -129,7 +136,7 @@ def test_only_actual_http_404_can_select_old_protocol(status, body):
     assert requests == ["/api/agent-capabilities/speech-lookup"]
 
 
-@pytest.mark.parametrize("versions", [[], [True], [1, 1], [7], [None], "1,2"])
+@pytest.mark.parametrize("versions", [[], [True], [1, 1], [8], [None], "1,2"])
 def test_invalid_registration_versions_are_rejected_before_dispatch(versions):
     client = WorkerClient("http://localhost", "synthetic-key", transport=httpx.MockTransport(lambda _: pytest.fail("No register dispatch")))
     try:

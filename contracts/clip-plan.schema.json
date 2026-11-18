@@ -33,17 +33,21 @@
       "type": "object", "additionalProperties": false, "required": ["text_model_id", "prompt_version", "retrieval_mode", "index_hash"],
       "properties": {
         "text_model_id": {"type": "string", "minLength": 1, "maxLength": 128},
-        "prompt_version": {"enum": ["intent-clips-v1", "anchor-clips-v1", "anchor-clips-v2"]},
+        "prompt_version": {"enum": ["intent-clips-v1", "montage-clips-v1", "anchor-clips-v1", "anchor-clips-v2"]},
         "retrieval_mode": {"enum": ["bm25", "bm25_dense_rrf", "anchor_context"]},
         "index_hash": {"$ref": "#/$defs/hash"}
       },
       "allOf": [
         {"if": {"properties": {"prompt_version": {"enum": ["anchor-clips-v1", "anchor-clips-v2"]}}}, "then": {"properties": {"retrieval_mode": {"const": "anchor_context"}}}},
-        {"if": {"properties": {"prompt_version": {"const": "intent-clips-v1"}}}, "then": {"properties": {"retrieval_mode": {"enum": ["bm25", "bm25_dense_rrf"]}}}}
+        {"if": {"properties": {"prompt_version": {"enum": ["intent-clips-v1", "montage-clips-v1"]}}}, "then": {"properties": {"retrieval_mode": {"enum": ["bm25", "bm25_dense_rrf"]}}}}
       ]
     }
   },
   "allOf": [
+    {
+      "if": {"properties": {"provenance": {"properties": {"prompt_version": {"const": "montage-clips-v1"}}}}},
+      "then": {"properties": {"goals": {"maxItems": 1}, "outputs": {"maxItems": 1}}}
+    },
     {
       "if": {"properties": {"provenance": {"properties": {"prompt_version": {"enum": ["anchor-clips-v1", "anchor-clips-v2"]}}}}},
       "then": {"properties": {

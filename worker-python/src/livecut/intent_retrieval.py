@@ -143,7 +143,7 @@ def _index_file(path: Path, fingerprint: str, chunks: list[dict], source_hash: s
 
 def retrieve(index: dict, queries: list[str], items: list[dict], *, dense_embedder: Embedder | None = None,
              top_k: int = 4, context_before: int = 1, context_after: int = 2,
-             max_visible_chars: int = 16000) -> dict:
+             max_visible_chars: int = 16000, montage_description: str | None = None) -> dict:
     """Rank each goal independently, then expose bounded whole-sentence context."""
     if (not isinstance(queries, list) or not 1 <= len(queries) <= 3
             or any(not isinstance(q, str) or not 1 <= len(q) <= 300 for q in queries)
@@ -180,7 +180,28 @@ def retrieve(index: dict, queries: list[str], items: list[dict], *, dense_embedd
     for ranking in ranks:
         for rank, i in enumerate(ranking, 1):
             fused[i] += 1 / (60 + rank)
-    chosen = sorted(fused, key=lambda i: (-fused[i], i))[:top_k]
+    ranking = sorted(fused, key=lambda i: (-fused[i], i))
+    if montage_description:
+        # Keep a slot for the passage that introduces a term. An exact term can
+        # be far more frequent in later benchmarks than in its ASR introduction.
+        opening = re.search(r"开头|片头|开场|起始|opening|beginning", montage_description, re.I)
+        introduction = re.search(r"介绍|定义|简介|是什么|introduc|definition", montage_description, re.I)
+        if opening:
+            opening_end = max(1, math.ceil(len(chunks) / 5))
+            early = next((i for i in ranking if i < opening_end and lexical[i] > 0), None)
+            if early is not None:
+                ranking = [early, *(i for i in ranking if i != early)]
+        elif introduction:
+            # Four-letter stems here are recall hints only, e.g. ASR "reran"
+            # for "reranker". Published evidence always contains original text.
+            words = {t[:4] for query in queries for t in terms(query)
+                     if len(t) >= 5 and t.isascii() and t.isalpha()}
+            early = next((i for i, chunk in enumerate(chunks)
+                          if any(len(t) >= 5 and t[:4] in words for t in corpus[i])
+                          and re.search(r"开源|推出|发布|介绍|是什么|指的是|定义|作为输入", chunk["text"])), None)
+            if early is not None:
+                ranking = [early, *(i for i in ranking if i != early)]
+    chosen = ranking[:top_k]
     order = {u["utterance_id"]: i for i, u in enumerate(items)}
     visible: set[int] = set()
     candidates, size, truncated = [], 0, False

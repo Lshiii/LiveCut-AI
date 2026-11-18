@@ -26,6 +26,7 @@ from .segmentation import (
 )
 
 PROMPT_VERSION = "intent-clips-v1"
+MONTAGE_VERSION = "montage-clips-v1"
 _ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}")
 _HASH = re.compile(r"[a-f0-9]{64}")
 _GOAL_SYSTEM = """你把用户的视频剪辑需求转换为有限目标与约束，不回答视频中不存在的内容。
@@ -197,6 +198,36 @@ def _rows(value: object, goals: list[dict], items: list[dict], *, timed: bool,
     return [by_goal[g["goal_id"]] for g in goals]
 
 
+def _montage_output(rows: list[dict], items: list[dict], instruction: str) -> dict:
+    """Compile checked component selections into one source-ordered edit."""
+    order = {u["utterance_id"]: i for i, u in enumerate(items)}
+    intervals = sorted((order[p["start_utterance_id"]], order[p["end_utterance_id"]])
+                       for row in rows for p in row["parts"])
+    merged: list[tuple[int, int]] = []
+    for first, last in intervals:
+        if merged and first <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], last))
+        else:
+            merged.append((first, last))
+    excluded = {ex["utterance_id"]: ex for row in rows for ex in row["excluded"]}
+    evidence = {uid for row in rows for uid in row["evidence_utterance_ids"]}
+    if len(merged) > 12 or len(excluded) > 100 or len(evidence) > 200:
+        raise _InvalidOutput("MONTAGE_BOUNDS")
+    if any(first <= order[uid] <= last for uid in excluded for first, last in merged):
+        raise _InvalidOutput("MONTAGE_EXCLUSION_CONFLICT")
+    parts = [{"start_utterance_id": items[first]["utterance_id"], "end_utterance_id": items[last]["utterance_id"],
+              "start_ms": items[first]["start_ms"], "end_ms": items[last]["end_ms"]} for first, last in merged]
+    statuses = {row["status"] for row in rows}
+    status = rows[0]["status"] if len(statuses) == 1 else "NEEDS_REVIEW"
+    labels = {"FOUND": "已定位", "NEEDS_REVIEW": "待核对", "NOT_FOUND": "未找到"}
+    share = 960 // len(rows)
+    reasons = [f'{labels[row["status"]]}「{row["title"][:45]}」 {row["reason"]}'[:share] for row in rows]
+    return {"goal_id": "montage", "output_id": "output-001", "title": instruction[:120],
+            "reason": "\n".join(reasons), "status": status, "enabled": False, "parts": parts,
+            "excluded": [excluded[uid] for uid in sorted(excluded, key=order.__getitem__)],
+            "evidence_utterance_ids": sorted(evidence, key=order.__getitem__)}
+
+
 def validate_clip_plan(plan: dict, utterances: list[dict], *, expected: dict | None = None,
                        allow_enabled: bool = False, answer_source: dict | None = None) -> None:
     """Validate source references; this cannot prove semantic truth or completeness."""
@@ -224,10 +255,12 @@ def validate_clip_plan(plan: dict, utterances: list[dict], *, expected: dict | N
         provenance = plan["provenance"]
         if (not isinstance(provenance, dict) or set(provenance) != {"text_model_id", "prompt_version", "retrieval_mode", "index_hash"}
                 or not isinstance(provenance["text_model_id"], str) or not _ID.fullmatch(provenance["text_model_id"])
-                or provenance["prompt_version"] not in {PROMPT_VERSION, "anchor-clips-v1", "anchor-clips-v2"}
+                or provenance["prompt_version"] not in {PROMPT_VERSION, MONTAGE_VERSION, "anchor-clips-v1", "anchor-clips-v2"}
                 or provenance["retrieval_mode"] not in ({"anchor_context"} if provenance["prompt_version"] in {"anchor-clips-v1", "anchor-clips-v2"} else {"bm25", "bm25_dense_rrf"})
                 or not isinstance(provenance["index_hash"], str) or not _HASH.fullmatch(provenance["index_hash"])):
             raise _InvalidOutput("PROVENANCE")
+        if provenance["prompt_version"] == MONTAGE_VERSION and len(plan["goals"]) != 1:
+            raise _InvalidOutput("MONTAGE_GOAL_COUNT")
         if provenance["prompt_version"] in {"anchor-clips-v1", "anchor-clips-v2"}:
             if answer_source is None:
                 raise _InvalidOutput("ANCHOR_SOURCE_REQUIRED")
@@ -265,7 +298,7 @@ def build_clip_plan(utterances: list[dict], duration_ms: int, instruction: str, 
                     model: str = "qwen-plus", api_key: str | None = None, base_url: str | None = None,
                     max_calls: int = 6, client: httpx.Client | None = None, timeout_seconds: float = 300,
                     dense_embedder: Embedder | None = None, embedding_model_id: str | None = None,
-                    index_cache_dir: str | Path | None = None) -> dict:
+                    index_cache_dir: str | Path | None = None, output_policy: str | None = None) -> dict:
     items = _inputs(utterances, duration_ms)
     if (not isinstance(instruction, str) or not 1 <= len(instruction.strip()) <= 2000
             or any(not isinstance(v, str) or not _ID.fullmatch(v) for v in (request_id, job_id, video_id, model))
@@ -277,7 +310,11 @@ def build_clip_plan(utterances: list[dict], duration_ms: int, instruction: str, 
         raise SegmentationError("INVALID_INPUT", "Invalid clip instruction, source identity or request bounds")
     instruction = instruction.strip()
     endpoint = _endpoint(base_url or os.environ.get("LIVECUT_TEXT_BASE_URL") or DEFAULT_BASE_URL)
-    config = {"prompt_version": PROMPT_VERSION, "utterances": items, "duration_ms": duration_ms,
+    if output_policy not in (None, "single_montage_v1"):
+        raise SegmentationError("INVALID_INPUT", "Unsupported clip output policy")
+    montage = output_policy == "single_montage_v1"
+    version = MONTAGE_VERSION if montage else PROMPT_VERSION
+    config = {"prompt_version": version, "utterances": items, "duration_ms": duration_ms,
               "instruction": instruction, "request_id": request_id, "job_id": job_id, "video_id": video_id,
               "source_hash": source_hash, "transcript_hash": transcript_hash, "model": model, "endpoint": endpoint,
               "embedding_model_id": embedding_model_id, "dense_enabled": dense_embedder is not None}
@@ -320,35 +357,62 @@ def build_clip_plan(utterances: list[dict], duration_ms: int, instruction: str, 
                                                                                  "validation_rule": exc.rule})})
                 raise AssertionError("unreachable")
 
-            demand = phase(0, _GOAL_SYSTEM, {"user_instruction": instruction}, _goals)
+            goal_system = _GOAL_SYSTEM
+            plan_system = _PLAN_SYSTEM
+            if montage:
+                goal_system += ("\n用户明确要求一条合辑。每项素材分别列一个检索目标，最终由程序合并。"
+                                "保留每项自己的位置限定，例如开头。为模型名称尝试不同的短查询，"
+                                "包括有依据的中英文别名、口语称呼和功能描述。")
+                plan_system += ("\n这些目标是同一条成片的素材。每项选出能解释它的少量原句，合计最多12段。"
+                                "结合相邻句和上下文辨别专名的转写差异，查不到的素材逐项说明。"
+                                "同一原句不能既在合辑保留，又被另一目标排除。")
+            demand = phase(0, goal_system, {"user_instruction": instruction}, _goals)
             _save(directory / "demand.json", demand)
             index = build_index(items, source_hash=source_hash, transcript_hash=transcript_hash,
                 cache_dir=index_cache_dir or directory / "indexes", dense_embedder=dense_embedder,
                 embedding_model_id=embedding_model_id)
             _save(root / "retrieval-index.json", index)
             retrieval = {g["goal_id"]: retrieve(index, g["queries"], items, dense_embedder=dense_embedder,
+                         **({"top_k": 6, "context_before": 2, "context_after": 3,
+                             "montage_description": g["description"]} if montage else {}),
                          max_visible_chars=max(2000, 32000 // len(demand["goals"]))) for g in demand["goals"]}
             _save(root / "retrieval-trace.json", {"retrieval_mode": index["retrieval_mode"], "index_hash": index["index_hash"],
                                                    "goals": retrieval})
             visible = {gid: {u["utterance_id"] for u in evidence["utterances"]} for gid, evidence in retrieval.items()}
+            if montage:
+                # All component lists are included in this single model input.
+                # Validate against what it actually saw, including every
+                # interior ASR sentence. Never widen to the full transcript.
+                sent_ids = set().union(*visible.values())
+                visible = dict.fromkeys(visible, sent_ids)
             if not items:
                 outputs = [{"output_id": f"output-{i + 1:03d}", "goal_id": g["goal_id"], "title": g["description"][:120],
                     "status": "NOT_FOUND", "reason": "当前转写没有可检索语句，无法提供目标证据。", "enabled": False,
                     "parts": [], "excluded": [], "evidence_utterance_ids": []} for i, g in enumerate(demand["goals"])]
+                if montage:
+                    outputs = [_montage_output(outputs, items, instruction)]
             else:
                 def parse_plan(raw):
                     value = _object(raw)
                     if set(value) != {"outputs"}:
                         raise _InvalidOutput("OUTPUT_STRUCTURE")
-                    return _rows(value["outputs"], demand["goals"], items, timed=False, visible=visible)
-                outputs = phase(1, _PLAN_SYSTEM,
+                    rows = _rows(value["outputs"], demand["goals"], items, timed=False, visible=visible)
+                    # Validate cross-component constraints inside the existing
+                    # bounded format repair, before accepting phase 1.
+                    if montage:
+                        return [_montage_output(rows, items, instruction)]
+                    return rows
+                outputs = phase(1, plan_system,
                     {"instruction": instruction, "goals": demand["goals"], "constraints": demand["constraints"],
                      "retrieval": retrieval}, parse_plan)
+            goals = [{"goal_id": g["goal_id"], "description": g["description"]} for g in demand["goals"]]
+            if montage:
+                goals = [{"goal_id": "montage", "description": instruction[:300]}]
             result = {"schema_version": "1.0", "request_id": request_id, "job_id": job_id, "video_id": video_id,
                 "source_hash": source_hash, "transcript_hash": transcript_hash, "duration_ms": duration_ms,
-                "instruction": instruction, "goals": [{"goal_id": g["goal_id"], "description": g["description"]} for g in demand["goals"]],
+                "instruction": instruction, "goals": goals,
                 "constraints": demand["constraints"], "outputs": outputs,
-                "provenance": {"text_model_id": model, "prompt_version": PROMPT_VERSION,
+                "provenance": {"text_model_id": model, "prompt_version": version,
                                "retrieval_mode": index["retrieval_mode"], "index_hash": index["index_hash"]}}
             validate_clip_plan(result, items)
             _save(root / "clip-plan.json", result)

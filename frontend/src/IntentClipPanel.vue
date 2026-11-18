@@ -43,6 +43,9 @@ const draftReadResults = ref<Record<string, IntentSnapshot>>({})
 let draftRestoreVersion = 0
 const saveNeedsCheck = ref(false)
 const error = ref(''), refreshError = ref(''), notice = ref(''), loading = ref(true)
+const unreadableDetailId = ref('')
+const waitingForStatus = computed(() => snapshot.value?.id === unreadableDetailId.value
+  && (snapshot.value.status === 'QUEUED' || snapshot.value.status === 'RUNNING'))
 const batches = ref<ExportJob[]>([]), previewUrl = ref(''), sourcePlayer = ref<HTMLVideoElement | null>(null)
 const instructionInput = ref<HTMLTextAreaElement | null>(null)
 const exportPlayer = ref<HTMLVideoElement | null>(null)
@@ -256,6 +259,7 @@ function accept(value: IntentSnapshot, force = false) {
   if (force && latest.revision > value.revision) throw new ApiError('CLIP_PLAN_REVISION_CONFLICT')
   const recovered = !force && protectedDraft && (!pending.value || action.value === 'check-save') && intentSaveRecovered(known, latest, outputs.value, draftRevision.value)
   snapshot.value = latest
+  unreadableDetailId.value = ''
   if (force || recovered || (!protectedDraft && !pending.value)) {
     outputs.value = latest.plan ? intentPayload(latest.plan.outputs).outputs : []
     baseline.value = JSON.stringify(intentPayload(outputs.value)); draftRevision.value = latest.revision
@@ -330,6 +334,7 @@ async function refreshNow(lease: IntentRefreshLease) {
   if (stopped || pending.value || props.active === false || document.hidden) return
   const read = scope.begin(lease.signal), jobId = props.jobId
   const current = () => read.current() && lease.current() && jobId === props.jobId
+  let readingDetail = ''
   try {
     let historyFailure: unknown = null, historyUpdated = false
     try { historyUpdated = await refreshHistory('refresh', read.signal) } catch (value) { historyFailure = value }
@@ -342,11 +347,13 @@ async function refreshNow(lease: IntentRefreshLease) {
     }
     const requestId = selectedId.value
     if (requestId) {
+      readingDetail = requestId
       const detail = await api<unknown>(`/api/clip-requests/${requestId}`, { signal: read.signal })
       if (!current() || selectedId.value !== requestId) return
       const verified = await verifyIntentManualReviewSnapshot(parseIntentSnapshot(detail, jobId, requestId))
       if (!current() || selectedId.value !== requestId) return
       accept(verified)
+      readingDetail = ''
       const exported = await api<{ items: unknown[] }>(`/api/clip-requests/${requestId}/exports`, { signal: read.signal })
       if (!current() || selectedId.value !== requestId) return
       if (!Array.isArray(exported.items)) throw new IntentResponseError()
@@ -362,7 +369,13 @@ async function refreshNow(lease: IntentRefreshLease) {
     }
     if (historyFailure) throw historyFailure
     refreshError.value = ''
-  } catch (value) { if (current()) { refreshError.value = message(value); throw value } }
+  } catch (value) {
+    if (current()) {
+      if (readingDetail === selectedId.value && readingDetail) unreadableDetailId.value = readingDetail
+      refreshError.value = message(value)
+      throw value
+    }
+  }
   finally { read.release(); if (lease.current()) loading.value = false }
 }
 function validOperation(requestId: string, version: number) { return !stopped && selectedId.value === requestId && version === selectionVersion }
@@ -922,7 +935,7 @@ onBeforeUnmount(() => { stopped = true; historyVersion++; historyScope.dispose()
 <template>
   <section ref="intentPanel" class="panel intent-panel" aria-label="按需求找片段" @keydown.esc="closeHistory()">
     <div class="intent-surface" :inert="historyOpen || manualReviewEditor?.opened ? true : undefined">
-      <header class="intent-toolbar"><h2>按需剪辑 <span v-if="snapshot" class="status">{{ names[snapshot.status] }}</span></h2>
+      <header class="intent-toolbar"><h2>按需剪辑 <span v-if="snapshot" class="status">{{ waitingForStatus ? '状态待更新' : names[snapshot.status] }}</span></h2>
       <nav class="intent-view-tabs" role="tablist" aria-label="按需剪辑流程" @keydown="viewKey">
         <button :id="`intent-view-${jobId}-compose`" role="tab" :aria-controls="`intent-page-${jobId}-compose`" :aria-selected="intentView === 'compose'" :tabindex="intentView === 'compose' ? 0 : -1" @click="setView('compose')">剪辑要求<span v-if="instruction.trim()" class="draft-dot" aria-label="有未提交要求"></span></button>
         <button :id="`intent-view-${jobId}-review`" role="tab" :aria-controls="`intent-page-${jobId}-review`" :aria-selected="intentView === 'review'" :tabindex="intentView === 'review' ? 0 : -1" :disabled="!snapshot" @click="setView('review')">核对方案<span v-if="planDirty" class="draft-dot" aria-label="有未保存修改"></span></button>
@@ -964,12 +977,13 @@ onBeforeUnmount(() => { stopped = true; historyVersion++; historyScope.dispose()
           <p v-if="instruction.trim()" class="help">剪辑要求页有尚未提交的新要求，请先提交或放弃输入，再继续当前请求。</p>
           <label class="intent-resume-budget">新请求模型上限<input v-model.number="maxCalls" type="number" min="1" max="24" :disabled="pending || !!pendingCreate || manualReviewProtected" aria-label="继续查找模型请求上限"></label><button class="primary" :disabled="!canResume" @click="resumeRequest">{{ action === 'resume' ? '正在继续…' : '继续查找' }}</button>
         </div>
-        <TextRequestProgress :progress="snapshot.stage.text_progress" :terminal="['PLAN_READY', 'FAILED', 'CANCELLED'].includes(snapshot.status)" />
+        <TextRequestProgress v-if="!waitingForStatus" :progress="snapshot.stage.text_progress" :terminal="['PLAN_READY', 'FAILED', 'CANCELLED'].includes(snapshot.status)" />
         <FailureDiagnostic v-if="snapshot.status !== 'CANCELLED'" :error-code="snapshot.stage.error_code" :attempt="snapshot.stage.attempt" />
 
             </aside>
             <div class="intent-output-list"><div class="intent-subheading"><h3>候选目标 <span v-if="snapshot.plan">{{ outputs.length }} 个 · 已选 {{ selectedCount }} 个 · r{{ draftRevision }}</span></h3><button v-if="planDirty || saveNeedsCheck || planRevisionConflict" class="text-button" :disabled="pending" @click="discard">放弃方案修改</button></div>
-              <p v-if="!snapshot.plan" class="intent-empty">{{ snapshot.status === 'FAILED' ? '本次查找未完成。请查看执行原因，原视频和原话题结果仍保留。' : snapshot.status === 'CANCELLED' ? '本次请求已取消。' : snapshot.status === 'RUNNING' ? '正在查找候选片段，执行进度会自动更新。' : '正在等待执行服务生成候选方案。' }}</p>
+              <p v-if="waitingForStatus" class="intent-empty">暂时无法取得最新执行状态。页面会自动重新读取，也可以点击「刷新」。</p>
+              <p v-else-if="!snapshot.plan" class="intent-empty">{{ snapshot.status === 'FAILED' ? '本次查找未完成。请查看执行原因，原视频和原话题结果仍保留。' : snapshot.status === 'CANCELLED' ? '本次请求已取消。' : snapshot.status === 'RUNNING' ? '正在查找候选片段，执行进度会自动更新。' : '正在等待执行服务生成候选方案。' }}</p>
               <template v-else>
           <p v-if="unresolved" class="intent-warning">有 {{ unresolved }} 个目标仍需核对或未找到证据。待复核候选可通过独立人工核对批次选用；未找到目标不能选用。AI 分类保持不变。</p>
           <div class="intent-recovery-actions"><button class="secondary" :disabled="manualReviewBlocked && !manualReviewEditor?.needsCheck || pending" @click="openManualReview">{{ manualReviewEditor?.needsCheck ? '核对原人工选用结果' : '批量人工核对与选用' }}</button><p v-if="snapshot.manual_review" class="help">当前 r{{ snapshot.revision }} 有独立人工核对记录，人工选用 {{ snapshot.manual_review.outputs.length }} 个待复核目标。修改方案后须重新核对；普通保存新版本不继承此记录。</p><p v-if="manualReviewEditor?.needsCheck" class="intent-warning" role="status">人工核对操作结果待确认，请先打开窗口核对原操作。暂不能保存其他方案、确认或导出。</p><p v-else-if="snapshot.manual_review && planDirty" class="intent-warning" role="status">本页方案已修改，原人工核对暂不授权当前草稿。保存后需重新人工核对。</p></div>

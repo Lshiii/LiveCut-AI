@@ -138,6 +138,45 @@ class ClipRequestIntegrationTests {
         String publicJson=JSON.writeValueAsString(first);for(String secret:List.of("run_token","transcript_key","source_json","jobs/"))assertFalse(publicJson.contains(secret));
         assertEquals(1,clips.list(f.job()).items().size());
     }
+    @Test void montageIsFrozenRoutesToCapableWorkersAndPublishesOneOutput() throws Exception {
+        var f = fixture();
+        var create = new ClipRequestModels.CreateRequest("把缓存失效和解决方法剪辑到一起", 6);
+        var request = clips.create(f.job(), create, "montage-" + UUID.randomUUID());
+        var capabilities = send("GET", "/api/clip-capabilities/single-montage", null, null, false);
+        assertEquals(JSON.valueToTree(Map.of("single_montage_supported",true,"worker_protocol",7)), JSON.readTree(capabilities.body()));
+        clips.cancel(request.id());
+        var resumed = clips.resume(request.id(), new ClipRequestModels.ResumeRequest(3), "resume-" + UUID.randomUUID());
+        String worker = "montage-" + UUID.randomUUID(), session = UUID.randomUUID().toString();
+        String older = "older-" + UUID.randomUUID(), oldSession = UUID.randomUUID().toString();
+        ownWorkers.addAll(List.of(worker, older));
+        var capacity = app.getBean(WorkerCapacityService.class);
+        capacity.register(new WorkerModels.Registration(older,oldSession,List.of("SEGMENT"),1,f.job(),List.of(1,6)));
+        assertTrue(jobs.ready("SEGMENT",100,f.job(),older,oldSession).isEmpty());
+        assertEquals("WORKER_PROTOCOL_MISMATCH", failure(() -> jobs.claim(new ClaimRequest(resumed.stage().id(),older,UUID.randomUUID().toString(),f.job(),oldSession))));
+        capacity.register(new WorkerModels.Registration(worker,session,List.of("SEGMENT"),1,f.job(),List.of(1,7)));
+        var lease = jobs.claim(new ClaimRequest(resumed.stage().id(),worker,UUID.randomUUID().toString(),f.job(),session));
+        assertEquals(7,lease.requiredWorkerProtocol());
+        assertEquals("single_montage_v1",((Map<?,?>)lease.config().get("clip_request")).get("output_policy"));
+        var multiple=publishPlan(f,resumed,lease,plan -> ((ObjectNode)plan.path("provenance")).put("prompt_version","montage-clips-v1"));
+        assertEquals("INVALID_CLIP_PLAN",failure(() -> jobs.complete(lease.stageId(), multiple)));
+        var single=publishPlan(f,resumed,lease,plan -> {
+            ((ObjectNode)plan.path("provenance")).put("prompt_version","montage-clips-v1");
+            ((tools.jackson.databind.node.ArrayNode)plan.path("goals")).remove(1);
+            ((tools.jackson.databind.node.ArrayNode)plan.path("outputs")).remove(1);
+        });
+        assertEquals("ACCEPTED", jobs.complete(lease.stageId(),single).outcome());
+        var ready = clips.get(resumed.id());
+        assertEquals(1,ready.plan().path("outputs").size());
+        assertEquals(2,ready.plan().at("/outputs/0/parts").size());
+
+        // A matching instruction saved before V32 retains its original mode on resume.
+        jdbc.update("UPDATE clip_request SET output_policy=NULL WHERE id=?",request.id());
+        var legacy = clips.resume(request.id(),new ClipRequestModels.ResumeRequest(3),"legacy-"+UUID.randomUUID());
+        var oldLease = jobs.claim(new ClaimRequest(legacy.stage().id(),older,UUID.randomUUID().toString(),f.job(),oldSession));
+        assertNull(oldLease.requiredWorkerProtocol());
+        assertFalse(((Map<?,?>)oldLease.config().get("clip_request")).containsKey("output_policy"));
+    }
+
     @Test void incompleteAndTamperedSourcesAreRejectedBeforeCreatingAnyRequest() throws Exception {
         Fixture f=fixture();jdbc.update("UPDATE analysis_job SET status='RUNNING' WHERE id=?",f.job());
         assertEquals("CLIP_SOURCE_NOT_READY",failure(()->create(f,4)));jdbc.update("UPDATE analysis_job SET status='REVIEW_READY' WHERE id=?",f.job());

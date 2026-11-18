@@ -89,6 +89,70 @@ def test_missing_goal_receives_exactly_one_structure_repair(tmp_path):
     assert "outputs" not in feedback
 
 
+def test_single_montage_compiles_components_in_source_order_and_replays(tmp_path):
+    parts = plan()
+    parts["outputs"].reverse()
+    result, requests = run(tmp_path, [demand(), parts], again=True, output_policy="single_montage_v1")
+    assert len(requests) == 2
+    assert result["provenance"]["prompt_version"] == "montage-clips-v1"
+    assert len(result["goals"]) == len(result["outputs"]) == 1
+    clip = result["outputs"][0]
+    assert clip["status"] == "FOUND" and clip["enabled"] is False
+    assert [p["start_ms"] for p in clip["parts"]] == [0, 3000, 4000]
+    assert len(clip["excluded"]) == 1
+    assert clip["evidence_utterance_ids"] == ["z10", "a2", "b4", "d6", "g7"]
+
+
+def test_partial_montage_preserves_review_evidence_and_names_missing_component(tmp_path):
+    partial = plan()
+    partial["outputs"][1] = output("solution", [], [], status="NOT_FOUND", reason="没有找到对应办法。")
+    result, _ = run(tmp_path, [demand(), partial], output_policy="single_montage_v1")
+    clip = result["outputs"][0]
+    assert clip["status"] == "NEEDS_REVIEW" and not clip["enabled"]
+    assert clip["parts"] and "没有找到对应办法。" in clip["reason"]
+    assert clip["evidence_utterance_ids"] == ["z10", "a2", "b4"]
+
+
+def test_shared_context_in_montage_appears_once(tmp_path):
+    shared = plan()
+    shared["outputs"][1] = output("solution", [("a2", "a2"), ("f5", "g7")], ["a2", "g7"])
+    result, _ = run(tmp_path, [demand(), shared], output_policy="single_montage_v1")
+    clip = result["outputs"][0]
+    assert [(p["start_utterance_id"], p["end_utterance_id"]) for p in clip["parts"]] == [
+        ("z10", "a2"), ("b4", "b4"), ("f5", "g7")]
+    assert clip["evidence_utterance_ids"] == ["z10", "a2", "b4", "g7"]
+
+
+@pytest.mark.parametrize("other_component_saw_interior", [False, True])
+def test_montage_validates_every_interior_sentence_against_actual_combined_model_input(
+        tmp_path, monkeypatch, other_component_saw_interior):
+    from livecut import intent
+
+    retrieve = intent.retrieve
+    def select(*args, **kwargs):
+        result = retrieve(*args, **kwargs)
+        if not other_component_saw_interior or kwargs["montage_description"] == demand()["goals"][1]["description"]:
+            result["utterances"] = [u for u in result["utterances"] if u["utterance_id"] != "d6"]
+        return result
+
+    monkeypatch.setattr(intent, "retrieve", select)
+    if other_component_saw_interior:
+        result, requests = run(tmp_path, [demand(), plan()], output_policy="single_montage_v1", max_calls=2)
+        assert len(requests) == 2 and result["outputs"][0]["status"] == "FOUND"
+    else:
+        with pytest.raises(SegmentationError, match="UNSEEN_SOURCE"):
+            run(tmp_path, [demand(), plan(), plan()], output_policy="single_montage_v1")
+
+
+def test_montage_exclusions_cannot_be_undone_by_another_component(tmp_path):
+    conflict = plan()
+    conflict["outputs"][1] = output("solution", [("a2", "b4")], ["a2"])
+    result, requests = run(tmp_path, [demand(), conflict, plan()], output_policy="single_montage_v1")
+    assert len(requests) == 3
+    assert "MONTAGE_EXCLUSION_CONFLICT" in requests[-1]["input"]["messages"][-1]["content"]
+    assert result["outputs"][0]["excluded"][0]["utterance_id"] == "c3"
+
+
 @pytest.mark.parametrize("mutation", [
     lambda p: p["outputs"][0]["parts"][0].update(start_ms=0),
     lambda p: p["outputs"][0]["parts"][0].update(start_utterance_id="unknown"),
