@@ -185,6 +185,15 @@ public class ClipRequestService {
         return deliverySelection(owner,rev,expected,null,confirmed).plan();
     }
     public record DeliverySelection(JsonNode plan,JsonNode review,List<JsonNode> outputs) { public DeliverySelection{outputs=List.copyOf(outputs);} }
+    /** A timeline exposes quote text in editor markers; bind it to the original ASR artifact before download. */
+    public JsonNode timelineUtterances(Map<String,Object> request, DeliverySelection selection) {
+        if (selection.review() != null) {
+            // deliverySelection has already verified the artifact and its equality to this frozen row.
+            return JSON.readTree(String.valueOf(request.get("source_json"))).path("utterances");
+        }
+        try { return manual.verifySource(request); }
+        catch (JobException invalid) { throw conflict("CLIP_SOURCE_INVALID", "Timeline evidence failed source verification"); }
+    }
     public DeliverySelection deliverySelection(Map<String,Object> owner,long revision,String planHash,String manualHash,boolean confirmed){
         var row=planRow(owner,revision);JsonNode plan=checkedPlan(owner,row,planHash),review=manual.stored(owner,row,plan,automaticPlan(owner));
         String actual=review==null?null:review.path("review_hash").asText();if(!Objects.equals(actual,manualHash))throw conflict("CLIP_MANUAL_REVIEW_MISMATCH","Supply this revision's exact manual review hash");

@@ -410,6 +410,48 @@ public class ExportService {
         return transaction.execute(status -> contentLocked(lockPublicOwner(id), clipId));
     }
 
+    public JsonNode editableTimeline(String value, String clipValue) {
+        String id = uuid(value, "INVALID_EXPORT_ID");
+        String clipId = uuid(clipValue, "INVALID_CLIP_ID");
+        return transaction.execute(status -> {
+            var owner = lockPublicOwner(id);
+            if (owner.get("clip_request_id") == null || !"CLEAN".equals(owner.get("render_mode"))) {
+                throw conflict("TIMELINE_UNAVAILABLE", "Select a clean export of a confirmed intent clipping request");
+            }
+            var row = clip(id, clipId, false);
+            var verified = verifiedIntentDelivery(owner, Set.of(clipId));
+            var origin = new EditTimeline.ExportOrigin(id, clipId, (String) owner.get("snapshot_hash"));
+            return compileTimeline(verified.request(), verified.selection(), (String) row.get("segment_id"),
+                    verified.frozen().path("approved_revision").longValue(), verified.frozen().path("plan_hash").asText(), origin);
+        });
+    }
+
+    /** Download straight from an exact confirmation, without creating a render batch or reserving work. */
+    public JsonNode confirmedTimeline(String requestId, long revision, String outputId, String planHash, String reviewHash) {
+        String id = ClipRequestService.uuid(requestId);
+        if (revision < 0 || revision > 9007199254740991L || !outputId.matches("[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}")) {
+            throw bad("INVALID_TIMELINE_SELECTION", "Provide a plan revision and output ID");
+        }
+        ClipPlanValidator.hash(planHash);
+        if (reviewHash != null) ClipPlanValidator.hash(reviewHash);
+        return transaction.execute(status -> {
+            var owner = clipRequests.lockPublicOwner(id);
+            var selection = clipRequests.deliverySelection(owner, revision, planHash, reviewHash, true);
+            return compileTimeline(owner, selection, outputId, revision, planHash, null);
+        });
+    }
+
+    private JsonNode compileTimeline(Map<String,Object> request, ClipRequestService.DeliverySelection selection,
+                                     String outputId, long revision, String planHash, EditTimeline.ExportOrigin origin) {
+        var output = selection.outputs().stream().filter(item -> outputId.equals(item.path("output_id").asText()))
+                .findFirst().orElseThrow(() -> missing("TIMELINE_OUTPUT_NOT_SELECTED", "Output was not selected in this confirmation"));
+        JsonNode utterances = clipRequests.timelineUtterances(request, selection);
+        var filename = jdbc.queryForObject("SELECT original_filename FROM video_asset WHERE id=? AND content_hash=?",
+                String.class, request.get("video_id"), request.get("source_hash"));
+        String reviewHash = selection.review() == null ? null : selection.review().path("review_hash").asText();
+        return EditTimeline.document(revision, planHash, reviewHash, origin, filename, selection.plan(), output, utterances);
+    }
+
     /** Admission metadata only, with existing manual-proof source checks; no captions or sibling media. */
     public ExportVideoModels.Plan videoPackagePlan(String value,List<String> selection){
         String id=uuid(value,"INVALID_EXPORT_ID");
@@ -648,6 +690,10 @@ public class ExportService {
         return verifyClipRequestFrozen(owner,null);
     }
     private JsonNode verifyClipRequestFrozen(Map<String,Object> owner,Set<String> selected){
+        return verifiedIntentDelivery(owner, selected).frozen();
+    }
+    private record VerifiedIntent(JsonNode frozen, ClipRequestService.DeliverySelection selection, Map<String,Object> request) {}
+    private VerifiedIntent verifiedIntentDelivery(Map<String,Object> owner,Set<String> selected){
         try{
             JsonNode frozen=JSON.readTree(String.valueOf(owner.get("frozen_json")));
             String digest=sha256(ClipRequestService.canonicalJson(frozen));
@@ -672,7 +718,7 @@ public class ExportService {
                 ||!Objects.equals(owner.get("job_id"),row.get("stage_job"))||!"EXPORT".equals(row.get("stage_owner_type"))||!Objects.equals(owner.get("id"),row.get("stage_owner"))
                 ||!Objects.equals(row.get("id"),row.get("shard_key"))||!"EXPORT_CLIP".equals(row.get("stage_type"))
                 ||!sha256(digest+"\n"+ClipRequestService.canonicalJson(JSON.valueToTree(clip))+"\n"+row.get("id")).equals(row.get("input_hash")))throw new IllegalArgumentException();}
-            return frozen;
+            return new VerifiedIntent(frozen, selection, request);
         }catch(JobException invalid){throw invalid;}catch(RuntimeException invalid){throw conflict("EXPORT_SNAPSHOT_INVALID","Frozen intent export failed plan and manual-review verification");}
     }
 

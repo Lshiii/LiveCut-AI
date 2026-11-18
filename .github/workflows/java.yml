@@ -10,6 +10,7 @@ on:
       - 'contracts/agent-answer-evidence-screen.schema.json'
       - '.github/workflows/java.yml'
       - 'scripts/install-caption-font.py'
+      - 'scripts/tests/verify-otio-handoff.py'
       - 'contracts/caption-render-spec.schema.json'
   pull_request:
     paths:
@@ -20,6 +21,7 @@ on:
       - 'contracts/agent-answer-evidence-screen.schema.json'
       - '.github/workflows/java.yml'
       - 'scripts/install-caption-font.py'
+      - 'scripts/tests/verify-otio-handoff.py'
       - 'contracts/caption-render-spec.schema.json'
 
 permissions:
@@ -72,6 +74,11 @@ jobs:
         run: python3 ../scripts/install-caption-font.py
       - name: Verify against real MySQL
         run: ./mvnw --batch-mode --no-transfer-progress verify
+      - name: Read both timeline downloads with OpenTimelineIO
+        run: |
+          python3 -m venv "$RUNNER_TEMP/otio-check"
+          "$RUNNER_TEMP/otio-check/bin/pip" install --only-binary=:all: opentimelineio==0.18.1
+          "$RUNNER_TEMP/otio-check/bin/python" ../scripts/tests/verify-otio-handoff.py target/otio-check
       - name: Require executed tests without skips
         run: |
           python3 - <<'PY'
