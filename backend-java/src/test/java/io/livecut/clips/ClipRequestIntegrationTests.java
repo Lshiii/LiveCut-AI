@@ -308,6 +308,84 @@ class ClipRequestIntegrationTests {
         assertEquals(batch.snapshotHash(),exports.get(batch.id()).snapshotHash());assertEquals(batch.id(),exports.createClipRequest(selected.id(),exportInput(selected)).id());
         app.close();startContext();assertEquals(batch.snapshotHash(),exports.get(batch.id()).snapshotHash());assertEquals(2,clips.get(selected.id()).revision());
     }
+    @Test void downloadsFrozenTimelineWithSyncedTracksAndEvidenceBeforeAnyRender() throws Exception {
+        Fixture source = fixture();
+        var selected = select(ready(source));
+        String direct = "/api/clip-requests/" + selected.id() + "/revisions/" + selected.revision()
+                + "/outputs/out-cause/timeline.otio?plan_hash=" + selected.planHash();
+        assertEquals(409, send("GET", direct, null, null, false).statusCode());
+        clips.confirm(selected.id(), confirmation(selected));
+        var before = jobs.get(source.job());
+        var directResponse = send("GET", direct, null, null, false);
+        assertEquals(200, directResponse.statusCode());
+        assertTrue(exports.listClipRequest(selected.id()).items().isEmpty());
+        assertEquals(before, jobs.get(source.job()));
+        assertEquals(404, send("GET", direct.replace("out-cause", "absent"), null, null, false).statusCode());
+        assertEquals(409, send("GET", direct.replace(selected.planHash(), "f".repeat(64)), null, null, false).statusCode());
+        var batch = exports.createClipRequest(selected.id(), exportInput(selected));
+        var cause = batch.clips().stream().filter(c -> c.segmentId().equals("out-cause")).findFirst().orElseThrow();
+        String path = "/api/exports/" + batch.id() + "/clips/" + cause.id() + "/timeline.otio";
+        var download = http.send(HttpRequest.newBuilder(base.resolve(path)).GET().build(),
+                HttpResponse.BodyHandlers.ofFile(root.resolve("downloaded-intent-timeline.otio")));
+        assertEquals(200, download.statusCode());
+        byte[] bytes = Files.readAllBytes(download.body());
+        assertEquals('"' + sha(bytes) + '"', download.headers().firstValue("etag").orElseThrow());
+        assertEquals("attachment; filename=\"livecut-" + cause.id() + ".otio\"",
+                download.headers().firstValue("content-disposition").orElseThrow());
+        JsonNode timeline = JSON.readTree(bytes);
+        JsonNode proof = timeline.at("/metadata/livecut");
+        assertEquals(source.hash(), proof.path("source_sha256").asText());
+        assertEquals(selected.planHash(), proof.path("plan_hash").asText());
+        assertEquals(selected.revision(), proof.path("approved_revision").longValue());
+        assertEquals(batch.snapshotHash(), proof.path("snapshot_hash").asText());
+        assertEquals(selected.source().transcriptHash(), proof.path("transcript_hash").asText());
+        var tracks = timeline.at("/tracks/children");
+        assertEquals(2, tracks.size());
+        assertEquals("Video", tracks.get(0).path("kind").asText());
+        assertEquals("Audio", tracks.get(1).path("kind").asText());
+        for (JsonNode track : tracks) {
+            JsonNode parts = track.path("children");
+            assertEquals(2, parts.size());
+            for (int n = 0; n < 2; n++) {
+                JsonNode part = parts.get(n);
+                assertEquals(2000 * n, part.at("/source_range/start_time/value").intValue());
+                assertEquals(1000, part.at("/source_range/duration/value").intValue());
+                assertEquals(1000, part.at("/source_range/duration/rate").intValue());
+                assertEquals("./intent-synthetic.mp4", part.at("/media_reference/target_url").asText());
+                assertEquals(4000, part.at("/media_reference/available_range/duration/value").intValue());
+                assertEquals(n == 0 ? "u1" : "u3", part.at("/metadata/livecut/start_utterance_id").asText());
+            }
+        }
+        var marker = tracks.get(0).at("/children/1/markers/0");
+        assertEquals("u3", marker.at("/metadata/livecut/utterance_id").asText());
+        assertEquals(source.utterances().get(2).path("text").asText(), marker.path("name").asText());
+        assertEquals(2000, marker.at("/marked_range/start_time/value").intValue());
+        assertEquals(0, tracks.get(1).at("/children/1/markers").size());
+        assertEquals(batch, exports.get(batch.id()), "A timeline download may not enqueue, claim or render a stage");
+        JsonNode directTimeline = JSON.readTree(directResponse.body());
+        assertEquals(tracks, directTimeline.at("/tracks/children"));
+        assertEquals(selected.planHash(), directTimeline.at("/metadata/livecut/plan_hash").asText());
+        assertFalse(directTimeline.at("/metadata/livecut").has("export_id"));
+
+        JsonNode updated = selected.plan().path("outputs").deepCopy();
+        ((ObjectNode) updated.get(0)).put("title", "new draft");
+        clips.save(selected.id(), edit(selected, updated));
+        assertArrayEquals(bytes, send("GET", path, null, null, false).body());
+        assertArrayEquals(directResponse.body(), send("GET", direct, null, null, false).body());
+        assertEquals(404, send("GET", path.replace(cause.id(), UUID.randomUUID().toString()), null, null, false).statusCode());
+        jdbc.update("UPDATE export_clip SET source_parts_json=? WHERE id=?", "[{\"start_ms\":0,\"end_ms\":3000}]", cause.id());
+        assertEquals("EXPORT_SNAPSHOT_INVALID", failure(() -> exports.editableTimeline(batch.id(), cause.id())));
+        var storage = JSON.readTree(jdbc.queryForObject("SELECT source_json FROM clip_request WHERE id=?", String.class, selected.id()));
+        ((ObjectNode)storage.path("utterances").get(0)).put("text", "changed quote");
+        jdbc.update("UPDATE clip_request SET source_json=? WHERE id=?", ClipRequestService.canonicalJson(storage), selected.id());
+        assertEquals("CLIP_SOURCE_INVALID", failure(() -> exports.confirmedTimeline(selected.id(), selected.revision(),
+                "out-cause", selected.planHash(), null)));
+
+        // The CI reader imports these actual HTTP attachments with the official OTIO library.
+        Path interoperability = Files.createDirectories(Path.of("target", "otio-check"));
+        Files.write(interoperability.resolve("confirmed-http.otio"), bytes);
+        Files.write(interoperability.resolve("confirmed-plan.otio"), directResponse.body());
+    }
     @Test void partialGoalsRemainExplicitAndOnlyFoundSelectionCanExport() throws Exception {
         Fixture f=fixture();var r=create(f,4);var lease=claim(r);var completion=publishPlan(f,r,lease,p->{ObjectNode out=(ObjectNode)p.path("outputs").get(1);out.put("status","NOT_FOUND").put("reason","not discussed");out.putArray("parts");out.putArray("evidence_utterance_ids");});jobs.complete(lease.stageId(),completion);
         var ready=clips.get(r.id());ObjectNode selected=(ObjectNode)ready.plan().deepCopy();((ObjectNode)selected.path("outputs").get(0)).put("enabled",true);var saved=clips.save(r.id(),edit(ready,selected.path("outputs")));clips.confirm(r.id(),confirmation(saved));assertEquals(1,exports.createClipRequest(r.id(),exportInput(saved)).clips().size());
@@ -647,6 +725,11 @@ class ClipRequestIntegrationTests {
     @Test void videoPackageRequiresOriginalManualSelectionProofAfterMediaHasCompleted()throws Exception{
         var r=readyManual(fixture(),null);clips.createManualReview(r.id(),manualInput(r,"out-cause"),UUID.randomUUID().toString());
         var human=clips.get(r.id());clips.confirm(human.id(),manualConfirmation(human));var batch=exports.createClipRequest(human.id(),manualExport(human));var clip=batch.clips().getFirst();
+        assertEquals(human.manualReview().path("review_hash"), exports.editableTimeline(batch.id(),clip.id()).at("/metadata/livecut/manual_review_hash"));
+        String reviewHash=human.manualReview().path("review_hash").asText();
+        assertEquals("CLIP_MANUAL_REVIEW_MISMATCH",failure(()->exports.confirmedTimeline(human.id(),human.revision(),"out-cause",human.planHash(),null)));
+        assertEquals("TIMELINE_OUTPUT_NOT_SELECTED",failure(()->exports.confirmedTimeline(human.id(),human.revision(),"out-method",human.planHash(),reviewHash)));
+        assertEquals(reviewHash,exports.confirmedTimeline(human.id(),human.revision(),"out-cause",human.planHash(),reviewHash).at("/metadata/livecut/manual_review_hash").asText());
         var lease=jobs.claim(new ClaimRequest(clip.stageId(),"manual-video-package-synthetic",UUID.randomUUID().toString()));
         assertEquals("ACCEPTED",jobs.complete(lease.stageId(),publishExport(lease,(Map<?,?>)lease.config().get("export"),false)).outcome());
         var admitted=exports.videoPackagePlan(batch.id(),List.of(clip.id()));assertEquals(2000,admitted.clips().getFirst().durationMs());
@@ -654,6 +737,7 @@ class ClipRequestIntegrationTests {
         try(var ready=delivery.bundle(batch.id(),List.of(clip.id()))){assertTrue(Files.exists(ready.path()));}
         assertEquals(0,jdbc.queryForObject("SELECT COUNT(*) FROM caption_document WHERE export_id=?",Integer.class,batch.id()));
         jdbc.update("DELETE FROM clip_plan_manual_review WHERE id=?",human.manualReview().path("id").asText());
+        assertEquals("CLIP_MANUAL_REVIEW_INVALID",failure(()->exports.editableTimeline(batch.id(),clip.id())));
         assertEquals("CLIP_MANUAL_REVIEW_INVALID",failure(()->exports.videoPackagePlan(batch.id(),List.of(clip.id()))));
         assertEquals("CLIP_MANUAL_REVIEW_INVALID",failure(()->exports.videoPackageContent(admitted,admitted.clips().getFirst())));
         assertEquals("CLIP_MANUAL_REVIEW_INVALID",failure(()->delivery.bundle(batch.id(),List.of(clip.id()))));

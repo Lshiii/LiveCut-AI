@@ -40,7 +40,7 @@ public final class ClipManualReview {
     public static String now(){return CREATED.format(Instant.now().truncatedTo(ChronoUnit.MICROS));}
 
     /** Verify the actual hashed ASR, not only hash labels on the request row. */
-    public void verifySource(Map<String,Object> owner){
+    public JsonNode verifySource(Map<String,Object> owner){
         try{
             var job=jdbc.queryForMap("SELECT id,video_id,generation FROM analysis_job WHERE id=?",owner.get("job_id"));
             if(!Objects.equals(job.get("video_id"),owner.get("video_id"))||!Objects.equals(owner.get("source_hash"),jdbc.queryForObject("SELECT content_hash FROM video_asset WHERE id=?",String.class,owner.get("video_id"))))throw invalid();
@@ -48,7 +48,9 @@ public final class ClipManualReview {
             var identity=new ArtifactVerifier.ManifestIdentity(String.valueOf(owner.get("job_id")),String.valueOf(owner.get("video_id")),((Number)job.get("generation")).intValue(),String.valueOf(stage.get("id")),"ASR",((Number)stage.get("attempt")).intValue(),String.valueOf(stage.get("run_token")),String.valueOf(owner.get("source_hash")));
             var manifest=artifacts.verifyManifest(String.valueOf(stage.get("manifest_key")),String.valueOf(stage.get("manifest_hash")),identity);
             var transcript=manifest.artifacts().stream().filter(a->a.kind().equals("transcript")).findFirst().orElseThrow();
-            if(!transcript.sha256().equals(owner.get("transcript_hash"))||!transcript.key().equals(owner.get("transcript_key"))||!artifacts.readJsonArtifact(transcript,identity).equals(JSON.readTree(String.valueOf(owner.get("source_json"))).path("utterances")))throw invalid();
+            JsonNode sentences=artifacts.readJsonArtifact(transcript,identity);
+            if(!transcript.sha256().equals(owner.get("transcript_hash"))||!transcript.key().equals(owner.get("transcript_key"))||!sentences.equals(JSON.readTree(String.valueOf(owner.get("source_json"))).path("utterances")))throw invalid();
+            return sentences;
         }catch(JobException failure){throw invalid();}catch(IllegalArgumentException|NoSuchElementException failure){throw invalid();}
     }
 

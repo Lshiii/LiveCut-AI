@@ -49,6 +49,12 @@ public class ExportController {
         return JsonAttachment.response("export-" + inventory.exportId() + "-v" + inventory.stateVersion() + ".json", inventory);
     }
 
+    @GetMapping("/{id}/clips/{clipId}/timeline.otio")
+    public ResponseEntity<byte[]> timeline(@PathVariable String id, @PathVariable String clipId) {
+        var timeline = exports.editableTimeline(id, clipId);
+        return JsonAttachment.response("livecut-" + clipId.toLowerCase(java.util.Locale.ROOT) + ".otio", timeline);
+    }
+
     @PostMapping("/{id}/clips/{clipId}/retry")
     public ExportModels.Snapshot retry(@PathVariable String id, @PathVariable String clipId) { return exports.retry(id, clipId); }
 
