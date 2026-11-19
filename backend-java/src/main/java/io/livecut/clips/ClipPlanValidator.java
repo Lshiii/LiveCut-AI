@@ -12,7 +12,12 @@ public final class ClipPlanValidator {
     public static final JsonMapper JSON=JsonMapper.builder().build();
     private static final Set<String> PLAN=Set.of("schema_version","request_id","job_id","video_id","source_hash","transcript_hash","duration_ms","instruction","goals","constraints","outputs","provenance");
     public static JsonNode validate(JsonNode plan,Map<String,Object> request,boolean initial) {
-        fields(plan,PLAN);
+        boolean hasCandidates = plan != null && plan.has("component_candidates");
+        if (hasCandidates) {
+            var extended = new HashSet<>(PLAN);
+            extended.add("component_candidates");
+            fields(plan, extended);
+        } else fields(plan, PLAN);
         equal(plan,"schema_version","1.0");
         for(String field:List.of("job_id","video_id","source_hash","transcript_hash","instruction"))equal(plan,field,String.valueOf(request.get(field)));
         equal(plan,"request_id",String.valueOf(request.get("id")));
@@ -64,6 +69,11 @@ public final class ClipPlanValidator {
             if(state.equals("NOT_FOUND")&&(!parts.isEmpty()||!evidence.isEmpty()))throw bad("Missing goal cannot invent source parts");
         }
         if(!seenGoals.equals(goals))throw bad("Each goal requires an explicit result");
+        if (hasCandidates) {
+            if (!montage || anchored || !"FOUND".equals(plan.path("outputs").get(0).path("status").asText()))
+                throw bad("Component choices require a found montage");
+            if (initial) ComponentCandidates.validate(plan, utterances, order);
+        }
         AnswerClipSource.validatePlan(plan,request,initial);
         return plan;
     }
@@ -71,6 +81,8 @@ public final class ClipPlanValidator {
     public static JsonNode validateReview(JsonNode plan,Map<String,Object> request,JsonNode automatic){
         validate(automatic,request,true);
         validate(plan,request,false);
+        if (!Objects.equals(plan.get("component_candidates"), automatic.get("component_candidates")))
+            throw bad("Component choices must match the original publication");
         for(String field:PLAN)if(!field.equals("outputs")&&!plan.path(field).equals(automatic.path(field)))throw bad("Review metadata must match the automatic plan");
         Map<String,JsonNode> originals=new HashMap<>();
         for(JsonNode output:automatic.path("outputs"))originals.put(output.path("output_id").stringValue(),output);
@@ -89,5 +101,5 @@ public final class ClipPlanValidator {
     public static String id(JsonNode value,String field){String s=text(value,field,128);if(!s.matches("[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}"))throw bad("Invalid identifier");return s;}
     public static void equal(JsonNode value,String field,String expected){if(!value.path(field).isString()||!expected.equals(value.path(field).stringValue()))throw bad("Source identity mismatch: "+field);}
     public static String hash(String value){if(value==null||!value.matches("[a-f0-9]{64}"))throw bad("Invalid hash");return value;}
-    private static JobException bad(String message){return new JobException(HttpStatus.BAD_REQUEST,"INVALID_CLIP_PLAN",message);}
+    static JobException bad(String message){return new JobException(HttpStatus.BAD_REQUEST,"INVALID_CLIP_PLAN",message);}
 }

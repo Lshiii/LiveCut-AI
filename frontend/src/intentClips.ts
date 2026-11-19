@@ -1,4 +1,5 @@
 import { parseTextProgress, type TextProgress } from './textProgress.ts'
+import { validComponentCache, type MontageComponent } from './componentCandidates.ts'
 import { parseAnswerClipSource, sameAnswerClipSource, type AnswerClipSource } from './answerClip.ts'
 import { effectiveIntentSelection, manualReviewCanonical, manualReviewVerified, parseIntentManualReview, type IntentManualReview } from './intentManualReview.ts'
 
@@ -10,6 +11,7 @@ export interface IntentOutput {
   parts: IntentPart[]; excluded: { utterance_id: string; reason: string }[]; evidence_utterance_ids: string[]
 }
 export interface IntentPlan {
+  component_candidates?: MontageComponent[]
   schema_version: '1.0'; request_id: string; job_id: string; video_id: string
   source_hash: string; transcript_hash: string; duration_ms: number; instruction: string
   goals: { goal_id: string; description: string }[]
@@ -149,6 +151,7 @@ export function parseIntentSnapshot(raw: unknown, jobId: string, requestId?: str
       if (!row(output) || !Array.isArray(output.parts) || output.parts.some(value => !row(value)) || !Array.isArray(output.excluded) || output.excluded.some(value => !row(value))) invalid()
     }
     if (intentOutputValidation(plan.outputs as unknown as IntentOutput[], raw.utterances as unknown as IntentUtterance[], raw.source.duration_ms, plan.goals as IntentPlan['goals'], sourceAnswer)) invalid()
+    if (!validComponentCache(plan as unknown as IntentPlan, raw.utterances as unknown as IntentUtterance[], raw.revision === 0)) invalid()
   }
   const { text_progress: rawProgress, ...stage } = raw.stage
   const progress = parseTextProgress(rawProgress)

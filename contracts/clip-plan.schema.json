@@ -29,6 +29,7 @@
       }
     },
     "outputs": {"type": "array", "minItems": 1, "maxItems": 6, "items": {"$ref": "#/$defs/output"}},
+    "component_candidates": {"type": "array", "minItems": 1, "maxItems": 6, "items": {"$ref": "#/$defs/component"}},
     "provenance": {
       "type": "object", "additionalProperties": false, "required": ["text_model_id", "prompt_version", "retrieval_mode", "index_hash"],
       "properties": {
@@ -45,6 +46,13 @@
   },
   "allOf": [
     {
+      "if": {"required": ["component_candidates"]},
+      "then": {"properties": {
+        "provenance": {"properties": {"prompt_version": {"const": "montage-clips-v1"}}},
+        "outputs": {"maxItems": 1, "items": {"properties": {"status": {"const": "FOUND"}}}}
+      }}
+    },
+    {
       "if": {"properties": {"provenance": {"properties": {"prompt_version": {"const": "montage-clips-v1"}}}}},
       "then": {"properties": {"goals": {"maxItems": 1}, "outputs": {"maxItems": 1}}}
     },
@@ -58,6 +66,23 @@
     }
   ],
   "$defs": {
+    "component": {
+      "type": "object", "additionalProperties": false, "required": ["component_id", "title", "choices"],
+      "properties": {
+        "component_id": {"$ref": "#/$defs/goalId"}, "title": {"type": "string", "minLength": 1, "maxLength": 120},
+        "choices": {
+          "type": "array", "minItems": 1, "maxItems": 4,
+          "items": {
+            "type": "object", "additionalProperties": false, "required": ["reason", "parts", "evidence_utterance_ids"],
+            "properties": {
+              "reason": {"type": "string", "minLength": 1, "maxLength": 1000},
+              "parts": {"type": "array", "minItems": 1, "maxItems": 12, "items": {"$ref": "#/$defs/part"}},
+              "evidence_utterance_ids": {"type": "array", "minItems": 1, "maxItems": 200, "uniqueItems": true, "items": {"$ref": "#/$defs/id"}}
+            }
+          }
+        }
+      }
+    },
     "hash": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
     "id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$"},
     "goalId": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$"},

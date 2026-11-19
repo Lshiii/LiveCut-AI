@@ -10,6 +10,8 @@ import CaptionPanel from './CaptionPanel.vue'
 import VideoPackagePanel from './VideoPackagePanel.vue'
 import TranscriptRangePicker from './TranscriptRangePicker.vue'
 import PaperCutEditor from './PaperCutEditor.vue'
+import ProductReplacementPanel from './ProductReplacementPanel.vue'
+import { replaceComponent, type ComponentSelection } from './componentCandidates'
 import { compilePaperCut, preparePaperCut, type PaperCutSource } from './paperCut'
 import DraftBackupPanel from './DraftBackupPanel.vue'
 import IntentManualReviewPanel from './IntentManualReviewPanel.vue'
@@ -787,6 +789,27 @@ function previewJoin(output: IntentOutput, index: number) {
   if (!join || !canPreviewSequence(output)) return
   void beginAudition(output, { id: `join:${output.output_id}:${index}`, title: `${output.title} · 剪点 ${index + 1}`, joinIndex: index, outputId: output.output_id }, join.audition)
 }
+function useComponentChoice(output: IntentOutput, pick: ComponentSelection, preview = false) {
+  const current = snapshot.value
+  if (!current?.plan || !mediaActive('review') || pending.value || document.hidden || manualReviewProtected.value
+    || saveNeedsCheck.value || planRevisionConflict.value || draftRevision.value !== current.revision
+    || draftBasePlanHash.value !== current.plan_hash || current.revision !== pick.revision || current.plan_hash !== pick.hash
+    || current.id !== pick.request || !outputs.value.includes(output)) return
+  const group = current.plan.component_candidates?.find(g => g.component_id === pick.component)
+  const choice = group?.choices[pick.choice]
+  if (!group || !choice) return
+  if (preview) {
+    const id = `choice:${output.output_id}:${group.component_id}:${pick.choice}`
+    if (sequenceState.value?.id === id || preparingSequence.value === id) { stopSequencePreview(); return }
+    void beginAudition(output, { id, outputId: output.output_id, title: group.title }, choice.parts)
+    return
+  }
+  const replacement = replaceComponent(current, output, pick)
+  if (!replacement) return
+  stopSequencePreview()
+  outputs.value = outputs.value.map(o => o.output_id === output.output_id ? replacement : o)
+  notice.value = `已将「${group.title}」替换到本页草稿。核对后可保存并确认导出。`
+}
 async function beginAudition(output: IntentOutput, detail: NonNullable<typeof sequenceDescription.value>, parts: SequencePreviewPart[]) {
   const player = sourcePlayer.value
   if (!player) return
@@ -993,6 +1016,11 @@ onBeforeUnmount(() => { stopped = true; historyVersion++; historyScope.dispose()
           <article v-for="(output, index) in outputs" :key="output.output_id" class="intent-output">
             <div class="intent-output-heading"><label><input v-if="output.status === 'FOUND'" v-model="output.enabled" type="checkbox" :disabled="pending || manualReviewProtected" :aria-label="`选择剪辑目标 ${goal(output)}`">目标 {{ index + 1 }}：{{ goal(output) }}</label><div class="intent-output-actions"><span>{{ names[output.status] }}</span><span v-if="manuallySelected.has(output.output_id)" class="status">人工已选用 · r{{ snapshot.revision }}</span><button class="secondary" :disabled="!canPreviewSequence(output)" :aria-label="`${sequenceSelected(output) ? '停止预览' : '预览'}目标 ${index + 1} 全部区间`" @click="previewSequence(output)">{{ sequenceSelected(output) ? '停止预览' : '预览全部区间' }}</button></div></div>
             <button v-if="output.status === 'FOUND'" class="secondary" :disabled="pending || manualReviewProtected || saveNeedsCheck || planRevisionConflict || !output.parts.length" @click="openPaperCut(output, $event)">逐句粗剪</button>
+            <ProductReplacementPanel v-if="snapshot.plan?.component_candidates && output.status === 'FOUND'"
+              :key="`${snapshot.id}:${snapshot.revision}:${snapshot.plan_hash}:${output.output_id}`"
+              :snapshot="snapshot" :output="output" :active="mediaActive('review')"
+              :disabled="pending || manualReviewProtected || saveNeedsCheck || planRevisionConflict || !!rangePickerTarget"
+              @apply="useComponentChoice(output, $event)" @preview="useComponentChoice(output, $event, true)" @seek="locateTime($event)" />
             <details class="intent-reason-details" :open="output.status !== 'FOUND'"><summary>AI 选段说明<span v-if="output.status !== 'FOUND'"> · 需要复核</span></summary><p class="intent-reason">{{ output.reason }}</p></details>
             <label class="intent-title-label">成片标题<input v-model="output.title" maxlength="120" :disabled="pending || manualReviewProtected" :aria-label="`剪辑标题 ${index + 1}`"></label>
             <ProductFrameRanking v-if="snapshot && snapshot.video_id === props.videoId && snapshot.source.video_sha256 === props.videoHash && partsForPreview(output)"

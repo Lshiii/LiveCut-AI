@@ -168,6 +168,7 @@ public class ClipRequestService {
         String outputPolicy = (String)owner.get("output_policy");
         if(!expected.equals(stage.stageType())||stage.requiredWorkerProtocol()!=ClipOutputPolicy.requiredProtocol(outputPolicy,answer))throw conflict("CLIP_STAGE_UNAVAILABLE","Clipping stage does not match its frozen policy and protocol");
         if(outputPolicy!=null)clip.put("output_policy",outputPolicy);
+        if(ClipOutputPolicy.SINGLE_MONTAGE.equals(outputPolicy))clip.put("component_candidates_enabled",true);
         if(answer!=null)clip.put("answer_source",answer.source());
         clip.put("request_id",stage.ownerId());clip.put("instruction",owner.get("instruction"));clip.put("source_job_id",stage.jobId());
         clip.put("source_transcript_key",owner.get("transcript_key"));clip.put("source_transcript_hash",owner.get("transcript_hash"));

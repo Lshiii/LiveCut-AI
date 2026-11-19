@@ -1491,6 +1491,7 @@ class AnalysisStageExecutor:
                     base_url=os.environ.get("LIVECUT_TEXT_BASE_URL"), dense_embedder=embedder,
                     embedding_model_id=embedder.model_id if embedder else None,
                     output_policy=config.get("output_policy"),
+                    component_candidates_enabled=config.get("component_candidates_enabled") is True,
                     index_cache_dir=_native_path(context.storage_root / "cache" / "intent-index-v1"))
         context.guard.check()
         artifacts = [context.artifact(kind, directory / filename) for kind, filename in (

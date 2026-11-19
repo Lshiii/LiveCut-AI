@@ -11,6 +11,7 @@ from pathlib import Path
 import httpx
 
 from .intent_retrieval import Embedder, build_index, retrieve
+from .montage_candidates import component_candidates
 from .segmentation import (
     DEFAULT_BASE_URL,
     SegmentationError,
@@ -228,13 +229,54 @@ def _montage_output(rows: list[dict], items: list[dict], instruction: str) -> di
             "evidence_utterance_ids": sorted(evidence, key=order.__getitem__)}
 
 
+def _validate_components(plan: dict, items: list[dict], initial: bool) -> None:
+    components = plan["component_candidates"]
+    if (plan["provenance"]["prompt_version"] != MONTAGE_VERSION or not isinstance(components, list)
+            or not 1 <= len(components) <= 6 or len(plan["outputs"]) != 1 or plan["outputs"][0]["status"] != "FOUND"):
+        raise _InvalidOutput("MONTAGE_COMPONENTS")
+    output = plan["outputs"][0]
+    ids, primary_parts, primary_evidence, limits = set(), [], set(), []
+    for group in components:
+        if not isinstance(group, dict) or set(group) != {"component_id", "title", "choices"}:
+            raise _InvalidOutput("COMPONENT_FIELDS")
+        gid = group["component_id"]
+        if not isinstance(gid, str) or not _ID.fullmatch(gid) or len(gid) > 64 or gid in ids:
+            raise _InvalidOutput("COMPONENT_ID")
+        ids.add(gid)
+        choices = group["choices"]
+        if not isinstance(choices, list) or not 1 <= len(choices) <= 4:
+            raise _InvalidOutput("COMPONENT_CHOICES")
+        seen = set()
+        for choice in choices:
+            if not isinstance(choice, dict) or set(choice) != {"reason", "parts", "evidence_utterance_ids"}:
+                raise _InvalidOutput("CHOICE_FIELDS")
+            projected = {**output, **choice, "goal_id": gid, "title": group["title"], "enabled": False,
+                         "excluded": output["excluded"] if initial else []}
+            _rows([projected], [{"goal_id": gid}], items, timed=True)
+            key = _json(choice["parts"])
+            if key in seen:
+                raise _InvalidOutput("DUPLICATE_CHOICE")
+            seen.add(key)
+        primary = choices[0]
+        primary_parts.extend(primary["parts"])
+        primary_evidence.update(primary["evidence_utterance_ids"])
+        limits.append((primary["parts"][0]["start_ms"], primary["parts"][-1]["end_ms"]))
+    for i, group in enumerate(components):
+        lo = limits[i - 1][1] if i else 0
+        hi = limits[i + 1][0] if i + 1 < len(limits) else plan["duration_ms"]
+        if any(c["parts"][0]["start_ms"] < lo or c["parts"][-1]["end_ms"] > hi for c in group["choices"]):
+            raise _InvalidOutput("CHOICE_OTHER_COMPONENT")
+    if initial and (primary_parts != output["parts"] or primary_evidence != set(output["evidence_utterance_ids"])):
+        raise _InvalidOutput("CHOICE_PRIMARY_MISMATCH")
+
+
 def validate_clip_plan(plan: dict, utterances: list[dict], *, expected: dict | None = None,
                        allow_enabled: bool = False, answer_source: dict | None = None) -> None:
     """Validate source references; this cannot prove semantic truth or completeness."""
     fields = {"schema_version", "request_id", "job_id", "video_id", "source_hash", "transcript_hash", "duration_ms",
               "instruction", "goals", "constraints", "outputs", "provenance"}
     try:
-        if not isinstance(plan, dict) or set(plan) != fields or plan["schema_version"] != "1.0":
+        if not isinstance(plan, dict) or set(plan) not in (fields, fields | {"component_candidates"}) or plan["schema_version"] != "1.0":
             raise _InvalidOutput("PLAN_FIELDS")
         items = _inputs(utterances, plan["duration_ms"])
         for field in ("request_id", "job_id", "video_id"):
@@ -261,6 +303,8 @@ def validate_clip_plan(plan: dict, utterances: list[dict], *, expected: dict | N
             raise _InvalidOutput("PROVENANCE")
         if provenance["prompt_version"] == MONTAGE_VERSION and len(plan["goals"]) != 1:
             raise _InvalidOutput("MONTAGE_GOAL_COUNT")
+        if "component_candidates" in plan:
+            _validate_components(plan, items, not allow_enabled)
         if provenance["prompt_version"] in {"anchor-clips-v1", "anchor-clips-v2"}:
             if answer_source is None:
                 raise _InvalidOutput("ANCHOR_SOURCE_REQUIRED")
@@ -298,7 +342,8 @@ def build_clip_plan(utterances: list[dict], duration_ms: int, instruction: str, 
                     model: str = "qwen-plus", api_key: str | None = None, base_url: str | None = None,
                     max_calls: int = 6, client: httpx.Client | None = None, timeout_seconds: float = 300,
                     dense_embedder: Embedder | None = None, embedding_model_id: str | None = None,
-                    index_cache_dir: str | Path | None = None, output_policy: str | None = None) -> dict:
+                    index_cache_dir: str | Path | None = None, output_policy: str | None = None,
+                    component_candidates_enabled: bool = False) -> dict:
     items = _inputs(utterances, duration_ms)
     if (not isinstance(instruction, str) or not 1 <= len(instruction.strip()) <= 2000
             or any(not isinstance(v, str) or not _ID.fullmatch(v) for v in (request_id, job_id, video_id, model))
@@ -379,6 +424,7 @@ def build_clip_plan(utterances: list[dict], duration_ms: int, instruction: str, 
             _save(root / "retrieval-trace.json", {"retrieval_mode": index["retrieval_mode"], "index_hash": index["index_hash"],
                                                    "goals": retrieval})
             visible = {gid: {u["utterance_id"] for u in evidence["utterances"]} for gid, evidence in retrieval.items()}
+            components = []
             if montage:
                 # All component lists are included in this single model input.
                 # Validate against what it actually saw, including every
@@ -393,6 +439,7 @@ def build_clip_plan(utterances: list[dict], duration_ms: int, instruction: str, 
                     outputs = [_montage_output(outputs, items, instruction)]
             else:
                 def parse_plan(raw):
+                    nonlocal components
                     value = _object(raw)
                     if set(value) != {"outputs"}:
                         raise _InvalidOutput("OUTPUT_STRUCTURE")
@@ -400,7 +447,10 @@ def build_clip_plan(utterances: list[dict], duration_ms: int, instruction: str, 
                     # Validate cross-component constraints inside the existing
                     # bounded format repair, before accepting phase 1.
                     if montage:
-                        return [_montage_output(rows, items, instruction)]
+                        compiled = _montage_output(rows, items, instruction)
+                        if component_candidates_enabled:
+                            components = component_candidates(rows, demand["goals"], retrieval, items)
+                        return [compiled]
                     return rows
                 outputs = phase(1, plan_system,
                     {"instruction": instruction, "goals": demand["goals"], "constraints": demand["constraints"],
@@ -414,6 +464,8 @@ def build_clip_plan(utterances: list[dict], duration_ms: int, instruction: str, 
                 "constraints": demand["constraints"], "outputs": outputs,
                 "provenance": {"text_model_id": model, "prompt_version": version,
                                "retrieval_mode": index["retrieval_mode"], "index_hash": index["index_hash"]}}
+            if components:
+                result["component_candidates"] = components
             validate_clip_plan(result, items)
             _save(root / "clip-plan.json", result)
             return result

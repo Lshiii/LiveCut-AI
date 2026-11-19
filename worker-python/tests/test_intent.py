@@ -265,3 +265,40 @@ def test_public_plan_time_and_enabled_flags_are_checked(tmp_path):
     with pytest.raises(SegmentationError):
         validate_clip_plan(result, utterances())
     validate_clip_plan(result, utterances(), allow_enabled=True)
+
+def test_component_candidates_are_frozen_and_generated_without_more_provider_calls(tmp_path):
+    from livecut.montage_candidates import component_candidates
+
+    source = utterances()
+    result, requests = run(tmp_path, [demand(), plan()], again=True, output_policy="single_montage_v1",
+                           component_candidates_enabled=True)
+    assert len(requests) == 2
+    assert [g["component_id"] for g in result["component_candidates"]] == ["cause", "solution"]
+    assert all(1 <= len(g["choices"]) <= 4 for g in result["component_candidates"])
+    first, second = (g["choices"][0] for g in result["component_candidates"])
+    assert first["parts"] + second["parts"] == result["outputs"][0]["parts"]
+    assert len(result["component_candidates"][0]["choices"]) >= 2
+    for change in ("foreign_source", "shared", "moved_original", "excluded"):
+        forged = copy.deepcopy(result)
+        c = forged["component_candidates"][0]["choices"]
+        if change == "foreign_source":
+            c[0]["parts"][0]["start_ms"] += 1
+        elif change == "shared":
+            c.append(copy.deepcopy(second))
+        elif change == "moved_original":
+            c.reverse()
+        else:
+            c.append({"parts": [{"start_utterance_id": "c3", "end_utterance_id": "c3", "start_ms": 2000, "end_ms": 2900}],
+                      "reason": "不应保留", "evidence_utterance_ids": ["c3"]})
+        with pytest.raises(SegmentationError, match="Clip plan"):
+            validate_clip_plan(forged, source)
+    assert component_candidates([{"status": "NEEDS_REVIEW"}], [], {}, []) == []
+
+
+def test_shared_primary_sentences_have_no_independently_swappable_components(tmp_path):
+    parts = plan()
+    overlap = parts["outputs"][1]
+    overlap["parts"] = [{"start_utterance_id": "b4", "end_utterance_id": "d6"}]
+    overlap["evidence_utterance_ids"] = ["b4", "d6"]
+    result, _ = run(tmp_path, [demand(), parts], output_policy="single_montage_v1", component_candidates_enabled=True)
+    assert "component_candidates" not in result
