@@ -20,6 +20,7 @@ import { newestSnapshot, parseExportSnapshot, SnapshotError } from './snapshotSt
 import { topicTime } from './topics'
 import { intentPreviewParts } from './intentPreviewParts'
 import EditJoinTimeline from './EditJoinTimeline.vue'
+import ProductFrameRanking from './ProductFrameRanking.vue'
 import { editJoins } from './editTimeline'
 import { SequencePreview, type SequencePreviewPart, type SequencePreviewState } from './sequencePreview'
 import { validateTranscriptRange } from './transcriptRange'
@@ -820,9 +821,11 @@ function updatePreviewVisibility() {
   if (!previewPageVisible.value && (preparedSequence || sequenceState.value)) stopSequencePreview()
 }
 async function locate(id: string) {
+  await locateTime(sourceTime(id))
+}
+async function locateTime(start: number) {
   stopSequencePreview()
-  const start = sourceTime(id)
-  if (start < 0 || !mediaActive('review')) return
+  if (!Number.isSafeInteger(start) || start < 0 || !snapshot.value || start >= snapshot.value.source.duration_ms || !mediaActive('review')) return
   const requestId = selectedId.value, version = selectionVersion, navigation = navigationVersion
   sourceContextOpen.value = true
   await nextTick()
@@ -992,6 +995,10 @@ onBeforeUnmount(() => { stopped = true; historyVersion++; historyScope.dispose()
             <button v-if="output.status === 'FOUND'" class="secondary" :disabled="pending || manualReviewProtected || saveNeedsCheck || planRevisionConflict || !output.parts.length" @click="openPaperCut(output, $event)">逐句粗剪</button>
             <details class="intent-reason-details" :open="output.status !== 'FOUND'"><summary>AI 选段说明<span v-if="output.status !== 'FOUND'"> · 需要复核</span></summary><p class="intent-reason">{{ output.reason }}</p></details>
             <label class="intent-title-label">成片标题<input v-model="output.title" maxlength="120" :disabled="pending || manualReviewProtected" :aria-label="`剪辑标题 ${index + 1}`"></label>
+            <ProductFrameRanking v-if="snapshot && snapshot.video_id === props.videoId && snapshot.source.video_sha256 === props.videoHash && partsForPreview(output)"
+              :snapshot="snapshot" :active="canPreviewSequence(output)"
+              :candidates="output.parts.map((part, i) => ({ id: output.output_id + ':' + i, parts: [part], text: sourceText(part.start_utterance_id) }))"
+              @seek="locateTime" />
             <EditJoinTimeline :parts="partsForPreview(output) ?? []" :disabled="!canPreviewSequence(output)" :active-join="activeJoin(output)"
               @audition="previewJoin(output, $event)" @stop="stopSequencePreview()" />
             <div v-if="confirmedTimelines.has(output.output_id)" class="intent-part-actions">

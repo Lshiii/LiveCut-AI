@@ -19,6 +19,7 @@ ocr = [
     "rapidocr>=3,<4",
 ]
 retrieval = ["onnxruntime>=1.20,<2", "tokenizers>=0.20,<1", "numpy>=1.26,<3"]
+product-frames = ["onnxruntime>=1.20,<2", "tokenizers>=0.20,<1", "numpy>=1.26,<3", "pillow>=10,<14"]
 kafka = [
     "kafka-python>=2.3.3,<3",
 ]

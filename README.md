@@ -435,6 +435,17 @@ uv run --frozen --no-sync python scripts/install-caption-font.py
 
 如果要一条成片，可以写“把开头的发布介绍和后面的模型演示剪辑到一起”。核对方案会列出各项素材的依据，并将保留的区间放在同一个目标中，方便连续试听。想要多个独立视频时，可以写“分别剪出发布介绍和模型演示”。[合片规则](docs/37-按需求检索与剪辑方案.md)
 
+直播回放可以在「核对方案」展开「按商品画面比较口播候选」，输入“主播手里举着鱼柳包装”之类的描述。工作台从候选的原句区间抽取原片帧，用本地 Chinese-CLIP 排序，并提供带原片时间的截图。点图可以回看。匹配值表示画面与描述的相似程度，报价和规格仍需查对应的口播。同一帧可在下次查询时复用特征。
+
+在运行 Java 工作台的机器上准备一次模型。以下命令在仓库根目录执行，需要已安装 FFmpeg。
+
+```powershell
+uv sync --frozen --extra product-frames --inexact
+uv run --frozen --no-sync python scripts/prepare-product-frame-model.py
+```
+
+权重来自固定版本的 [Chinese-CLIP ONNX 转换](https://huggingface.co/Xenova/chinese-clip-vit-base-patch16/tree/f26904860903e70e050b8f48255e5f48401816e9)，下载脚本核对 SHA-256。独立部署时，启动 Java 前可通过 `LIVECUT_PRODUCT_FRAME_PYTHON` 和 `LIVECUT_PRODUCT_FRAME_MODEL_DIR` 指定安装了 LiveCut 的 Python 解释器及权重目录。
+
 **入口：「按需剪辑」→「剪辑要求」。**
 
 1. 描述目标和取舍，例如：**「把视频里缓存失效原因和解决方法分别剪出来，保留完整解释，跳过关注引导。」**

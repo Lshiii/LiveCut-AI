@@ -574,6 +574,13 @@ ocr = [
     { name = "onnxruntime" },
     { name = "rapidocr" },
 ]
+product-frames = [
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
+    { name = "numpy", version = "2.5.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+    { name = "onnxruntime" },
+    { name = "pillow" },
+    { name = "tokenizers" },
+]
 retrieval = [
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
     { name = "numpy", version = "2.5.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
@@ -596,14 +603,18 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.28,<1" },
     { name = "jsonschema", specifier = ">=4.23,<5" },
     { name = "kafka-python", marker = "extra == 'kafka'", specifier = ">=2.3.3,<3" },
+    { name = "numpy", marker = "extra == 'product-frames'", specifier = ">=1.26,<3" },
     { name = "numpy", marker = "extra == 'retrieval'", specifier = ">=1.26,<3" },
     { name = "onnxruntime", marker = "extra == 'ocr'", specifier = ">=1.20,<2" },
+    { name = "onnxruntime", marker = "extra == 'product-frames'", specifier = ">=1.20,<2" },
     { name = "onnxruntime", marker = "extra == 'retrieval'", specifier = ">=1.20,<2" },
+    { name = "pillow", marker = "extra == 'product-frames'", specifier = ">=10,<14" },
     { name = "rapidocr", marker = "extra == 'ocr'", specifier = ">=3,<4" },
+    { name = "tokenizers", marker = "extra == 'product-frames'", specifier = ">=0.20,<1" },
     { name = "tokenizers", marker = "extra == 'retrieval'", specifier = ">=0.20,<1" },
     { name = "yt-dlp", extras = ["default"], marker = "extra == 'source-import'", specifier = "==2026.10.26" },
 ]
-provides-extras = ["ocr", "retrieval", "kafka", "source-import"]
+provides-extras = ["ocr", "retrieval", "product-frames", "kafka", "source-import"]
 
 [package.metadata.requires-dev]
 dev = [
