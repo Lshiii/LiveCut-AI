@@ -14,6 +14,13 @@ from pathlib import Path
 
 import httpx
 
+from .agent_offers import (
+    OFFER_SYSTEM,
+    price_context,
+    price_query,
+    product_candidates,
+    wants_product_prices,
+)
 from .intent import _object
 from .intent_retrieval import build_index, retrieve
 from .segmentation import (
@@ -269,6 +276,10 @@ def build_coverage_answer(utterances, topics, duration_ms, question, output_dir,
         "max_tool_steps": max_tool_steps, "max_calls": max_calls, "max_request_attempts": max_request_attempts,
         "embedding_model_id": embedding_model_id, "dense_enabled": dense_embedder is not None,
         "central_budget": budget_remaining is not None}
+    legacy_fingerprint = hashlib.sha256(_json(config).encode()).hexdigest()
+    check_offers = wants_product_prices(question, safe_topics)
+    system = SYSTEM + OFFER_SYSTEM if check_offers else SYSTEM
+    config["system_sha256"] = hashlib.sha256(system.encode()).hexdigest()
     fingerprint = hashlib.sha256(_json(config).encode()).hexdigest()
     root, directory = Path(output_dir), Path(output_dir) / "agent-coverage-v1"
     with _discovery_directory_lock(directory):
@@ -276,7 +287,14 @@ def build_coverage_answer(utterances, topics, duration_ms, question, output_dir,
         state_path, plan_path = directory / "state.json", directory / "request-plans.json"
         if not state_path.exists() and (plan_path.exists() or any(directory.glob("window-*-attempt-*.json"))):
             raise SegmentationError("INVALID_AGENT_CHECKPOINT", "Orphaned coverage evidence cannot start a new ledger")
-        state = _state(state_path, fingerprint, max_calls, max_tool_steps)
+        try:
+            state = _state(state_path, fingerprint, max_calls, max_tool_steps)
+        except SegmentationError:
+            if not check_offers:
+                raise
+            # Replay a pre-upgrade price question with its original request identity.
+            state = _state(state_path, legacy_fingerprint, max_calls, max_tool_steps)
+            fingerprint, system, check_offers = legacy_fingerprint, SYSTEM, False
         plans = _plans(plan_path, fingerprint, state, max_tool_steps)
         _save(state_path, state)
         key = _text_api_key(api_key, endpoint)
@@ -324,7 +342,7 @@ def build_coverage_answer(utterances, topics, duration_ms, question, output_dir,
                         "topic_count": len(safe_topics), "utterance_count": len(items)},
                         "remaining_tool_steps": plan["tools_left"], "remaining_model_calls": plan["remaining_calls"],
                         "coverage_policy": POLICY, "supplement_checked": len(unique_tools) >= 2}
-                    messages = [{"role": "system", "content": SYSTEM}, {"role": "user", "content": _json(payload)}]
+                    messages = [{"role": "system", "content": system}, {"role": "user", "content": _json(payload)}]
                     if repair_rule:
                         messages.append({"role": "user", "content": _json({"repair": "仅一次修复；逐项回答，仍有证据缺口且预算允许时改用合法工具补查；不足只能限定本轮范围。",
                                                                                   "validation_rule": repair_rule})})
@@ -344,6 +362,11 @@ def build_coverage_answer(utterances, topics, duration_ms, question, output_dir,
                     try:
                         action = _coverage_decision(raw, by_id, visible, parts, tools_left=plan["tools_left"],
                                                     require_supplement=plan["require_supplement"])
+                        if (check_offers and action["type"] == "answer" and action["answer_scope"] == "VIDEO"
+                                and plan["require_supplement"] and not any(
+                                    step["tool_name"] == "search_transcript" and price_query(step["arguments"]["query"])
+                                    for step in trace)):
+                            raise AgentOutputError("PRODUCT_OFFER_LOOKUP_REQUIRED")
                         break
                     except AgentOutputError as error:
                         if repair:
@@ -373,11 +396,21 @@ def build_coverage_answer(utterances, topics, duration_ms, question, output_dir,
                             cache_dir=index_cache_dir or directory / "indexes", dense_embedder=dense_embedder,
                             embedding_model_id=embedding_model_id)
                     mode = index["retrieval_mode"]
-                    evidence = retrieve(index, [args["query"]], items, dense_embedder=dense_embedder,
+                    groups = price_query(args["query"]) if check_offers else []
+                    query = " ".join(" ".join([*aliases, spec]) for aliases, spec in groups).strip() if groups else args["query"]
+                    evidence = retrieve(index, [query], items, dense_embedder=dense_embedder,
                         top_k=args["top_k"], context_before=0, context_after=0, max_visible_chars=32000)
+                    if groups:
+                        price_hits = product_candidates(items, groups, args["top_k"], topics=safe_topics, question=question)
+                        evidence["candidates"] = (price_hits + evidence["candidates"])[:args["top_k"]]
                     observation = expand_search_context(items, evidence["candidates"],
                         allowance=CONTEXT_POLICY["max_observation_chars"], remaining_context=remaining_context)
                     observation["context_truncated"] |= evidence["context_truncated"]
+                    if groups:
+                        labels = price_context(observation["utterances"])
+                        if labels and len(_json({**observation, "price_context": labels})) <= min(
+                                remaining_context, CONTEXT_POLICY["max_observation_chars"]):
+                            observation["price_context"] = labels
                 elif name == "read_context":
                     position = order[args["utterance_id"]]
                     observation = {"utterances": items[max(0, position - args["before"]):position + args["after"] + 1]}
