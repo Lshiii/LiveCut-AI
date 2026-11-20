@@ -1027,8 +1027,9 @@ onBeforeUnmount(() => { stopped = true; historyVersion++; historyScope.dispose()
               :snapshot="snapshot" :active="canPreviewSequence(output)"
               :candidates="output.parts.map((part, i) => ({ id: output.output_id + ':' + i, parts: [part], text: sourceText(part.start_utterance_id) }))"
               @seek="locateTime" />
-            <EditJoinTimeline :parts="partsForPreview(output) ?? []" :disabled="!canPreviewSequence(output)" :active-join="activeJoin(output)"
-              @audition="previewJoin(output, $event)" @stop="stopSequencePreview()" />
+            <EditJoinTimeline :key="`${snapshot.id}:${snapshot.revision}:${output.output_id}`" :parts="partsForPreview(output) ?? []"
+              :video-url="videoUrl" :disabled="!canPreviewSequence(output)" :active-join="activeJoin(output)"
+              @audition="previewJoin(output, $event)" @stop="stopSequencePreview()" @seek="locateTime" />
             <div v-if="confirmedTimelines.has(output.output_id)" class="intent-part-actions">
               <a class="text-button" :href="confirmedTimelines.get(output.output_id)" download>下载已确认时间线 (.otio)</a>
               <small>在支持 OTIO 的剪辑器中打开，并链接原视频。</small>
