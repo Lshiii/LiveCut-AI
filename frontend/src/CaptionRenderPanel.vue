@@ -7,6 +7,7 @@ import { captionRenderActive, captionRenderBase, captionRenderFrames, captionRen
   parseCaptionRenderList, CaptionRenderResponseError, CaptionRenderReceiptStorageError, type CaptionRenderFrame,
   type CaptionRenderSnapshot, type CaptionRenderStyle } from './captionRenders'
 import FailureDiagnostic from './FailureDiagnostic.vue'
+import CaptionFramePreview from './CaptionFramePreview.vue'
 
 const props = withDefaults(defineProps<{ snapshot: CaptionSnapshot; captionDirty: boolean; captionPending: boolean; active?: boolean }>(), { active: true })
 const rows = ref<CaptionRenderSnapshot[]>([]), selectedId = ref(''), action = ref('')
@@ -202,8 +203,9 @@ onBeforeUnmount(() => { stopped = true; epoch++; revisionEpoch++; resetPreviewLa
         <p v-if="revisionBusy" class="render-help" role="status">正在核对所选确认版本…</p><button v-else-if="revision !== null && !confirmedCaption" class="render-link" :disabled="pending" @click="readRevision">重新读取所选版本</button>
         <p v-if="confirmedCaption" class="render-help">已确认 r{{ confirmedCaption.revision }} · {{ confirmedCaption.cues.length }} 条字幕。{{ confirmedCaption.revision !== snapshot.revision ? '本页其他版本的修改不会进入这条视频。' : '' }}</p>
         <label>字幕样式<select v-model="style" :disabled="pending" aria-label="烧录字幕样式"><option v-for="(name, key) in captionRenderStyles" :key="key" :value="key">{{ name }}</option></select></label>
-        <div class="render-style-sample" :class="{ boxed: style === 'DARK_BOX_V1' }" aria-label="字幕样式示意"><span>字幕会写入视频画面</span></div><p class="render-help sample-note">样式示意，最终以生成成片为准。</p>
         <label>输出画幅<select v-model="frame" :disabled="pending" aria-label="烧录输出画幅"><option v-for="(name, key) in captionRenderFrames" :key="key" :value="key">{{ name }}</option></select></label><p class="render-help">{{ frame === 'PORTRAIT_BLUR_720' ? '前景完整保留，用同源视频的柔化背景填充竖屏，减少黑边；背景仅作装饰。' : '横竖屏均保留完整画面，不裁切内容，空白处补边。' }}</p>
+        <CaptionFramePreview v-if="confirmedCaption?.cues.length" :caption="confirmedCaption" :style-preset="style"
+          :frame="frame" :enabled="active && !pending && !captionDirty && !captionPending && !revisionBusy" />
         <p v-if="captionDirty" class="render-warning" role="status">字幕有未保存修改。请先回到校对页保存并确认，再生成；已有成片仍可查看和下载。</p>
         <p v-else-if="!confirmedRevisions.length" class="render-warning">请先在“校对字幕”中确认一个字幕版本。</p>
         <p v-else-if="confirmedCaption && !confirmedCaption.cues.length" class="render-warning">这个确认版本没有字幕，请校对并确认有字幕的版本。</p>
@@ -239,9 +241,6 @@ onBeforeUnmount(() => { stopped = true; epoch++; revisionEpoch++; resetPreviewLa
 .render-message, .render-warning { flex: none; padding: 9px 12px; margin: 8px 18px; background: #f1f5f9; color: #475569; border-radius: 6px; font-size: 13px; line-height: 1.7; overflow-wrap: anywhere; }
 .render-message { max-height: 72px; overflow-y: auto; }.render-message.error, .render-warning { background: #fff6eb; color: #8b632f; }
 .render-config > .render-warning, .render-record > .render-warning { margin: 10px 0; }
-.render-style-sample { display: grid; place-items: center; min-height: 94px; border-radius: 7px; margin-top: 10px; padding: 16px 12px; background: linear-gradient(135deg, #65758b, #aab7c3); overflow: hidden; }
-.render-style-sample span { color: white; font-size: 18px; text-align: center; line-height: 1.6; font-weight: 600; overflow-wrap: anywhere; text-shadow: -1px -1px 0 #111, 1px -1px 0 #111, -1px 1px 0 #111, 1px 1px 0 #111; }
-.render-style-sample.boxed span { text-shadow: none; background: #101827d9; padding: 3px 8px; border-radius: 3px; }.sample-note { margin-top: 5px; }
 .render-button { display: inline-flex; justify-content: center; align-items: center; min-height: 38px; max-width: 100%; padding: 8px 12px; border: 1px solid #cbd5e1; border-radius: 6px; background: white; color: #334155; font: inherit; font-size: 13px; line-height: 1.5; text-decoration: none; cursor: pointer; white-space: normal; overflow-wrap: anywhere; }
 .render-button.primary { background: #e47650; border-color: #e47650; color: white; font-size: 14px; }.render-create { width: 100%; margin: 12px 0 0; }
 .render-link { min-height: 32px; border: 0; background: none; color: #475569; padding: 4px 0; font: inherit; font-size: 13px; cursor: pointer; }
@@ -254,8 +253,8 @@ onBeforeUnmount(() => { stopped = true; epoch++; revisionEpoch++; resetPreviewLa
 .render-record { border: 1px solid #e2e8f0; border-radius: 7px; padding: 12px; margin-bottom: 10px; min-width: 0; }.render-record.selected { border-color: #e9b49f; background: #fffcfa; }.render-record-heading { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 7px; }.render-record-heading strong { color: #334155; font-size: 14px; }.render-status { padding: 3px 7px; border-radius: 4px; color: #64748b; background: #f1f5f9; font-size: 12px; }.render-status.running, .render-status.queued { color: #8b632f; background: #fff5e4; }.render-status.failed { color: #a0533c; background: #fff0e9; }.render-status.succeeded { color: #55745c; background: #edf5ef; }
 .render-record-date { margin: 5px 0; color: #64748b; font-size: 12px; overflow-wrap: anywhere; }.render-progress { font-size: 13px; color: #475569; margin: 10px 0 6px; line-height: 1.7; }.render-record progress { display: block; width: 100%; height: 8px; accent-color: #e47650; }.render-record-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
 .render-record :deep(.failure-diagnostic p) { font-size: 13px; }.render-record :deep(.failure-diagnostic code) { font-size: 12px; }
-@media(max-width:760px) { .render-body { display: block; overflow-y: auto; padding: 12px 14px; }.render-config { overflow: visible; padding-right: 0; }.render-style-sample { min-height: 70px; }.render-results { margin-top: 20px; border-top: 1px solid #e2e8f0; padding-top: 14px; }.render-history { overflow: visible; padding-right: 0; scrollbar-gutter: auto; }.render-preview video { max-height: 190px; }.render-record-actions > .render-button { flex: 1; }.render-message { margin-inline: 14px; } }
-@media(min-width:761px) and (max-height:760px) { .render-preview video { max-height: 170px; }.render-style-sample { min-height: 75px; } }
+@media(max-width:760px) { .render-body { display: block; overflow-y: auto; padding: 12px 14px; }.render-config { overflow: visible; padding-right: 0; }.render-results { margin-top: 20px; border-top: 1px solid #e2e8f0; padding-top: 14px; }.render-history { overflow: visible; padding-right: 0; scrollbar-gutter: auto; }.render-preview video { max-height: 190px; }.render-record-actions > .render-button { flex: 1; }.render-message { margin-inline: 14px; } }
+@media(min-width:761px) and (max-height:760px) { .render-preview video { max-height: 170px; } }
 .render-preview.portrait video { width: auto; max-width: 100%; height: min(360px, 44dvh); max-height: min(360px, 44dvh); margin-inline: auto; aspect-ratio: 9/16; }
 .render-preview video:fullscreen { width: 100vw; height: 100dvh; max-width: none; max-height: none; aspect-ratio: auto; border-radius: 0; object-fit: contain; }
 .caption-render-panel.preview-enlarged { position: relative; }

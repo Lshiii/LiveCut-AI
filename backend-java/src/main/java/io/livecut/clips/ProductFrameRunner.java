@@ -1,14 +1,13 @@
 package io.livecut.clips;
 
 import io.livecut.video.VideoApiException;
+import io.livecut.worker.LocalPython;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import tools.jackson.databind.JsonNode;
 
 import java.io.IOException;
-import java.nio.file.Files;
-import java.nio.file.Path;
 import java.util.Map;
 import java.util.concurrent.*;
 
@@ -19,18 +18,7 @@ public class ProductFrameRunner {
     private final Semaphore slot = new Semaphore(1);
 
     public ProductFrameRunner(@Value("${LIVECUT_PRODUCT_FRAME_PYTHON:}") String configuredPython) {
-        python = interpreter(configuredPython);
-    }
-    private static String interpreter(String configured) {
-        if (!configured.isBlank()) return configured;
-        Path dir = Path.of("").toAbsolutePath();
-        for (int i = 0; i < 3 && dir != null; i++, dir = dir.getParent()) {
-            for (var relative : new String[]{".venv/Scripts/python.exe", ".venv/bin/python"}) {
-                var candidate = dir.resolve(relative);
-                if (Files.isRegularFile(candidate)) return candidate.toString();
-            }
-        }
-        return "python";
+        python = LocalPython.interpreter(configuredPython);
     }
     public JsonNode run(Map<String,Object> input) {
         if (!slot.tryAcquire()) throw new VideoApiException(HttpStatus.TOO_MANY_REQUESTS, "PRODUCT_FRAME_BUSY", "Another local visual ranking is running");

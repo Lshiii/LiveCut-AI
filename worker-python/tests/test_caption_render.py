@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 from livecut import media as media_module
+from livecut.caption_frame_preview import preview_frame
 from livecut.media import burn_caption_clip, export_clip, export_composed_clip, probe_media
 from livecut.worker import Lease, LeaseGuard, StageContext, WorkerError, _native_path, sha256
 from livecut.worker_caption_render import (
@@ -307,6 +308,31 @@ def pixels(ffmpeg, path, seconds, width, height):
     )
     assert len(result.stdout) == width * height * 3
     return result.stdout
+
+
+@pytest.mark.parametrize(("frame", "style", "at_ms", "visible"), [
+    ("SOURCE", "WHITE_OUTLINE_V1", 119, False),
+    ("LANDSCAPE_720", "DARK_BOX_V1", 999, True),
+    ("PORTRAIT_720", "WHITE_OUTLINE_V1", 1121, True),
+    ("PORTRAIT_BLUR_720", "DARK_BOX_V1", 1999, False),
+])
+def test_preview_single_real_frame_matches_captioned_export(tmp_path, media, font, frame, style, at_ms, visible):
+    ctx, _, render = context(tmp_path, media, font, frame=frame, style=style)
+    ffmpeg, ffprobe, _ = media
+    directory = tmp_path / "preview"
+    directory.mkdir()
+    render_hash = hashlib.sha256(canonical(render)).hexdigest()
+    preview_frame(ctx.storage_root, render, render_hash, at_ms, directory, ffmpeg=ffmpeg, ffprobe=ffprobe)
+    assert not (ctx.directory / "clip.mp4").exists()
+    image = directory / "preview.jpg"
+    width, height = render["output"]["width"], render["output"]["height"]
+    rgb = pixels(ffmpeg, image, 0, width, height)
+    whites = sum(min(pixel) > 160 for pixel in zip(rgb[::3], rgb[1::3], rgb[2::3]))
+    assert (whites > 20) == visible
+    ExportStageExecutor(ffmpeg_path=ffmpeg, ffprobe_path=ffprobe)(ctx)
+    # This synthetic clean clip is 25 fps. Compare the frame already on screen at t.
+    encoded = pixels(ffmpeg, ctx.directory / "clip.mp4", at_ms // 40 * .04, width, height)
+    assert sum(abs(a - b) for a, b in zip(rgb, encoded)) / len(rgb) < 6
 
 
 @pytest.mark.parametrize("frame", ["SOURCE", "LANDSCAPE_720", "PORTRAIT_720"])

@@ -61,6 +61,25 @@ class CaptionRenderIntegrationTests {
     private static String failure(Runnable action){return assertThrows(JobException.class,action::run).getCode();}
     private static ObjectNode progress(ClaimResult lease,long sequence,String phase,long processed,long total){return JSON.createObjectNode().put("attempt",lease.attempt()).put("run_token",lease.runToken()).put("sequence",sequence).put("phase",phase).put("processed_ms",processed).put("total_ms",total);}
 
+    @Test void previewUsesExactConfirmedExportSpecWithoutCreatingARender() throws Exception {
+        var f=fixture(0,4000,false);
+        var initial=captions.initialize(f.export(),f.clip());
+        assertEquals("CAPTION_RENDER_REQUIRES_CONFIRMATION",failure(()->renders.previewSpec(f.export(),f.clip(),body(initial))));
+        var caption=confirm(f);
+        var options=body(caption).put("frame_preset","PORTRAIT_BLUR_720").put("style_preset","DARK_BOX_V1");
+        JsonNode preview=renders.previewSpec(f.export(),f.clip(),options);
+        assertEquals("CAPTION_RENDER_REVISION_MISMATCH",failure(()->renders.previewSpec(f.export(),f.clip(),
+            body(caption).put("caption_content_hash","0".repeat(64)))));
+        var invalidTime=send("POST",f.path()+"/preview?at_ms="+preview.path("input_media").path("duration_ms").asLong(),options,null);
+        assertEquals(400,invalidTime.statusCode());
+        assertEquals("CAPTION_PREVIEW_TIME_INVALID",JSON.readTree(invalidTime.body()).path("error_code").asString());
+        assertEquals(0,jdbc.queryForObject("SELECT COUNT(*) FROM caption_render WHERE source_clip_id=?",Integer.class,f.clip()));
+        var actual=renders.create(f.export(),f.clip(),"preview-match",options);
+        String frozen=jdbc.queryForObject("SELECT frozen_json FROM export_job WHERE id=?",String.class,actual.id());
+        assertEquals(ClipRequestService.canonicalJson(preview),
+            ClipRequestService.canonicalJson(JSON.readTree(frozen).path("caption_render")));
+    }
+
     @Test void strictConfirmationIdentityIdempotencyAndCleanResourcesStayIndependent()throws Exception{
         var f=fixture(0,4000,false);var initial=captions.initialize(f.export(),f.clip());
         assertEquals("CAPTION_RENDER_REQUIRES_CONFIRMATION",failure(()->create(f,initial,"unconfirmed")));

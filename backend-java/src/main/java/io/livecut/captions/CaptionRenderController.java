@@ -11,7 +11,14 @@ import tools.jackson.databind.JsonNode;
 @RestController
 public class CaptionRenderController {
     private final CaptionRenderService renders;
-    public CaptionRenderController(CaptionRenderService renders){this.renders=renders;}
+    private final CaptionFramePreview preview;
+    public CaptionRenderController(CaptionRenderService renders, CaptionFramePreview preview){this.renders=renders;this.preview=preview;}
+    @PostMapping("/api/exports/{export}/clips/{clip}/caption-renders/preview")
+    public ResponseEntity<byte[]> preview(@PathVariable String export, @PathVariable String clip,
+        @RequestParam("at_ms") long atMs, @RequestBody JsonNode body) {
+        return ResponseEntity.ok().cacheControl(CacheControl.noStore()).contentType(MediaType.IMAGE_JPEG)
+            .header("X-Content-Type-Options", "nosniff").body(preview.render(export, clip, body, atMs));
+    }
     @PostMapping("/api/exports/{export}/clips/{clip}/caption-renders")
     public CaptionRenderModels.Snapshot create(@PathVariable String export,@PathVariable String clip,
         @RequestHeader(value="Idempotency-Key",required=false) String key,@RequestBody JsonNode body){return renders.create(export,clip,key,body);}

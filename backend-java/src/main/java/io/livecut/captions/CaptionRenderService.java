@@ -30,34 +30,59 @@ public class CaptionRenderService {
     public CaptionRenderService(JdbcTemplate jdbc,ExportService exports,CaptionService captions,CaptionRenderAssets assets,PlatformTransactionManager manager,StageWakeups wakeups,
         @Value("${livecut.jobs.max-attempts:3}") int maxAttempts){this.wakeups=wakeups;this.jdbc=jdbc;this.exports=exports;this.captions=captions;this.assets=assets;this.maxAttempts=maxAttempts;
         tx=new TransactionTemplate(manager);tx.setIsolationLevel(TransactionDefinition.ISOLATION_READ_COMMITTED);}
+    private record Options(long revision, String contentHash, String style, String frame) {}
+    private static Options options(JsonNode body){
+        try {
+            CaptionRenderSpec.fields(body, Set.of("caption_revision", "caption_content_hash", "style_preset", "frame_preset"));
+            long revision = CaptionRenderSpec.number(body, "caption_revision", 0, CaptionRenderSpec.MAX_SAFE);
+            String hash = CaptionRenderSpec.text(body, "caption_content_hash");
+            CaptionRenderSpec.hash(hash);
+            String style = CaptionRenderSpec.text(body, "style_preset"), frame = CaptionRenderSpec.text(body, "frame_preset");
+            if (!CaptionRenderSpec.STYLES.contains(style) || !CaptionRenderSpec.FRAMES.contains(frame)) throw invalid();
+            return new Options(revision, hash, style, frame);
+        } catch (IllegalArgumentException ex) {
+            throw invalid();
+        }
+    }
+    private record ConfirmedSpec(JsonNode value, String clipTitle) {}
+    private ConfirmedSpec confirmedSpec(String sourceExport,String sourceClip,long revision,String contentHash,String style,String frame){
+        CaptionService.VerifiedDelivery delivery;
+        try{delivery=captions.readConfirmedForDelivery(sourceExport,sourceClip,revision);}
+        catch(JobException failure){if(Set.of("CAPTION_CONFIRMATION_REQUIRED","CAPTIONS_NOT_INITIALIZED").contains(failure.getCode()))throw error(HttpStatus.CONFLICT,"CAPTION_RENDER_REQUIRES_CONFIRMATION","Confirm this caption revision before rendering");
+            if(failure.getCode().equals("CAPTION_REVISION_NOT_FOUND"))throw error(HttpStatus.CONFLICT,"CAPTION_RENDER_REVISION_MISMATCH","The selected caption revision is unavailable");
+            throw error(HttpStatus.CONFLICT,"CAPTION_RENDER_SOURCE_UNAVAILABLE","The confirmed source could not be verified");}
+        var caption=delivery.snapshot();if(!caption.contentHash().equals(contentHash))throw error(HttpStatus.CONFLICT,"CAPTION_RENDER_REVISION_MISMATCH","The selected caption revision hash has changed");
+        JsonNode media=delivery.mediaInfo();final int width,height;final long duration;final boolean hasAudio;
+        try{width=(int)CaptionRenderSpec.number(media,"width",2,4096);height=(int)CaptionRenderSpec.number(media,"height",2,4096);duration=CaptionRenderSpec.number(media,"duration_ms",1,CaptionRenderSpec.MAX_SAFE);
+            JsonNode audio=media.path("audio_codec");if(!audio.isNull()&&!audio.isMissingNode()&&!audio.asText().equals("aac"))throw new IllegalArgumentException();hasAudio=!audio.isNull()&&!audio.isMissingNode();
+        }catch(RuntimeException bad){throw error(HttpStatus.CONFLICT,"CAPTION_RENDER_SOURCE_UNAVAILABLE","The clean clip media metadata is unavailable");}
+        var output=CaptionRenderSpec.outputSize(frame,width,height);
+        Map<String,Object> render=new TreeMap<>();render.put("schema_version",1);render.put("profile_version",CaptionRenderSpec.VERSION);render.put("source_export_id",sourceExport);render.put("source_clip_id",sourceClip);render.put("source_snapshot_hash",caption.source().snapshotHash());
+        render.put("input_media",Map.of("key",delivery.contentKey(),"sha256",delivery.content().hash(),"size_bytes",delivery.content().sizeBytes(),"duration_ms",duration,"width",width,"height",height,"has_audio",hasAudio));
+        render.put("captions",assets.cues(caption));render.put("style_preset",style);render.put("frame_preset",frame);render.put("output",Map.of("width",output.width(),"height",output.height()));render.put("font",assets.font());render.put("timing_basis","CLIP_RELATIVE_ASS_CS_FLOOR");
+        JsonNode spec=JSON.valueToTree(render);CaptionRenderSpec.validate(spec);return new ConfirmedSpec(spec,caption.clipTitle());
+    }
+    JsonNode previewSpec(String exportValue, String clipValue, JsonNode body) {
+        String sourceExport = id(exportValue), sourceClip = id(clipValue);
+        Options o = options(body);
+        return tx.execute(status -> {
+            source(sourceExport, sourceClip);
+            return confirmedSpec(sourceExport, sourceClip, o.revision(), o.contentHash(), o.style(), o.frame()).value();
+        });
+    }
     public Snapshot create(String exportValue,String clipValue,String key,JsonNode body){
-        String sourceExport=id(exportValue),sourceClip=id(clipValue);final long revision;final String contentHash,style,frame;
-        try{CaptionRenderSpec.fields(body,Set.of("caption_revision","caption_content_hash","style_preset","frame_preset"));
-            revision=CaptionRenderSpec.number(body,"caption_revision",0,CaptionRenderSpec.MAX_SAFE);contentHash=CaptionRenderSpec.text(body,"caption_content_hash");CaptionRenderSpec.hash(contentHash);
-            style=CaptionRenderSpec.text(body,"style_preset");frame=CaptionRenderSpec.text(body,"frame_preset");
-            if(!CaptionRenderSpec.STYLES.contains(style)||!CaptionRenderSpec.FRAMES.contains(frame)||key==null||!key.matches("[A-Za-z0-9_.:-]{1,128}"))throw new IllegalArgumentException();
-        }catch(RuntimeException invalid){throw invalid();}
+        String sourceExport=id(exportValue),sourceClip=id(clipValue);
+        Options o=options(body);
+        if(key==null||!key.matches("[A-Za-z0-9_.:-]{1,128}"))throw invalid();
         String requestHash=ClipRequestService.sha(ClipRequestService.canonicalJson(body));
         return tx.execute(status->{
             var source=source(sourceExport,sourceClip);var existing=jdbc.queryForList("SELECT id,request_hash FROM caption_render WHERE source_clip_id=? AND idempotency_key=?",sourceClip,key);
             if(!existing.isEmpty()){if(!requestHash.equals(existing.getFirst().get("request_hash")))throw error(HttpStatus.CONFLICT,"IDEMPOTENCY_CONFLICT","This creation key belongs to different render options");return snapshot(lock(String.valueOf(existing.getFirst().get("id"))));}
-            CaptionService.VerifiedDelivery delivery;
-            try{delivery=captions.readConfirmedForDelivery(sourceExport,sourceClip,revision);}
-            catch(JobException failure){if(Set.of("CAPTION_CONFIRMATION_REQUIRED","CAPTIONS_NOT_INITIALIZED").contains(failure.getCode()))throw error(HttpStatus.CONFLICT,"CAPTION_RENDER_REQUIRES_CONFIRMATION","Confirm this caption revision before rendering");
-                if(failure.getCode().equals("CAPTION_REVISION_NOT_FOUND"))throw error(HttpStatus.CONFLICT,"CAPTION_RENDER_REVISION_MISMATCH","The selected caption revision is unavailable");
-                throw error(HttpStatus.CONFLICT,"CAPTION_RENDER_SOURCE_UNAVAILABLE","The confirmed source could not be verified");}
-            var caption=delivery.snapshot();if(!caption.contentHash().equals(contentHash))throw error(HttpStatus.CONFLICT,"CAPTION_RENDER_REVISION_MISMATCH","The selected caption revision hash has changed");
-            JsonNode media=delivery.mediaInfo();final int width,height;final long duration;final boolean hasAudio;
-            try{width=(int)CaptionRenderSpec.number(media,"width",2,4096);height=(int)CaptionRenderSpec.number(media,"height",2,4096);duration=CaptionRenderSpec.number(media,"duration_ms",1,CaptionRenderSpec.MAX_SAFE);
-                JsonNode audio=media.path("audio_codec");if(!audio.isNull()&&!audio.isMissingNode()&&!audio.asText().equals("aac"))throw new IllegalArgumentException();hasAudio=!audio.isNull()&&!audio.isMissingNode();
-            }catch(RuntimeException bad){throw error(HttpStatus.CONFLICT,"CAPTION_RENDER_SOURCE_UNAVAILABLE","The clean clip media metadata is unavailable");}
-            var output=CaptionRenderSpec.outputSize(frame,width,height);
-            Map<String,Object> render=new TreeMap<>();render.put("schema_version",1);render.put("profile_version",CaptionRenderSpec.VERSION);render.put("source_export_id",sourceExport);render.put("source_clip_id",sourceClip);render.put("source_snapshot_hash",caption.source().snapshotHash());
-            render.put("input_media",Map.of("key",delivery.contentKey(),"sha256",delivery.content().hash(),"size_bytes",delivery.content().sizeBytes(),"duration_ms",duration,"width",width,"height",height,"has_audio",hasAudio));
-            render.put("captions",assets.cues(caption));render.put("style_preset",style);render.put("frame_preset",frame);render.put("output",Map.of("width",output.width(),"height",output.height()));render.put("font",assets.font());render.put("timing_basis","CLIP_RELATIVE_ASS_CS_FLOOR");
-            JsonNode spec=JSON.valueToTree(render);CaptionRenderSpec.validate(spec);String renderHash=ClipRequestService.sha(ClipRequestService.canonicalJson(spec));
-            var created=exports.createCaptionRender(String.valueOf(source.get("job_id")),String.valueOf(source.get("video_id")),((Number)source.get("approved_revision")).longValue(),String.valueOf(source.get("source_hash")),caption.clipTitle(),spec,ClipRequestService.sha(sourceClip+"\n"+key));
-            jdbc.update("INSERT INTO caption_render (id,source_export_id,source_clip_id,job_id,derived_clip_id,idempotency_key,request_hash,caption_revision,caption_content_hash,caption_render_hash) VALUES (?,?,?,?,?,?,?,?,?,?)",created.exportId(),sourceExport,sourceClip,source.get("job_id"),created.clipId(),key,requestHash,revision,contentHash,renderHash);
+            var confirmed=confirmedSpec(sourceExport,sourceClip,o.revision(),o.contentHash(),o.style(),o.frame());
+            JsonNode spec=confirmed.value();
+            String renderHash=ClipRequestService.sha(ClipRequestService.canonicalJson(spec));
+            var created=exports.createCaptionRender(String.valueOf(source.get("job_id")),String.valueOf(source.get("video_id")),((Number)source.get("approved_revision")).longValue(),String.valueOf(source.get("source_hash")),confirmed.clipTitle(),spec,ClipRequestService.sha(sourceClip+"\n"+key));
+            jdbc.update("INSERT INTO caption_render (id,source_export_id,source_clip_id,job_id,derived_clip_id,idempotency_key,request_hash,caption_revision,caption_content_hash,caption_render_hash) VALUES (?,?,?,?,?,?,?,?,?,?)",created.exportId(),sourceExport,sourceClip,source.get("job_id"),created.clipId(),key,requestHash,o.revision(),o.contentHash(),renderHash);
             return snapshot(lock(created.exportId()));
         });
     }

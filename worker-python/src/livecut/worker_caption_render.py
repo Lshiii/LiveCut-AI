@@ -389,7 +389,7 @@ def write_exact(path, data, guard):
         temporary.unlink(missing_ok=True)
 
 
-def prepare_inputs(context: StageContext, render):
+def verified_caption_inputs(storage_root, render, guard):
     media = render["input_media"]
     references = [
         (media["key"], media["sha256"], media["size_bytes"]),
@@ -398,12 +398,12 @@ def prepare_inputs(context: StageContext, render):
     ]
     paths = []
     for name, expected, size in references:
-        context.guard.check()
-        path = shared_path(context.storage_root, name, must_exist=True)
+        guard()
+        path = shared_path(storage_root, name, must_exist=True)
         if size is None and _native_path(path).stat().st_size > 8 * 1024 * 1024:
             raise invalid()
         if (size is not None and _native_path(path).stat().st_size != size) or sha256(
-            path, guard=context.guard.check
+            path, guard=guard
         ) != expected:
             raise invalid("CAPTION_RENDER_SOURCE_HASH_MISMATCH")
         paths.append(path)
@@ -412,7 +412,12 @@ def prepare_inputs(context: StageContext, render):
         font_bytes = source.read(FONT_SIZE + 1)
     if len(font_bytes) != FONT_SIZE or hashlib.sha256(font_bytes).hexdigest() != FONT_HASH:
         raise invalid("CAPTION_RENDER_SOURCE_HASH_MISMATCH")
-    ass = build_ass(cues, render, FontMetrics(font_bytes), context.guard.check)
+    ass = build_ass(cues, render, FontMetrics(font_bytes), guard)
+    return paths[0], font_bytes, ass
+
+
+def prepare_inputs(context: StageContext, render):
+    source, font_bytes, ass = verified_caption_inputs(context.storage_root, render, context.guard.check)
     directory = context.directory / "caption-render"
     # Existing source/link components are checked by shared_path before use.
     shared_path(context.storage_root, directory.relative_to(context.storage_root).as_posix())
@@ -421,7 +426,7 @@ def prepare_inputs(context: StageContext, render):
         context.storage_root, (directory / "fonts").relative_to(context.storage_root).as_posix()
     )
     write_exact(directory / "fonts" / "font.otf", font_bytes, context.guard.check)
-    return paths[0], directory
+    return source, directory
 
 
 class RenderProgress:
