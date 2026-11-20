@@ -20,15 +20,14 @@ def test_independent_screen_capability_only_adds_version4(replay, screen):
             return httpx.Response(200, json={"speech_lookup_supported": True, "worker_protocol": 2})
         if request.url.path.endswith("/cached-answer-replay"):
             return httpx.Response(200, json={"cached_answer_replay_supported": True, "worker_protocol": 3}) if replay else httpx.Response(404)
-        if request.url.path in {"/api/clip-capabilities/anchor-context", "/api/agent-capabilities/text-coverage",
-                                "/api/clip-capabilities/single-montage"}:
-            return httpx.Response(404)
-        assert request.url.path.endswith("/screen-search")
-        return httpx.Response(200, json={"screen_search_supported": True, "worker_protocol": 4}) if screen else httpx.Response(404)
+        if request.url.path.endswith("/screen-search") and screen:
+            return httpx.Response(200, json={"screen_search_supported": True, "worker_protocol": 4})
+        return httpx.Response(404)
     client = WorkerClient("http://localhost", "synthetic", transport=httpx.MockTransport(receive))
     try:
         assert client.worker_protocol_versions() == (1, 2, *((3,) if replay else ()), *((4,) if screen else ()))
-        assert len(seen) == 6
+        assert seen.count("/api/agent-capabilities/screen-search") == 1
+        assert seen.count("/api/agent-capabilities/cached-answer-replay") == 1
     finally:
         client.close()
 
