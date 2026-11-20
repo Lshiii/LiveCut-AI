@@ -82,7 +82,7 @@ def test_strict_event_and_key():
 @pytest.mark.parametrize("changes", [
     {"extra": 1}, {"schema_version": "2.0"}, {"event_type": "EXECUTE"},
     {"stage_id": "not-a-uuid"}, {"event_id": str(uuid4()).upper()},
-    {"required_worker_protocol": True}, {"required_worker_protocol": 8},
+    {"required_worker_protocol": True}, {"required_worker_protocol": 9},
     {"reason": "CANCEL"}, {"stage_type": "UNKNOWN"}, {"stage_type": []},
     {"occurred_at": "2026-11-12T00:00:00+08:00"},
     {"occurred_at": "2026-11-12 00:00:00Z"}, {"occurred_at": "2026-02-31T00:00:00Z"},

@@ -4,8 +4,11 @@ import { compilePaperCut, editPaperCut, newPaperCutHistory, stepPaperCut, type P
 import { SequencePreview, type SequencePreviewState } from './sequencePreview'
 import { topicTime } from './topics'
 import PaperCutBudget from './PaperCutBudget.vue'
+import PaperCutSuggestion from './PaperCutSuggestion.vue'
+import type { PaperCutContext } from './paperCutSuggestion'
+import type { IntentPart } from './intentClips'
 
-const props = defineProps<{ source: PaperCutSource; title: string; goal: string; videoUrl: string; token: number; active: boolean; stale: boolean }>()
+const props = defineProps<{ source: PaperCutSource; context: PaperCutContext; title: string; goal: string; videoUrl: string; token: number; active: boolean; stale: boolean }>()
 const emit = defineEmits<{ apply: [token: number, removedIds: ReadonlySet<string>]; close: [] }>()
 const dialog = ref<HTMLDialogElement | null>(null), player = ref<HTMLVideoElement | null>(null)
 const page = ref(1), pageSize = 30
@@ -61,11 +64,11 @@ function metadata(event: Event) {
   ready.value = true; mediaError.value = false
   showFirstFrame()
 }
-function audition() {
-  if (playback.value) { stopPlayback(); return }
+function audition(parts: IntentPart[] = cut.value.parts, id = 'paper-cut') {
+  if (playback.value?.id === id) { stopPlayback(); return }
   if (!enabled.value || !ready.value || !player.value || !dialog.value?.open) return
   error.value = ''
-  void preview.start(player.value, { id: 'paper-cut', parts: cut.value.parts })
+  void preview.start(player.value, { id, parts })
 }
 function guardPlay(event: Event) {
   const video = event.currentTarget as HTMLVideoElement
@@ -99,6 +102,9 @@ onBeforeUnmount(() => { stopped = true; document.removeEventListener('visibility
 <template>
   <dialog ref="dialog" class="paper-cut" aria-label="逐句粗剪" @cancel.prevent="escape" @keydown.esc.stop>
     <header><div><h2>逐句粗剪</h2><p>{{ title }}</p></div><button class="secondary" @click="close">{{ dirty ? '放弃本次粗剪' : '关闭' }}</button></header>
+    <PaperCutSuggestion :context="context" :source="source" :removed="history.removed" :enabled="enabled"
+      :duration-ms="cut.durationMs" :can-play="ready" :playing="playback?.id === 'paper-cut-proposal'"
+      @audition="audition($event, 'paper-cut-proposal')" @stop="stopPlayback" @adopt="edit(true, $event)" />
     <PaperCutBudget :source="source" :removed="history.removed" :goal="goal" :duration-ms="cut.durationMs" :enabled="enabled"
       @adopt="edit(true, $event)" />
     <div class="paper-body">
@@ -113,7 +119,7 @@ onBeforeUnmount(() => { stopped = true; document.removeEventListener('visibility
         <div class="paper-track" aria-hidden="true"><i v-for="part in cut.parts" :key="part.start_utterance_id"
           :style="{ flexGrow: part.end_ms - part.start_ms }"></i></div>
         <p class="paper-delta" role="status">{{ cut.parts.length }} 段 · 已剪掉 {{ history.removed.size }} 句 · 缩短 {{ topicTime(source.originalDurationMs - cut.durationMs) }}</p>
-        <button class="secondary" :disabled="!enabled || !ready" @click="audition">{{ playback ? '停止试听' : '试听草稿' }}</button>
+        <button class="secondary" :disabled="!enabled || !ready" @click="audition()">{{ playback?.id === 'paper-cut' ? '停止试听' : '试听草稿' }}</button>
         <p v-if="playback">正在播放第 {{ playback.part_index + 1 }} 段</p>
         <p v-if="mediaError" role="status">无法载入原视频。仍可按原句编辑。</p>
       </section>

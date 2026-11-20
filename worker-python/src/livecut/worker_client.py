@@ -185,6 +185,8 @@ class WorkerClient:
             versions = (*versions, 6)
         if self._context_capability("/api/clip-capabilities/single-montage", "single_montage_supported", 7):
             versions = (*versions, 7)
+        if self._context_capability("/api/clip-capabilities/paper-cut-suggestions", "paper_cut_supported", 8):
+            versions = (*versions, 8)
         return versions
 
     def _context_capability(self, path: str, field: str, protocol: int) -> bool:
@@ -287,7 +289,7 @@ class WorkerClient:
                    "session_id": self._session_id(session_id), "stage_types": stage_types, "slots": 1}
         if supported_protocol_versions is not None:
             if (not isinstance(supported_protocol_versions, list) or not supported_protocol_versions
-                    or any(type(v) is not int or v not in {1, 2, 3, 4, 5, 6, 7} for v in supported_protocol_versions)
+                    or any(type(v) is not int or v not in {1, 2, 3, 4, 5, 6, 7, 8} for v in supported_protocol_versions)
                     or len(set(supported_protocol_versions)) != len(supported_protocol_versions)):
                 raise WorkerClientError("INVALID_WORKER_PROTOCOL_VERSIONS")
             payload["supported_protocol_versions"] = sorted(supported_protocol_versions)

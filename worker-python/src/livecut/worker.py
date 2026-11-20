@@ -191,10 +191,14 @@ class Lease:
         has_output_policy = isinstance(clip, dict) and "output_policy" in clip
         anchor_v2 = isinstance(anchor_source, dict) and anchor_source.get("schema_version") == "1.1"
         qa_policy = turn.get("qa_policy") if isinstance(turn, dict) else None
-        if (type(protocol) is not int or protocol not in {1, 2, 3, 4, 5, 6, 7}
-                or "required_worker_protocol" in value and protocol not in {2, 3, 4, 5, 6, 7}
+        paper = isinstance(turn, dict) and turn.get("kind") == "PAPER_CUT"
+        if (type(protocol) is not int or protocol not in {1, 2, 3, 4, 5, 6, 7, 8}
+                or "required_worker_protocol" in value and protocol not in {2, 3, 4, 5, 6, 7, 8}
                 or has_output_policy and clip["output_policy"] != "single_montage_v1"
                 or has_output_policy != (protocol == 7)
+                or paper != (protocol == 8)
+                or paper and (value["stage_type"] != "SEGMENT" or not isinstance(turn.get("paper_context"), dict)
+                              or "clip_request" in value["config"])
                 or protocol == 7 and (value["stage_type"] != "SEGMENT" or "answer_source" in clip
                                       or "agent_turn" in value["config"])
                 or protocol == 5 and (value["stage_type"] != "ANCHOR_CLIP" or not anchor_v2)
@@ -699,7 +703,7 @@ class StageWorker:
                 if (not isinstance(protocols, tuple) or any(type(v) is not int for v in protocols)
                         or protocols not in {(1,), (3,)} and (protocols[:2] != (1, 2)
                             or protocols != tuple(sorted(set(protocols)))
-                            or any(v not in {1, 2, 3, 4, 5, 6, 7} for v in protocols))):
+                            or any(v not in {1, 2, 3, 4, 5, 6, 7, 8} for v in protocols))):
                     raise WorkerClientError("INVALID_WORKER_PROTOCOL_CAPABILITY")
                 self._evidence_protocol_versions = tuple(protocols)
             self._protocol_versions = self._evidence_protocol_versions
@@ -911,7 +915,7 @@ class StageWorker:
                         _identifier(row.get("id"))
                         protocol = row.get("required_worker_protocol", 1)
                         if (type(protocol) is not int or protocol not in (self._protocol_versions or (1,))
-                                or "required_worker_protocol" in row and protocol not in {2, 3, 4, 5, 6, 7}):
+                                or "required_worker_protocol" in row and protocol not in {2, 3, 4, 5, 6, 7, 8}):
                             raise WorkerError("INVALID_WORKER_PROTOCOL")
                         if self.target_job_id is not None and row.get("job_id") != self.target_job_id:
                             raise WorkerError("CLAIM_TARGET_CHANGED")
@@ -930,7 +934,7 @@ class StageWorker:
                     raise WorkerError("CLAIM_STAGE_TYPE_CHANGED")
                 pending = {"stage_id": _identifier(item.get("id")),
                            "worker_id": self.worker_id, "claim_request_id": str(uuid4()), **target}
-                if item.get("required_worker_protocol") in {2, 3, 4, 5, 6, 7}:
+                if item.get("required_worker_protocol") in {2, 3, 4, 5, 6, 7, 8}:
                     pending["required_worker_protocol"] = item["required_worker_protocol"]
                 _write(claim_path, pending)
             if pending.get("worker_id") != self.worker_id:
@@ -1244,6 +1248,8 @@ class AnalysisStageExecutor:
         self.asr_reuse_source = deepcopy(asr_reuse_source)
 
     def _execute_agent(self, context: StageContext) -> dict:
+        if context.lease.required_worker_protocol == 8:
+            return self._execute_paper_cut(context)
         if context.lease.required_worker_protocol == 3:
             from .agent_cached_replay import execute_cached_replay
 
@@ -1411,6 +1417,32 @@ class AnalysisStageExecutor:
                 "stage_type": lease.stage_type, "attempt": lease.attempt, "run_token": lease.run_token,
                 "input_sha256": lease.source_hash, "data_kind": "model_result", "review_status": "DRAFT",
                 "artifacts": artifacts}
+
+    def _execute_paper_cut(self, context: StageContext) -> dict:
+        from .paper_cut_suggestion import generate_proposal
+
+        lease, directory = context.lease, context.directory
+        config = lease.config["agent_turn"]
+        if (config.get("kind") != "PAPER_CUT" or lease.stage_type != "SEGMENT"
+                or lease.config.get("max_text_calls") != 2 or lease.config.get("max_asr_submissions") != 0):
+            raise WorkerError("INVALID_PAPER_CUT_INPUT")
+        if self.transport_factory is None:
+            raise WorkerError("DURABLE_BUDGET_REQUIRED")
+        with httpx.Client(transport=self.transport_factory(context, "text"),
+                          timeout=min(90, context.guard.remaining_seconds()), follow_redirects=False) as client:
+            result = generate_proposal(config["paper_context"], config["turn_id"], lease.config["text_model"],
+                                       client, _native_path(directory / "paper"), context.guard.check)
+        context.guard.check()
+        path = directory / "paper-cut-suggestion.json"
+        _write(path, result)
+        artifacts = [context.artifact("paper_cut_suggestion", path)]
+        trace = directory / "text-execution-trace.json"
+        if _native_path(trace).is_file():
+            artifacts.append(context.artifact("text_execution_trace", trace))
+        return {"schema_version": 1, "job_id": lease.job_id, "video_id": lease.video_id,
+                "analysis_generation": lease.generation, "stage_id": lease.stage_id, "stage_type": lease.stage_type,
+                "attempt": lease.attempt, "run_token": lease.run_token, "input_sha256": lease.source_hash,
+                "data_kind": "model_result", "review_status": "DRAFT", "artifacts": artifacts}
 
     def _execute_intent(self, context: StageContext) -> dict:
         from .intent import build_clip_plan

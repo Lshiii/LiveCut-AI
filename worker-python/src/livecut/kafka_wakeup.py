@@ -51,7 +51,7 @@ def validate_wakeup(raw: bytes, *, key: bytes | None = None) -> dict:
         if (value["schema_version"] != "1.0" or value["event_type"] != "STAGE_WAKEUP"
                 or value["stage_type"] not in STAGE_TYPES
                 or type(value["required_worker_protocol"]) is not int
-                or value["required_worker_protocol"] not in {1, 2, 3, 4, 5, 6, 7}
+                or value["required_worker_protocol"] not in {1, 2, 3, 4, 5, 6, 7, 8}
                 or value["reason"] not in {"READY", "CAPACITY_RELEASED"}):
             raise ValueError("field")
         for field in ("event_id", "stage_id", "job_id"):

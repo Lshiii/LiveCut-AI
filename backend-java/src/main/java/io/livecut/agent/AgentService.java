@@ -55,6 +55,89 @@ public class AgentService {
             return sessionSnapshot(lockSession(id,parent));
         });}catch(DuplicateKeyException collision){return tx.execute(status->{lockAnalysis(parent);var rows=jdbc.queryForList("SELECT * FROM agent_session WHERE idempotency_key=? FOR UPDATE",key);if(rows.isEmpty())throw collision;return existingSession(rows.getFirst(),fingerprint);});}
     }
+    Map<String,Object> createPaperCut(ClipRequestService clips,String requestId,JsonNode body,String submissionKey) {
+        String request=uuid(requestId), key=uuid(submissionKey);
+        PaperCutSuggestion.validateInput(body);
+        String fingerprint=sha("paper-edit-v1\n"+request+"\n"+canonical(body));
+        try {
+            return tx.execute(txStatus -> {
+                clips.lockPublicOwner(request);
+                var existing=paperOwner(key);
+                if(existing!=null) return existingPaper(request,fingerprint,existing);
+                var clip=clips.get(request);
+                JsonNode context=PaperCutSuggestion.freeze(clip,body);
+                String jobId=clip.jobId(), turn=UUID.randomUUID().toString(), stage=UUID.randomUUID().toString();
+                var job=lockAnalysis(jobId); var source=source(job);
+                if(!source.hash().equals(clip.source().videoSha256()) || !source.transcriptHash().equals(clip.source().transcriptHash())) throw PaperCutSuggestion.changed();
+                String serialized=canonical(context), model=model(job);
+                String fallbacks=TextExecutionPolicy.serialize(TextExecutionPolicy.configuredFallbacks(configuredFallbackModels));
+                jdbc.update("INSERT INTO agent_session (id,kind,job_id,video_id,idempotency_key,request_hash,source_hash,transcript_hash,transcript_key,analysis_hash,analysis_key,source_json,duration_ms) VALUES (?,'PAPER_CUT',?,?,?,?,?,?,?,?,?,?,?)",
+                        turn,jobId,source.video(),turn,fingerprint,source.hash(),source.transcriptHash(),source.transcriptKey(),source.analysisHash(),source.analysisKey(),serialized,source.duration());
+                jdbc.update("INSERT INTO agent_turn (id,session_id,job_id,sequence_number,question,idempotency_key,request_hash,text_model_id,text_fallback_models_json,max_text_calls,history_json) VALUES (?,?,?,1,?,?,?,?,?,?,'[]')",
+                        turn,turn,jobId,body.path("instruction").asText(),key,fingerprint,model,fallbacks,PaperCutSuggestion.MAX_CALLS);
+                var owner=lockOwner(turn,jobId);
+                jdbc.update("INSERT INTO job_stage (id,job_id,owner_type,owner_id,stage_type,shard_key,status,input_hash,required_worker_protocol) VALUES (?,?,'AGENT_TURN',?,'SEGMENT',?,'READY',?,?)",
+                        stage,jobId,turn,"paper-"+turn,paperStageHash(owner),PaperCutSuggestion.PROTOCOL);
+                wakeups.ready(stage);
+                return paperSnapshot(owner);
+            });
+        } catch(DuplicateKeyException collision) {
+            return tx.execute(txStatus -> {
+                var owner=paperOwner(key);
+                if(owner==null) throw collision;
+                return existingPaper(request,fingerprint,owner);
+            });
+        }
+    }
+    private static String paperStageHash(Map<String,Object> owner) {
+        return sha(String.join("\n","paper-cut-v1",String.valueOf(owner.get("request_hash")),String.valueOf(owner.get("source_hash")),
+                String.valueOf(owner.get("transcript_hash")),String.valueOf(owner.get("text_model_id")),
+                TextExecutionPolicy.serialize(TextExecutionPolicy.storedFallbacks(owner.get("text_fallback_models_json"))),canonical(PaperCutSuggestion.stored(owner))));
+    }
+    private Map<String,Object> paperOwner(String key) {
+        var ids=jdbc.queryForList("SELECT id FROM agent_turn WHERE idempotency_key=?",String.class,key);
+        return ids.isEmpty()?null:lockPublicOwner(ids.getFirst());
+    }
+    private Map<String,Object> existingPaper(String request,String fingerprint,Map<String,Object> owner) {
+        if(!PaperCutSuggestion.isPaper(owner) || !fingerprint.equals(owner.get("request_hash"))
+                || !request.equals(PaperCutSuggestion.stored(owner).path("clip_request_id").asText())) throw conflict("IDEMPOTENCY_CONFLICT","Key belongs to a different suggestion");
+        return paperSnapshot(owner);
+    }
+    Map<String,Object> paperSubmission(String id,String key) {
+        String request=uuid(id), receipt=uuid(key);
+        return tx.execute(txStatus -> {
+            var owner=paperOwner(receipt);
+            if(owner==null || !PaperCutSuggestion.isPaper(owner) || !request.equals(PaperCutSuggestion.stored(owner).path("clip_request_id").asText()))
+                throw missing("PAPER_CUT_SUBMISSION_NOT_FOUND");
+            return paperSnapshot(owner);
+        });
+    }
+    Map<String,Object> paperCut(String value,boolean cancel) {
+        String id=uuid(value);
+        return tx.execute(txStatus -> {
+            var owner=lockPublicOwner(id); PaperCutSuggestion.stored(owner);
+            if(cancel && active(owner)) {
+                cancelTurnStage(id);
+                owner=lockOwner(id,String.valueOf(owner.get("job_id")));
+            }
+            return paperSnapshot(owner);
+        });
+    }
+    private Map<String,Object> paperSnapshot(Map<String,Object> owner) {
+        var context=PaperCutSuggestion.stored(owner);
+        var stage=jdbc.queryForMap("SELECT error_code,input_hash,required_worker_protocol FROM job_stage WHERE owner_type='AGENT_TURN' AND owner_id=?",owner.get("id"));
+        if(!paperStageHash(owner).equals(stage.get("input_hash")) || ((Number)stage.get("required_worker_protocol")).intValue()!=PaperCutSuggestion.PROTOCOL) throw invalidSubmission();
+        Map<String,Object> snapshot=new LinkedHashMap<>();
+        for(String field:List.of("clip_request_id","base_revision","plan_hash","output_id")) snapshot.put(field,context.path(field));
+        for(String field:List.of("id","status","idempotency_key")) snapshot.put(field,owner.get(field));
+        snapshot.put("error_code",stage.get("error_code")); snapshot.put("result",null);
+        if("SUCCEEDED".equals(owner.get("status"))) {
+            var artifact=AgentAnswerValidator.JSON.readTree(String.valueOf(owner.get("result_json")));
+            if(!sha(canonical(artifact)).equals(owner.get("result_hash"))) throw invalidSubmission();
+            snapshot.put("result",PaperCutSuggestion.validateResult(artifact,owner).path("proposal"));
+        }
+        return snapshot;
+    }
     private Session existingSession(Map<String,Object> owner,String fingerprint){
         if(!fingerprint.equals(owner.get("request_hash")))throw conflict("IDEMPOTENCY_CONFLICT","Session key belongs to different input");return sessionSnapshot(owner);
     }
@@ -192,13 +275,16 @@ public class AgentService {
     public Turn cancel(String id){String turn=uuid(id);return tx.execute(status->{
         var owner=lockPublicOwner(turn);requireKind(owner,false);if("CANCELLED".equals(owner.get("status")))return turnSnapshot(owner);
         if(!active(owner))throw conflict("AGENT_TURN_NOT_CANCELLABLE","Only queued or running turns can be cancelled");
+        cancelTurnStage(turn);
+        return turnSnapshot(lockOwner(turn,String.valueOf(owner.get("job_id"))));
+    });}
+    private void cancelTurnStage(String turn) {
         var stages=jdbc.queryForList("SELECT id,status FROM job_stage FORCE INDEX (idx_stage_owner_status) WHERE owner_type='AGENT_TURN' AND owner_id=? FOR UPDATE",turn);
         if(stages.size()!=1||!Set.of("READY","RUNNING","RETRY_WAIT").contains(stages.getFirst().get("status")))throw conflict("AGENT_STAGE_UNAVAILABLE","Agent stage already changed");
         jdbc.update("UPDATE job_stage SET status='CANCELLED',run_token=NULL,worker_id=NULL,worker_session_id=NULL,lease_until=NULL,hard_deadline_at=NULL,last_retryable=FALSE,error_code='USER_CANCELLED',diagnostic_json=NULL,text_progress_json=NULL,updated_at=CURRENT_TIMESTAMP(6) WHERE id=?",stages.getFirst().get("id"));
         wakeups.released(String.valueOf(stages.getFirst().get("id")));
         jdbc.update("UPDATE agent_turn SET status='CANCELLED',state_version=state_version+1,updated_at=CURRENT_TIMESTAMP(6) WHERE id=?",turn);
-        return turnSnapshot(lockOwner(turn,String.valueOf(owner.get("job_id"))));
-    });}
+    }
     public Map<String,Object> lockOwner(String id,String job){
         var rows=jdbc.queryForList("SELECT t.*,s.kind,s.caption_export_id,s.caption_clip_id,s.video_id,s.source_hash,s.transcript_hash,s.transcript_key,s.analysis_key,s.analysis_hash,s.source_json,s.duration_ms FROM agent_turn t JOIN agent_session s ON s.id=t.session_id WHERE t.id=? AND t.job_id=? AND s.job_id=t.job_id FOR UPDATE",id,job);
         if(rows.isEmpty())throw missing("AGENT_TURN_NOT_FOUND");return rows.getFirst();
@@ -220,6 +306,12 @@ public class AgentService {
     }
     public Map<String,Object> claimConfig(StageRow stage){
         var owner=lockOwner(stage.ownerId(),stage.jobId());Map<String,Object> turn=new TreeMap<>();
+        if(PaperCutSuggestion.isPaper(owner)) {
+            verifyPaperStage(owner,stage);
+            return Map.of("agent_turn",Map.of("kind",PaperCutSuggestion.KIND,"turn_id",stage.ownerId(),"paper_context",PaperCutSuggestion.stored(owner)),
+                    "text_model",owner.get("text_model_id"),"text_fallback_models",TextExecutionPolicy.storedFallbacks(owner.get("text_fallback_models_json")),
+                    "max_text_calls",PaperCutSuggestion.MAX_CALLS,"max_asr_submissions",0,"visual_provider","none");
+        }
         if(stage.requiredWorkerProtocol()!=AgentSpeechLookup.requiredProtocol(owner))throw conflict("AGENT_STAGE_UNAVAILABLE","Stage protocol no longer matches the frozen policy");
         verifySpeechStage(stage,owner);
         if(isCaption(owner)){if(!CaptionProofreadValidator.STAGE.equals(stage.stageType()))throw conflict("CAPTION_PROOFREAD_STAGE_INVALID","Caption proofreading requires its declared worker capability");
@@ -241,6 +333,13 @@ public class AgentService {
     }
     public ArtifactVerifier.VerifiedManifest verifyResult(StageRow stage,Map<String,Object> job,String key,String hash){
         var owner=lockOwner(stage.ownerId(),stage.jobId());var identity=identity(stage,job,String.valueOf(owner.get("source_hash")));
+        if(PaperCutSuggestion.isPaper(owner)) {
+            verifyPaperStage(owner,stage);
+            var manifest=artifacts.verifyPaperCutManifest(key,hash,identity);
+            var file=manifest.artifacts().stream().filter(a->PaperCutSuggestion.ARTIFACT.equals(a.kind())).findFirst().orElseThrow();
+            PaperCutSuggestion.validateResult(artifacts.readJsonArtifact(file,identity),owner);
+            return manifest;
+        }
         if(isCaption(owner)){var manifest=artifacts.verifyCaptionProofreadManifest(key,hash,identity);var file=manifest.artifacts().stream().filter(a->a.kind().equals("caption_proofread")).findFirst().orElseThrow();CaptionProofreadValidator.validate(artifacts.readJsonArtifact(file,identity),owner);return manifest;}
         var manifest=artifacts.verifyAgentAnswerManifest(key,hash,identity);
         var file=manifest.artifacts().stream().filter(a->a.kind().equals("agent_answer")).findFirst().orElseThrow();
@@ -248,9 +347,18 @@ public class AgentService {
     }
     public void recordSuccess(StageRow stage,Map<String,Object> job,ArtifactVerifier.VerifiedManifest manifest){
         var owner=lockOwner(stage.ownerId(),stage.jobId());var identity=identity(stage,job,String.valueOf(owner.get("source_hash")));
-        var file=manifest.artifacts().stream().filter(a->a.kind().equals(isCaption(owner)?"caption_proofread":"agent_answer")).findFirst().orElseThrow();
-        JsonNode result=isCaption(owner)?CaptionProofreadValidator.validate(artifacts.readJsonArtifact(file,identity),owner):validateAnswer(stage,job,owner,artifacts.readJsonArtifact(file,identity),manifest,identity);String serialized=canonical(result);
+        boolean paper=PaperCutSuggestion.isPaper(owner);
+        if(paper) verifyPaperStage(owner,stage);
+        String kind=paper?PaperCutSuggestion.ARTIFACT:isCaption(owner)?"caption_proofread":"agent_answer";
+        var file=manifest.artifacts().stream().filter(a->a.kind().equals(kind)).findFirst().orElseThrow();
+        var value=artifacts.readJsonArtifact(file,identity);
+        JsonNode result=paper?PaperCutSuggestion.validateResult(value,owner):isCaption(owner)?CaptionProofreadValidator.validate(value,owner):validateAnswer(stage,job,owner,value,manifest,identity);String serialized=canonical(result);
         jdbc.update("UPDATE agent_turn SET result_json=?,result_hash=? WHERE id=?",serialized,sha(serialized),stage.ownerId());
+    }
+    private static void verifyPaperStage(Map<String,Object> owner,StageRow stage) {
+        if(!"SEGMENT".equals(stage.stageType()) || stage.requiredWorkerProtocol()!=PaperCutSuggestion.PROTOCOL
+                || !paperStageHash(owner).equals(stage.inputHash()) || ((Number)owner.get("max_text_calls")).intValue()!=PaperCutSuggestion.MAX_CALLS)
+            throw invalidSubmission();
     }
     private JsonNode validateAnswer(StageRow stage,Map<String,Object> job,Map<String,Object> owner,JsonNode result,ArtifactVerifier.VerifiedManifest manifest,ArtifactVerifier.ManifestIdentity identity){
         validateReplayManifest(owner,manifest);
@@ -503,7 +611,7 @@ public class AgentService {
     }
     private static JsonNode captionIdentity(JsonNode caption){var result=AgentAnswerValidator.JSON.createObjectNode();for(String name:caption.propertyNames())if(!Set.of("status","confirmed_revisions").contains(name))result.set(name,caption.path(name));return result;}
     private static boolean isCaption(Map<String,Object> owner){return "CAPTION".equals(owner.get("kind"));}
-    private static void requireKind(Map<String,Object> owner,boolean caption){if(isCaption(owner)!=caption)throw missing(caption?"CAPTION_PROOFREAD_NOT_FOUND":"AGENT_SESSION_NOT_FOUND");}
+    private static void requireKind(Map<String,Object> owner,boolean caption){if(PaperCutSuggestion.isPaper(owner)||isCaption(owner)!=caption)throw missing(caption?"CAPTION_PROOFREAD_NOT_FOUND":"AGENT_SESSION_NOT_FOUND");}
     private static void captionFields(JsonNode input,Set<String> allowed,Set<String> required){if(input==null||!input.isObject()||!allowed.containsAll(input.propertyNames())||!input.propertyNames().containsAll(required))throw invalidCaption("Unexpected or missing caption proofreading fields");}
     private static long captionNumber(JsonNode input,String field){JsonNode value=input.path(field);if(!value.isIntegralNumber()||!value.canConvertToLong()||value.longValue()<0)throw invalidCaption("Invalid "+field);return value.longValue();}
     private static JobException invalidCaption(String message){return bad("INVALID_CAPTION_PROOFREAD_REQUEST",message);}

@@ -47,6 +47,51 @@ class ClipRequestIntegrationTests {
     @AfterEach void cleanup(){for(String id:ownWorkers){jdbc.update("DELETE FROM worker_instance WHERE worker_id=?",id);jdbc.update("DELETE FROM worker_session_history WHERE worker_id=?",id);}ownWorkers.clear();for(String id:ownJobs)jdbc.update("DELETE FROM analysis_job WHERE id=?",id);for(String id:ownVideos)jdbc.update("DELETE FROM video_asset WHERE id=?",id);ownJobs.clear();ownVideos.clear();}
     @AfterAll void stop(){if(app!=null)app.close();}
 
+    @Test void paperEditIsSourceBoundBudgetedAndLeavesTheParentDraftIntact() throws Exception {
+        var fixture=fixture(); var parent=ready(fixture); String key=UUID.randomUUID().toString();
+        String path="/api/clip-requests/"+parent.id()+"/paper-cut-suggestions";
+        ObjectNode input=JSON.createObjectNode().put("base_revision",parent.revision()).put("plan_hash",parent.planHash())
+                .put("output_id","out-cause").put("instruction","保留第一句，压到一秒").put("target_ms",1000);
+        var rows=input.putArray("rows");
+        rows.addObject().put("utterance_id","u1").put("part_index",0).put("anchor",false).put("evidence",true);
+        rows.addObject().put("utterance_id","u3").put("part_index",1).put("anchor",false).put("evidence",true);
+        var first=send("POST",path,input,key,false);
+        assertEquals(200,first.statusCode(),()->new String(first.body(),StandardCharsets.UTF_8));
+        JsonNode created=JSON.readTree(first.body()); String id=created.path("id").asText();
+        assertEquals("QUEUED",created.path("status").asText()); assertEquals(key,created.path("idempotency_key").asText());
+        assertEquals(id,JSON.readTree(send("POST",path,input,key,false).body()).path("id").asText());
+        JsonNode videoHistory=JSON.readTree(send("GET","/api/jobs/"+fixture.job()+"/agent-session-history",null,null,false).body());
+        assertTrue(videoHistory.path("items").isArray() && videoHistory.path("items").isEmpty());
+        assertEquals(0,videoHistory.path("active_count").intValue());
+        assertEquals(404,send("GET","/api/agent-sessions/"+id,null,null,false).statusCode());
+        String cancelled=JSON.readTree(send("POST",path,input,UUID.randomUUID().toString(),false).body()).path("id").asText();
+        assertEquals("CANCELLED",JSON.readTree(send("POST","/api/paper-cut-suggestions/"+cancelled+"/cancel",null,null,false).body()).path("status").asText());
+        ObjectNode foreign=input.deepCopy(); ((ObjectNode)foreign.path("rows").get(1)).put("utterance_id","u2");
+        assertEquals(409,send("POST",path,foreign,UUID.randomUUID().toString(),false).statusCode());
+        String stage=jdbc.queryForObject("SELECT id FROM job_stage WHERE owner_type='AGENT_TURN' AND owner_id=?",String.class,id);
+        var legacyError=assertThrows(VideoApiException.class,()->jobs.claim(new ClaimRequest(stage,"legacy-worker",UUID.randomUUID().toString())));
+        assertEquals("WORKER_NOT_REGISTERED",legacyError.getCode());
+        String worker="paper-test-"+UUID.randomUUID(),session=UUID.randomUUID().toString(); ownWorkers.add(worker);
+        app.getBean(WorkerCapacityService.class).register(new WorkerModels.Registration(worker,session,List.of("SEGMENT"),1,fixture.job(),List.of(1,8)));
+        var claim=jobs.claim(new ClaimRequest(stage,worker,UUID.randomUUID().toString(),fixture.job(),session));
+        assertEquals("CLAIMED",claim.outcome()); assertEquals(2,claim.config().get("max_text_calls"));
+        var context=JSON.valueToTree(claim.config()).path("agent_turn").path("paper_context");
+        assertEquals("修改前缀使缓存失效",context.path("rows").get(0).path("text").asText()); assertEquals(2,context.path("rows").size());
+        byte[] artifact=JSON.writeValueAsBytes(Map.of("turn_id",id,"proposal",Map.of("remove_ids",List.of("u3"),"target_ms",1000,"reason","保留第一句")));
+        String prefix=prefix(claim); write(prefix+"suggestion.json",artifact);
+        var manifest=manifest(fixture.job(),fixture.video(),stage,"SEGMENT",claim.runToken(),fixture.hash()).put("attempt",claim.attempt());
+        manifest.putArray("artifacts").addObject().put("kind","paper_cut_suggestion").put("key",prefix+"suggestion.json").put("sha256",sha(artifact));
+        byte[] bytes=JSON.writeValueAsBytes(manifest);write(prefix+"manifest.json",bytes);
+        jobs.complete(stage,new CompleteRequest(claim.attempt(),claim.runToken(),prefix+"manifest.json",sha(bytes)));
+        var result=JSON.readTree(send("GET","/api/paper-cut-suggestions/"+id,null,null,false).body());
+        assertEquals("SUCCEEDED",result.path("status").asText()); assertEquals("u3",result.path("result").path("remove_ids").get(0).asText());
+        assertEquals(parent.planHash(),clips.get(parent.id()).planHash());
+        select(parent);
+        assertEquals(id,JSON.readTree(send("POST",path,input,key,false).body()).path("id").asText());
+        assertEquals(id,JSON.readTree(send("GET","/api/clip-requests/"+parent.id()+"/paper-cut-submissions/"+key,null,null,false).body()).path("id").asText());
+        assertEquals(409,send("POST",path,input,UUID.randomUUID().toString(),false).statusCode());
+    }
+
     @Test void historyForNewSourceHasNoItemsCursorOrActiveRequests()throws Exception{
         Fixture f=fixture();
         for(String query:List.of("","?limit=1","?limit=30")){

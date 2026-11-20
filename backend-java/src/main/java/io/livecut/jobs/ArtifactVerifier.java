@@ -106,6 +106,11 @@ public class ArtifactVerifier {
         if(expected==null||!Set.of("SEGMENT","AGENT_VISUAL","AGENT_VISUAL_FOCUS","AGENT_EVIDENCE").contains(expected.stageType()))throw invalidReference();
         return verifyManifest(key,hash,expected,null,"agent_answer");
     }
+
+    public VerifiedManifest verifyPaperCutManifest(String key,String hash,ManifestIdentity expected) {
+        if(expected==null||!"SEGMENT".equals(expected.stageType()))throw invalidReference();
+        return verifyManifest(key,hash,expected,null,"paper_cut_suggestion");
+    }
     public VerifiedManifest verifyCaptionProofreadManifest(String key,String hash,ManifestIdentity expected) {
         if(expected==null||!"CAPTION_PROOFREAD".equals(expected.stageType()))throw invalidReference();
         return verifyManifest(key,hash,expected,null,"caption_proofread");

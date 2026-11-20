@@ -180,7 +180,7 @@ public class WorkerCapacityService {
         return new ReadyCapabilities(worker.types(),worker.protocols(),worker.target());
     }
     private static List<Integer> protocols(List<Integer> values){
-        if(values==null||values.isEmpty()||values.size()>7||new HashSet<>(values).size()!=values.size()||values.stream().anyMatch(value->value==null||value<1||value>7))throw bad("INVALID_WORKER","Worker protocol versions are invalid");
+        if(values==null||values.isEmpty()||values.size()>8||new HashSet<>(values).size()!=values.size()||values.stream().anyMatch(value->value==null||value<1||value>8))throw bad("INVALID_WORKER","Worker protocol versions are invalid");
         return values.stream().sorted().toList();
     }
     private static List<Integer> readProtocols(String raw){
@@ -188,7 +188,7 @@ public class WorkerCapacityService {
         List<Integer> result=new ArrayList<>();for(var value:values){if(!value.isIntegralNumber()||!value.canConvertToInt())throw conflict("WORKER_PROTOCOL_INVALID","Stored worker protocols are invalid");result.add(value.intValue());}
         try{return protocols(result);}catch(VideoApiException failure){throw conflict("WORKER_PROTOCOL_INVALID","Stored worker protocols are invalid");}
     }
-    static void requiredProtocol(int value){if(value<1||value>7)throw bad("INVALID_WORKER_PROTOCOL","Worker protocol must be between 1 and 7");}
+    static void requiredProtocol(int value){if(value<1||value>8)throw bad("INVALID_WORKER_PROTOCOL","Worker protocol must be between 1 and 8");}
     private static boolean applies(Instance worker, String job) { return job == null || worker.target() == null || job.equals(worker.target()); }
     private static int busy(String id, List<Occupancy> occupancy) { return (int) occupancy.stream().filter(o -> id.equals(o.worker())).count(); }
     private static int resourceBusy(String name, List<Occupancy> occupancy) { return (int) occupancy.stream().filter(o -> resources(o.type()).contains(name)).count(); }
