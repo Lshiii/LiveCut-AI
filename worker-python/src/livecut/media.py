@@ -669,10 +669,12 @@ def _caption_execution_directory(working_dir: Path, execution_root: Path | None,
 
 
 def caption_video_filters(width: int, height: int, source_frame: bool, blur_background: bool,
-                          input_width: int, input_height: int, *, prefix: str = "") -> list[str]:
+                          input_width: int, input_height: int, *, prefix: str = "",
+                          map_audio: bool = False) -> list[str]:
     """Use the same geometry, blur and libass composition for export and still previews."""
     if type(blur_background) is not bool or (blur_background and (source_frame or (width, height) != (720, 1280))):
         raise MediaError("INVALID_ARGUMENT", "Blur is available only for the fixed portrait output")
+    audio_map = ["-map", "0:a:0?"] if map_audio else []
     filters = (("" if source_frame else
                 f"scale={width}:{height}:force_original_aspect_ratio=decrease:force_divisible_by=2,")
                + f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,"
@@ -687,8 +689,8 @@ def caption_video_filters(width: int, height: int, source_frame: bool, blur_back
                  f"[foreground]scale={foreground_width}:{foreground_height},setsar=1[contained];"
                  "[blurred][contained]overlay=(W-w)/2:(H-h)/2:shortest=1:eof_action=endall,"
                  "setsar=1,ass=filename=captions.ass:fontsdir=fonts[v]")
-        return ["-filter_complex_threads", "1", "-filter_complex", graph, "-map", "[v]"]
-    return ["-map", "0:v:0", "-vf", prefix + filters]
+        return ["-filter_complex_threads", "1", "-filter_complex", graph, "-map", "[v]", *audio_map]
+    return ["-map", "0:v:0", *audio_map, "-vf", prefix + filters]
 
 
 def burn_caption_clip(
@@ -723,7 +725,8 @@ def burn_caption_clip(
         except FileNotFoundError:
             pass
 
-    video_arguments = caption_video_filters(width, height, source_frame, blur_background, info.width, info.height)
+    video_arguments = caption_video_filters(width, height, source_frame, blur_background,
+                                           info.width, info.height, map_audio=True)
     try:
         with _caption_execution_directory(working_dir, execution_root, guard) as execution_dir:
             progress_path = execution_dir / "ffmpeg-progress.txt"
@@ -731,7 +734,7 @@ def burn_caption_clip(
                 raise MediaError("CAPTION_RENDER_ARTIFACT_CHANGED", "Unsafe progress path")
             progress_path.unlink(missing_ok=True)
             _run_process([str(ffmpeg_path), "-hide_banner", "-loglevel", "warning", "-nostdin", "-y",
-                "-i", str(info.path), *video_arguments, "-map", "0:a:0?",
+                "-i", str(info.path), *video_arguments,
                 "-c:v", "libx264", "-threads", "2", "-preset", "veryfast", "-crf", "23",
                 "-pix_fmt", "yuv420p", "-c:a", "aac", "-movflags", "+faststart", "-nostats",
                 "-stats_period", "0.5", "-progress", "ffmpeg-progress.txt", str(temporary)],
