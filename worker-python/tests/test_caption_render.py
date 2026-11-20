@@ -285,13 +285,14 @@ def context(
 
 
 def pixels(ffmpeg, path, seconds, width, height):
+    # A still image has one frame and no video timeline to seek.
+    seek = ["-ss", str(seconds)] if seconds is not None else []
     result = subprocess.run(
         [
             ffmpeg,
             "-v",
             "error",
-            "-ss",
-            str(seconds),
+            *seek,
             "-i",
             str(_native_path(path)),
             "-frames:v",
@@ -326,7 +327,7 @@ def test_preview_single_real_frame_matches_captioned_export(tmp_path, media, fon
     assert not (ctx.directory / "clip.mp4").exists()
     image = directory / "preview.jpg"
     width, height = render["output"]["width"], render["output"]["height"]
-    rgb = pixels(ffmpeg, image, 0, width, height)
+    rgb = pixels(ffmpeg, image, None, width, height)
     whites = sum(min(pixel) > 160 for pixel in zip(rgb[::3], rgb[1::3], rgb[2::3]))
     assert (whites > 20) == visible
     ExportStageExecutor(ffmpeg_path=ffmpeg, ffprobe_path=ffprobe)(ctx)
