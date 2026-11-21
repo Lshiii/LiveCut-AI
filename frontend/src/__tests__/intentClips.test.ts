@@ -2,12 +2,23 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { reactive } from 'vue'
 import type { TextProgress } from '../textProgress.ts'
-import { editIntentBoundary, intentCanCancel, intentCanConfirm, intentCanExport, intentCanResume, intentOutputValidation, intentPartIds,
+import { editIntentBoundary, intentCanCancel, intentCanConfirm, intentCanExport, intentCanResume, intentDeliveryOrder, intentOutputValidation, intentPartIds,
   intentPayload, IntentReadScope, IntentResponseError, newestIntentSnapshot, parseIntentSnapshot,
   parseResumedIntentSnapshot, intentResumeReceipt, refreshIntentEvidence, type IntentSnapshot } from '../intentClips.ts'
 
 const JOB = '11111111-1111-4111-8111-111111111111'
 const REQUEST = '22222222-2222-4222-8222-222222222222'
+test('deliveries keep the latest revision first across shuffled polls and order same-version batches by creation time', () => {
+  const old = { id: 'old', approved_revision: 1, created_at: '2026-11-21T15:05:06Z' }
+  const early = { id: 'z', approved_revision: 2, created_at: '2026-11-21T14:15:16.234110Z' }
+  const late = { id: 'a', approved_revision: 2, created_at: '2026-11-21T14:15:16.234962Z' }
+  const responses = [[old, late, early], [early, old, late], [late, early, old]]
+  for (const response of responses) {
+    const receiptOrder = [...response]
+    assert.deepEqual(intentDeliveryOrder(response), [late, early, old])
+    assert.deepEqual(response, receiptOrder)
+  }
+})
 function snapshot(): IntentSnapshot {
   const utterances = ['u10', 'u2', 'u30', 'u4', 'u50', 'u6'].map((utterance_id, i) => ({ utterance_id,
     start_ms: i * 1000, end_ms: (i + 1) * 1000, text: i === 2 ? '关注一下再继续' : `缓存解释第${i}句` }))

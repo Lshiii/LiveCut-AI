@@ -29,7 +29,7 @@ import { validateTranscriptRange } from './transcriptRange'
 import { intentSaveRecovered } from './intentSaveRecovery'
 import { IntentRefreshScheduler, intentHistoryHasActiveWork, type IntentRefreshLease } from './intentRefreshScheduler'
 import { IntentHistoryError, IntentHistoryPager, cacheLegacyIntentDetails, mergeVerifiedIntentDetail, readIntentHistory, type IntentHistoryNavigation } from './intentHistory'
-import { intentCanCancel, intentCanConfirm, intentCanExport, intentCanResume, intentOutputValidation, intentPayload, intentResumeReceipt,
+import { intentCanCancel, intentCanConfirm, intentCanExport, intentCanResume, intentDeliveryOrder, intentOutputValidation, intentPayload, intentResumeReceipt,
   IntentReadScope, IntentResponseError, newestIntentSnapshot, parseIntentSnapshot, refreshIntentEvidence,
   parseResumedIntentSnapshot, type IntentOutput, type IntentResumeReceipt, type IntentSnapshot, type IntentUtterance } from './intentClips'
 
@@ -153,6 +153,7 @@ const unresolved = computed(() => outputs.value.filter(value => value.status !==
 const reviewableCount = computed(() => outputs.value.filter(value => value.status === 'NEEDS_REVIEW').length)
 const confirmed = computed(() => !!snapshot.value && snapshot.value.confirmed_revisions.includes(snapshot.value.revision))
 const completedClips = computed(() => batches.value.reduce((count, batch) => count + batch.clips.filter(clip => clip.status === 'SUCCEEDED').length, 0))
+const deliveryBatches = computed(() => intentDeliveryOrder(batches.value))
 const hasActiveRefreshWork = computed(() => intentHistoryHasActiveWork(history.value, snapshot.value, batches.value))
 const refreshScheduler = new IntentRefreshScheduler({ refresh: refreshNow, hasActiveWork: () => hasActiveRefreshWork.value })
 function syncRefreshLifecycle() { refreshScheduler.update({ active: props.active !== false, visible: previewPageVisible.value,
@@ -1143,8 +1144,8 @@ onBeforeUnmount(() => { stopped = true; historyVersion++; historyScope.dispose()
           <div class="intent-delivery-heading"><h3>成片与字幕 <span>{{ completedClips }} 个成片完成 · {{ batches.length }} 个批次</span></h3><p class="help">这里展示本次请求已经冻结的成片。修改新方案不会改变已有文件。</p><p v-if="dirty" class="intent-draft-hint">其他页面的未提交要求与方案修改仍保留；下载只包含已确认版本。</p></div>
           <section v-if="previewUrl" ref="previewSection" class="intent-preview" aria-label="剪辑成片预览"><div class="intent-subheading"><h3>成片预览</h3><button class="text-button" @click="exportPlayer?.pause(); previewUrl = ''">收起预览</button></div><video ref="exportPlayer" :key="previewUrl" :src="previewUrl" controls preload="metadata" playsinline class="intent-source" @play="guardPlayback"></video></section>
           <div v-if="batches.length" class="intent-exports">
-            <article v-for="batch in batches" :key="batch.id" class="intent-batch">
-              <div class="intent-batch-heading"><strong>确认版本 r{{ batch.approved_revision }}</strong>
+            <article v-for="batch in deliveryBatches" :key="batch.id" class="intent-batch" :aria-label="`导出批次 · r${batch.approved_revision} · ${date(batch.created_at)}`">
+              <div class="intent-batch-heading"><strong>{{ batch.approved_revision === snapshot?.revision ? '当前确认版本' : '确认版本' }} r{{ batch.approved_revision }}</strong>
                 <span>{{ names[batch.status] ?? batch.status }} · {{ date(batch.created_at) }}</span>
               </div>
               <div v-for="clip in batch.clips" :key="clip.id" class="intent-export-clip">

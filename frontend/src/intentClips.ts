@@ -1,9 +1,15 @@
 import { parseTextProgress, type TextProgress } from './textProgress.ts'
+import type { ExportJob } from './api.ts'
 import { validComponentCache, type MontageComponent } from './componentCandidates.ts'
 import { parseAnswerClipSource, sameAnswerClipSource, type AnswerClipSource } from './answerClip.ts'
 import { effectiveIntentSelection, manualReviewCanonical, manualReviewVerified, parseIntentManualReview, type IntentManualReview } from './intentManualReview.ts'
 
 export interface IntentUtterance { utterance_id: string; start_ms: number; end_ms: number; text: string }
+export function intentDeliveryOrder<T extends Pick<ExportJob, 'approved_revision' | 'created_at' | 'id'>>(batches: readonly T[]): T[] {
+  return [...batches].sort((a, b) => b.approved_revision - a.approved_revision || Date.parse(b.created_at) - Date.parse(a.created_at)
+    || (b.created_at.match(/\.(\d+)/)?.[1] ?? '').padEnd(9, '0').localeCompare((a.created_at.match(/\.(\d+)/)?.[1] ?? '').padEnd(9, '0'))
+    || b.id.localeCompare(a.id))
+}
 export interface IntentPart { start_utterance_id: string; end_utterance_id: string; start_ms: number; end_ms: number }
 export interface IntentOutput {
   output_id: string; goal_id: string; title: string
