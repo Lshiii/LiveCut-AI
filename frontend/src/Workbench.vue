@@ -228,6 +228,7 @@ async function loadDetail(id: string, background = false, allowPending = false) 
     const raw = await api<unknown>(`/api/jobs/${encodeURIComponent(id)}`)
     if (stopped || version !== selectionVersion || !canSelect(id, allowPending)) return
     const result = parseAnalysisSnapshot(raw, id)
+    if (!background && selectedJob.value?.id !== result.id) notice.value = ''
     adoptHttpSnapshot(result)
     if (!background) {
       try { localStorage.setItem('livecut.last-video', result.video_id) } catch { /* optional local preference */ }
@@ -302,6 +303,7 @@ function selectVideo() {
     errorMessage.value = '审核、剪辑方案或对话有未提交内容，请先保存或在相应区域放弃修改。'; return
   }
   detailRecovery.cancel(); detailConnectionError.value = ''
+  notice.value = ''
   selectedJob.value = null; selectionVersion++; taskStream.select(null)
   newRunSettings.value = false
   const url = new URL(location.href); url.searchParams.delete('job'); history.replaceState({}, '', url)
