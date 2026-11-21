@@ -32,6 +32,7 @@ import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 import org.junit.jupiter.api.io.TempDir;
 import org.springframework.boot.builder.SpringApplicationBuilder;
 import org.springframework.context.ConfigurableApplicationContext;
+import org.springframework.http.ContentDisposition;
 import org.springframework.dao.DataAccessResourceFailureException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.support.JdbcTransactionManager;
@@ -147,6 +148,7 @@ class VideoApiIntegrationTests {
         assertEquals(200, complete.statusCode());
         assertArrayEquals(bytes, complete.body());
         assertEquals("video/mp4", complete.headers().firstValue("content-type").orElseThrow());
+        assertEquals("inline; filename=\"" + id + ".mp4\"", complete.headers().firstValue("Content-Disposition").orElseThrow());
 
         var head = send("HEAD", contentPath, null);
         assertEquals(200, head.statusCode());
@@ -167,6 +169,38 @@ class VideoApiIntegrationTests {
         var beyond = send("GET", contentPath, "bytes=999-1000");
         assertEquals(416, beyond.statusCode());
         assertEquals("bytes */" + bytes.length, beyond.headers().firstValue("content-range").orElseThrow());
+    }
+
+    @Test
+    void originalAttachmentUsesUtf8PortableMediaNameAndKeepsRangeAndHead() throws Exception {
+        byte[] bytes = VideoStorageTests.mp4Header();
+        String filename = "课程 #1+.mp4";
+        JsonNode asset = rememberUpload(upload(filename, bytes));
+        String content = asset.path("content_url").asText();
+        var full = send("GET", content + "?download=original", null);
+        String header = full.headers().firstValue("Content-Disposition").orElseThrow();
+        assertEquals(200, full.statusCode());
+        assertArrayEquals(bytes, full.body());
+        assertTrue(header.contains("filename*=UTF-8''%E8%AF%BE%E7%A8%8B%20"), header);
+        assertTrue(ContentDisposition.parse(header).isAttachment());
+        assertEquals(filename, ContentDisposition.parse(header).getFilename());
+
+        var ranged = send("GET", content + "?download=original", "bytes=0-3");
+        assertEquals(206, ranged.statusCode());
+        assertEquals(header, ranged.headers().firstValue("Content-Disposition").orElseThrow());
+        assertArrayEquals(Arrays.copyOf(bytes, 4), ranged.body());
+        var head = send("HEAD", content + "?download=original", null);
+        assertEquals(200, head.statusCode());
+        assertEquals(header, head.headers().firstValue("Content-Disposition").orElseThrow());
+        assertEquals(String.valueOf(bytes.length), head.headers().firstValue("Content-Length").orElseThrow());
+        assertEquals(0, head.body().length);
+        assertEquals("inline; filename=\"" + asset.path("id").asText() + ".mp4\"",
+                send("HEAD", content + "?download=true", null).headers().firstValue("Content-Disposition").orElseThrow());
+
+        JsonNode reserved = rememberUpload(upload("AUX.mp4", bytes));
+        var fallback = send("HEAD", reserved.path("content_url").asText() + "?download=original", null);
+        assertEquals("source-" + reserved.path("content_hash").asText() + ".mp4",
+                ContentDisposition.parse(fallback.headers().firstValue("Content-Disposition").orElseThrow()).getFilename());
     }
 
     @Test

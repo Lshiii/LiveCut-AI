@@ -2,6 +2,7 @@ package io.livecut.video;
 
 import java.io.IOException;
 import java.net.URI;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
@@ -10,6 +11,7 @@ import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.core.io.FileSystemResource;
 import org.springframework.core.io.Resource;
 import org.springframework.http.HttpHeaders;
+import org.springframework.http.ContentDisposition;
 import org.springframework.http.HttpRange;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
@@ -53,7 +55,8 @@ public class VideoController {
     public VideoAssetResponse metadata(@PathVariable String id) { return VideoAssetResponse.from(service.get(id)); }
 
     @RequestMapping(value = "/{id}/content", method = {RequestMethod.GET, RequestMethod.HEAD})
-    public ResponseEntity<Resource> content(@PathVariable String id, HttpServletRequest request) {
+    public ResponseEntity<Resource> content(@PathVariable String id, @RequestParam(required = false) String download,
+                                            HttpServletRequest request) {
         VideoAsset asset = service.get(id);
         Path path = storage.resolve(asset.sourceKey());
         try {
@@ -66,10 +69,13 @@ public class VideoController {
         } catch (IOException exception) {
             throw new VideoApiException(HttpStatus.INTERNAL_SERVER_ERROR, "STORAGE_ERROR", "Video storage is unavailable");
         }
+        String disposition = "original".equals(download)
+                ? ContentDisposition.attachment().filename(SourceMediaFilename.portable(asset.originalFilename(), asset.contentHash()), StandardCharsets.UTF_8).build().toString()
+                : "inline; filename=\"" + asset.id() + ".mp4\"";
         ResponseEntity.BodyBuilder response = ResponseEntity.ok()
                 .contentType(MediaType.parseMediaType("video/mp4"))
                 .header(HttpHeaders.ACCEPT_RANGES, "bytes")
-                .header(HttpHeaders.CONTENT_DISPOSITION, "inline; filename=\"" + asset.id() + ".mp4\"")
+                .header(HttpHeaders.CONTENT_DISPOSITION, disposition)
                 .header("X-Content-Type-Options", "nosniff")
                 .eTag("\"" + asset.contentHash() + "\"");
         if ("HEAD".equals(request.getMethod())) {

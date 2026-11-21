@@ -1,6 +1,7 @@
 package io.livecut.exports;
 
 import java.util.List;
+import io.livecut.video.SourceMediaFilename;
 
 import org.junit.jupiter.api.Test;
 import tools.jackson.databind.JsonNode;
@@ -13,9 +14,9 @@ class EditTimelineTests {
         String hash = "a".repeat(64);
         for (String name : List.of("../../source.mp4", "C:\\tmp\\source.mp4", "https://host/movie.mp4",
                 "AUX.mp4", "a%2Fb.mp4", "clip\r\n.mp4", "bad\u202Ename.mp4", "ff.mp3")) {
-            assertEquals("source-" + hash + ".mp4", EditTimeline.portableFilename(name, hash));
+            assertEquals("source-" + hash + ".mp4", SourceMediaFilename.portable(name, hash));
         }
-        assertEquals("课程 #1.mp4", EditTimeline.portableFilename("课程 #1.mp4", hash));
+        assertEquals("课程 #1.mp4", SourceMediaFilename.portable("课程 #1.mp4", hash));
     }
 
     @Test void externalMediaUrlEncodesOneSegmentAndMarkersUseOriginalTime() {

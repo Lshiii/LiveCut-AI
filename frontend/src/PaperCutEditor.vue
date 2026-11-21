@@ -3,6 +3,8 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch 
 import { compilePaperCut, editPaperCut, newPaperCutHistory, stepPaperCut, type PaperCutSource } from './paperCut'
 import { SequencePreview, type SequencePreviewPart, type SequencePreviewState } from './sequencePreview'
 import { topicTime } from './topics'
+import CutScrubber from './CutScrubber.vue'
+import { editToSource, sourceToEdit } from './editTimeline'
 import PaperCutBudget from './PaperCutBudget.vue'
 import PaperCutSuggestion from './PaperCutSuggestion.vue'
 import type { PaperCutContext } from './paperCutSuggestion'
@@ -29,8 +31,14 @@ const hiddenSelected = computed(() => selected.value.size - rows.value.filter(ro
 const canRemove = computed(() => [...selected.value].some(id => !history.value.removed.has(id)))
 const canRestore = computed(() => [...selected.value].some(id => history.value.removed.has(id)))
 const playback = shallowRef<SequencePreviewState | null>(null)
+const cursor = ref<number | null>(0)
+let draftPlaybackStart = 0
 const preview = new SequencePreview((state, reason) => {
+  const previous = playback.value
   playback.value = state
+  if (state?.id === 'paper-cut') cursor.value = Math.min(cut.value.durationMs, draftPlaybackStart + state.played_ms)
+  else if (state) cursor.value = sourceToEdit(cut.value.parts, Math.round((player.value?.currentTime ?? 0) * 1000))
+  else if (previous?.id === 'paper-cut' && reason === 'finished') cursor.value = cut.value.durationMs
   if (reason === 'failed') error.value = '未能播放当前草稿，请检查原视频后重试。'
 })
 let stopped = false, hasAuditioned = false
@@ -85,16 +93,35 @@ function metadata(event: Event) {
   ready.value = true; mediaError.value = false
   showFirstFrame()
 }
-function audition(parts: SequencePreviewPart[] = cut.value.parts, id = 'paper-cut') {
+function seekDraft(editMs: number) {
+  const video = player.value, target = editToSource(cut.value.parts, editMs)
+  if (!enabled.value || !ready.value || !dialog.value?.open || !video || !isCurrentVideo(video) || !target) return
+  stopPlayback()
+  hasAuditioned = true
+  try {
+    video.currentTime = target.sourceMs / 1000
+    cursor.value = editMs; error.value = ''
+  } catch { error.value = '暂时无法定位原片，请稍后重试。' }
+}
+function audition(parts: SequencePreviewPart[], id: string) {
   if (playback.value?.id === id) { stopPlayback(); return }
-  if (!enabled.value || !ready.value || !player.value || !dialog.value?.open) return
+  if (!enabled.value || !ready.value || !player.value || !isCurrentVideo(player.value) || !dialog.value?.open) return
   error.value = ''
   hasAuditioned = true
-  void preview.start(player.value, { id, parts })
+  void preview.start(player.value, { id, parts, parkInsideEnd: id === 'paper-cut' })
+}
+function playDraft() {
+  if (playback.value?.id === 'paper-cut') { stopPlayback(); return }
+  const at = cursor.value !== null && cursor.value < cut.value.durationMs ? cursor.value : 0
+  const target = editToSource(cut.value.parts, at)
+  if (!target) return
+  draftPlaybackStart = at
+  const parts = cut.value.parts.slice(target.partIndex)
+  audition([{ start_ms: target.sourceMs, end_ms: parts[0]!.end_ms }, ...parts.slice(1)], 'paper-cut')
 }
 function guardPlay(event: Event) {
   const video = event.currentTarget as HTMLVideoElement
-  if (!enabled.value || !dialog.value?.open || !playback.value || stopped) video.pause()
+  if (!enabled.value || !dialog.value?.open || !playback.value || !isCurrentVideo(video)) video.pause()
   else preview.timeUpdate(video)
 }
 function close() { stopPlayback(); emit('close') }
@@ -127,11 +154,14 @@ function syncOpen() {
   if (dialog.value && !dialog.value.open) dialog.value.showModal()
   showFirstFrame()
 }
-watch(history, stopPlayback, { flush: 'sync' })
+watch(cut, value => {
+  stopPlayback()
+  cursor.value = hasAuditioned && player.value ? sourceToEdit(value.parts, Math.round(player.value.currentTime * 1000)) : 0
+}, { flush: 'sync' })
 watch(() => cut.value.parts[0]?.start_ms, showFirstFrame, { flush: 'post' })
 watch(() => props.stale, stale => { if (stale) stopPlayback() }, { flush: 'sync' })
 watch(() => props.videoUrl, () => {
-  stopPlayback(); hasAuditioned = false; ready.value = false; mediaError.value = false
+  stopPlayback(); hasAuditioned = false; cursor.value = 0; ready.value = false; mediaError.value = false
 }, { flush: 'sync' })
 watch([() => props.active, visible], syncOpen, { flush: 'post' })
 onMounted(() => { document.addEventListener('visibilitychange', visibility); void nextTick(syncOpen) })
@@ -151,11 +181,10 @@ onBeforeUnmount(() => { stopped = true; document.removeEventListener('visibility
             @pause="preview.pause($event.currentTarget as HTMLVideoElement)" @ended="preview.ended($event.currentTarget as HTMLVideoElement)"
             @ratechange="preview.rateChange($event.currentTarget as HTMLVideoElement)" />
           <div class="paper-length"><strong>{{ topicTime(cut.durationMs) }}</strong><span>成片时长</span></div>
-          <div class="paper-track" aria-hidden="true"><i v-for="part in cut.parts" :key="part.start_utterance_id"
-            :style="{ flexGrow: part.end_ms - part.start_ms }"></i></div>
           <p class="paper-delta" role="status">{{ cut.parts.length }} 段 · 已剪掉 {{ history.removed.size }} 句 · 缩短 {{ topicTime(source.originalDurationMs - cut.durationMs) }}</p>
-          <button class="secondary" :disabled="!enabled || !ready" @click="audition()">{{ playback?.id === 'paper-cut' ? '停止试听' : '试听草稿' }}</button>
-          <p v-if="playback" class="paper-now">{{ playback.id.startsWith('row:') ? '正在试听原句' : '正在试听第 ' + (playback.part_index + 1) + ' / ' + playback.part_count + ' 段' }}</p>
+          <CutScrubber :parts="cut.parts" :position-ms="cursor" :disabled="!enabled || !ready" @seek="seekDraft" />
+          <button class="secondary paper-play" :disabled="!enabled || !ready" @click="playDraft">{{ playback?.id === 'paper-cut' ? '停止试听' : cursor && cursor < cut.durationMs ? '从游标试听' : '试听草稿' }}</button>
+          <p v-if="playback && playback.id !== 'paper-cut'" class="paper-now">{{ playback.id.startsWith('row:') ? '正在试听原句' : '正在试听删句建议' }}</p>
           <p v-if="mediaError" role="status">无法载入原视频。仍可按原句编辑。</p>
         </section>
         <PaperCutSuggestion :context="context" :source="source" :removed="history.removed" :enabled="enabled"
@@ -229,9 +258,8 @@ onBeforeUnmount(() => { stopped = true; document.removeEventListener('visibility
 .paper-length { margin:12px 0 5px; flex-wrap:wrap; }
 .paper-length strong { font:600 1.5rem var(--workspace-mono,monospace); }
 .paper-length span,.paper-tools span { font-size:.85rem; color:var(--workspace-muted,#675f56); }
-.paper-track { display:flex; height:5px; gap:2px; margin:8px 0; }
-.paper-track i { min-width:2px; border-radius:2px; background:var(--workspace-accent,#a94424); }
-.paper-monitor button { margin:10px 0 3px; }
+.paper-play { margin:8px 0 3px; }
+.paper-delta { margin-bottom:6px; }
 .paper-rail :deep(.cut-instruction),.paper-rail :deep(.cut-budget) { max-height:none; overflow:visible; border-block:1px solid var(--workspace-border,#e4e0d8); padding:12px 15px; background:#fff; }
 .paper-rail :deep(.cut-budget) { border-top:0; }
 .paper-rail :deep(.cut-instruction label) { min-width:0; }
@@ -271,7 +299,7 @@ onBeforeUnmount(() => { stopped = true; document.removeEventListener('visibility
   .paper-monitor { padding:9px 12px; }
   .paper-monitor video { float:right; width:min(34%,155px); margin-left:8px; }
   .paper-monitor::after { content:''; display:block; clear:both; }
-  .paper-track { max-width:60%; }
+  .paper-monitor :deep(.cut-scrubber) { clear:both; }
   .paper-length { margin-top:0; }
   .paper-rail :deep(.cut-instruction),.paper-rail :deep(.cut-budget) { padding:8px 12px; }
   .paper-script { flex:1; }

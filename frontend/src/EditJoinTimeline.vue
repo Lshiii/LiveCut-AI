@@ -1,13 +1,15 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, shallowRef, watch } from 'vue'
 import { editJoins } from './editTimeline'
+import CutScrubber from './CutScrubber.vue'
 import { inspectJoinBlackFrames, type JoinSample } from './joinBlackFrames'
 import { topicTime } from './topics'
 import type { SequencePreviewPart } from './sequencePreview'
 
-const props = defineProps<{ parts: SequencePreviewPart[]; videoUrl: string; activeJoin?: number; disabled: boolean; canAdjust?: boolean }>()
+const props = defineProps<{ parts: SequencePreviewPart[]; videoUrl: string; activeJoin?: number; disabled: boolean; canAdjust?: boolean;
+  positionMs?: number | null; showFrame?: boolean; frame?: { player: HTMLVideoElement; sourceMs: number } | null }>()
 const emit = defineEmits<{ audition: [index: number]; stop: []; seek: [sourceMs: number];
-  'adjust-boundary': [partIndex: number, field: 'start' | 'end', event: Event] }>()
+  'scrub': [editMs: number]; 'adjust-boundary': [partIndex: number, field: 'start' | 'end', event: Event] }>()
 const joins = computed(() => editJoins(props.parts))
 const selected = ref(0)
 const join = computed(() => joins.value[selected.value])
@@ -16,6 +18,22 @@ const ranges = computed(() => props.parts.map(p => [p.start_ms, p.end_ms].join('
 const checking = shallowRef<AbortController | null>(null)
 const marks = ref<JoinSample[] | null>(null)
 const error = ref('')
+const canvas = ref<HTMLCanvasElement | null>(null)
+const frameStatus = ref<'waiting' | 'ready' | 'failed'>('waiting')
+watch([canvas, () => props.frame], ([surface, frame]) => {
+  frameStatus.value = 'waiting'
+  if (!surface || !frame || frame.player.seeking || frame.player.readyState < 2) return
+  const { player } = frame
+  try {
+    const scale = Math.min(360 / player.videoWidth, 640 / player.videoHeight)
+    surface.width = Math.max(1, Math.round(player.videoWidth * scale))
+    surface.height = Math.max(1, Math.round(player.videoHeight * scale))
+    const context = surface.getContext('2d')
+    if (!context) throw new Error()
+    context.drawImage(player, 0, 0, surface.width, surface.height)
+    frameStatus.value = 'ready'
+  } catch { frameStatus.value = 'failed' }
+}, { flush: 'post' })
 function resetCheck() {
   checking.value?.abort()
   checking.value = null
@@ -53,21 +71,21 @@ function select(index: number) {
 </script>
 
 <template>
-  <section v-if="join" class="cut-timeline" aria-label="成片剪点">
+  <section v-if="parts.length" class="cut-timeline" aria-label="成片时间线">
     <header><strong>成片时间线</strong><span>{{ parts.length }} 段 · {{ topicTime(total) }}</span></header>
-    <div class="cut-track">
-      <div class="cut-segments" aria-hidden="true"><i v-for="(part, i) in parts" :key="part.start_ms"
-        :class="{ left: i === selected, right: i === selected + 1 }" :style="{ flexGrow: part.end_ms - part.start_ms }"></i></div>
+    <CutScrubber :parts="parts" :position-ms="positionMs ?? null" :disabled="disabled" @seek="emit('scrub', $event)" />
+    <figure v-if="showFrame" class="cut-frame">
+      <canvas ref="canvas" :style="{ visibility: frameStatus === 'ready' ? 'visible' : 'hidden' }" aria-hidden="true"></canvas>
+      <figcaption>{{ frameStatus === 'ready' && frame ? '原片 ' + topicTime(frame.sourceMs) : frameStatus === 'failed' ? '当前帧无法读取' : '正在定位原片画面…' }}</figcaption>
+    </figure>
+    <template v-if="join">
+    <div class="cut-joins" role="group" aria-label="选择成片剪点">
       <button v-for="(item, i) in joins" :key="item.at_ms" type="button" class="cut-pin"
-        :style="{ left: (100 * item.at_ms / total) + '%' }" :aria-pressed="selected === i"
+        :aria-pressed="selected === i"
         :aria-label="`选择剪点 ${i + 1}，成片 ${topicTime(item.at_ms)}`" :title="`剪点 ${i + 1} · ${topicTime(item.at_ms)}`"
-        @click="select(i)"><span>{{ i + 1 }}</span></button>
+        @click="select(i)">剪点 {{ i + 1 }} · {{ topicTime(item.at_ms) }}</button>
     </div>
     <div class="cut-controls">
-      <label v-if="joins.length > 1">剪点 <select aria-label="选择成片剪点" :value="selected" @change="select(Number(($event.target as HTMLSelectElement).value))">
-        <option v-for="(item, i) in joins" :key="item.at_ms" :value="i">{{ i + 1 }} · {{ topicTime(item.at_ms) }}</option>
-      </select></label>
-      <strong v-else>剪点 · {{ topicTime(join.at_ms) }}</strong>
       <button type="button" class="secondary" :disabled="disabled" :aria-pressed="activeJoin === selected"
         @click="emit('audition', selected)">{{ activeJoin === selected ? '停止试听' : '试听剪点' }}</button>
       <button type="button" class="secondary" :disabled="disabled || !videoUrl" @click="checking ? resetCheck() : check()">
@@ -93,6 +111,7 @@ function select(index: number) {
         {{ mark.side === 'before' ? '剪点前' : '剪点后' }} {{ topicTime(mark.editMs) }}
       </button>
     </div>
+    </template>
   </section>
 </template>
 
@@ -100,19 +119,13 @@ function select(index: number) {
 .cut-timeline { display: grid; gap: .55rem; min-width: 0; margin: .65rem 0; padding: .75rem; border: 1px solid var(--workspace-border,#e4e0d8); border-radius: 6px; background: var(--workspace-canvas,#f4f3ef); }
 .cut-timeline header, .cut-controls { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: .45rem .8rem; }
 .cut-timeline header span, .cut-timeline small { color: var(--workspace-muted,#675f56); font-variant-numeric: tabular-nums; }
-.cut-track { position:relative; margin:0 15px; height:36px; }
-.cut-segments { position:absolute; inset:auto 0 1px; display:flex; height:9px; overflow:hidden; border-radius:2px; background:#dbd4c9; }
-.cut-segments i { flex-basis:0; min-width:0; border-right:1px solid white; box-sizing:border-box; }
-.cut-segments .left { background:#905038; }
-.cut-segments .right { background:#c48968; }
-.cut-pin { position:absolute; top:0; z-index:1; display:grid; place-items:start center; width:29px; height:36px; padding:0; transform:translateX(-50%); border:0; background:transparent; cursor:pointer; }
-.cut-pin::after { content:''; width:2px; position:absolute; inset:19px auto 0; background:#655548; }
-.cut-pin span { display:grid; place-items:center; min-width:21px; height:20px; padding:0 2px; border-radius:3px; background:#fff; border:1px solid #7f7267; color:#4d433b; font:600 12px var(--workspace-mono,monospace); }
-.cut-pin[aria-pressed='true'] { z-index:2; }
-.cut-pin[aria-pressed='true'] span,.cut-pin[aria-pressed='true']::after { background:var(--workspace-accent,#a94424); border-color:var(--workspace-accent,#a94424); color:white; }
-.cut-pin:focus-visible { z-index:3; }
-.cut-controls label { display: inline-flex; align-items: center; gap: .4rem; }
-.cut-controls strong { font-size: .85rem; font-variant-numeric: tabular-nums; }
+.cut-frame { display:flex; align-items:center; flex-wrap:wrap; gap:4px 8px; margin:0; font-size:12px; color:var(--workspace-muted,#675f56); font-variant-numeric:tabular-nums; }
+.cut-frame canvas { display:block; width:clamp(100px, 30%, 170px); height:79px; object-fit:contain; border-radius:4px; background:#211f1b; }
+@media (max-height:480px) { .cut-frame canvas { height:54px; } }
+.cut-joins { display:flex; flex-wrap:wrap; gap:5px; }
+.cut-pin { min-height:32px; padding:4px 8px; border:1px solid var(--workspace-border,#d1c9bc); border-radius:5px; color:var(--workspace-muted,#675f56); background:#fff; font:inherit; font-size:.85rem; font-variant-numeric:tabular-nums; cursor:pointer; }
+.cut-pin[aria-pressed='true'] { color:#743a25; background:var(--workspace-accent-soft,#f7ebe5); border-color:#98644e; font-weight:600; }
+.cut-controls { justify-content:flex-start; }
 .cut-controls button { min-height: 32px; }
 .cut-locate { display:grid; grid-template-columns:minmax(0,1fr) auto minmax(0,1fr); align-items:start; gap:.2rem .4rem; }
 .cut-locate > div { display:flex; align-items:flex-start; flex-wrap:wrap; gap:2px 6px; }

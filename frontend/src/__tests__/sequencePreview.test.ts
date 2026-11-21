@@ -81,6 +81,14 @@ test('sparse media events still play only the ordered parts and clamp the final 
   assert.deepEqual(player.seeks, [1, 2, 2.1], 'the surrounding gap must never be played as a retained part')
 })
 
+test('a completed timeline preview can park its monitor inside the last retained interval', async () => {
+  const { player, clock, preview, events } = fixture()
+  await preview.start(player, { ...plan(), parkInsideEnd: true })
+  clock.advance(250)
+  assert.equal(player.currentTime, 2.099)
+  assert.equal(events.at(-1)?.reason, 'finished')
+})
+
 test('input is copied and logical progress counts retained duration rather than the surrounding source span', async () => {
   const { player, preview, events } = fixture()
   const parts = [{ start_ms: 8572, end_ms: 31315 }, { start_ms: 178900, end_ms: 188442 }]

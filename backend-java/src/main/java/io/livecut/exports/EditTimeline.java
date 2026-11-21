@@ -3,12 +3,11 @@ package io.livecut.exports;
 import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
 import java.util.HashSet;
-import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
-import java.util.regex.Pattern;
 
 import org.springframework.web.util.UriUtils;
+import io.livecut.video.SourceMediaFilename;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.json.JsonMapper;
 import tools.jackson.databind.node.ArrayNode;
@@ -17,8 +16,6 @@ import tools.jackson.databind.node.ObjectNode;
 /** OpenTimelineIO hard cuts of one verified, confirmed output. Times use the source plan's millisecond clock. */
 final class EditTimeline {
     private static final JsonMapper JSON = JsonMapper.builder().build();
-    private static final Pattern UNSAFE_NAME = Pattern.compile("[\\\\/<>:\"|?*%\\p{C}]");
-    private static final Pattern DEVICE_NAME = Pattern.compile("(?i)^(?:CON|PRN|AUX|NUL|COM[1-9¹²³]|LPT[1-9¹²³])\\..*");
 
     private EditTimeline() {}
 
@@ -28,7 +25,7 @@ final class EditTimeline {
                                String originalFilename, JsonNode plan, JsonNode output, JsonNode utterances) {
         String title = output.path("title").asText();
         String hash = plan.path("source_hash").asText();
-        String filename = portableFilename(originalFilename, hash);
+        String filename = SourceMediaFilename.portable(originalFilename, hash);
         ObjectNode timeline = schema("Timeline.1").put("name", title);
         timeline.set("global_start_time", time(0));
         ObjectNode proof = timeline.putObject("metadata").putObject("livecut");
@@ -118,12 +115,4 @@ final class EditTimeline {
         return JSON.createObjectNode().put("OTIO_SCHEMA", type);
     }
 
-    static String portableFilename(String name, String hash) {
-        if (name == null || name.length() < 5 || name.length() > 255 || name.startsWith(".")
-                || !name.equals(name.strip()) || !name.toLowerCase(Locale.ROOT).endsWith(".mp4")
-                || UNSAFE_NAME.matcher(name).find() || DEVICE_NAME.matcher(name).matches()) {
-            return "source-" + hash + ".mp4";
-        }
-        return name;
-    }
 }

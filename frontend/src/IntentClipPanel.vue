@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
 import { api, ApiError, post, type ExportJob } from './api'
 import FailureDiagnostic from './FailureDiagnostic.vue'
 import TextRequestProgress from './TextRequestProgress.vue'
@@ -10,6 +10,8 @@ import CaptionPanel from './CaptionPanel.vue'
 import VideoPackagePanel from './VideoPackagePanel.vue'
 import TranscriptRangePicker from './TranscriptRangePicker.vue'
 import PaperCutEditor from './PaperCutEditor.vue'
+import FineCutEditor from './FineCutEditor.vue'
+import type { FineCutOwner } from './fineCutProject'
 import ProductReplacementPanel from './ProductReplacementPanel.vue'
 import { replaceComponent, type ComponentSelection } from './componentCandidates'
 import { compilePaperCut, preparePaperCut, type PaperCutSource } from './paperCut'
@@ -23,7 +25,7 @@ import { topicTime } from './topics'
 import { intentPreviewParts } from './intentPreviewParts'
 import EditJoinTimeline from './EditJoinTimeline.vue'
 import ProductFrameRanking from './ProductFrameRanking.vue'
-import { editJoins } from './editTimeline'
+import { editJoins, editToSource, sourceToEdit } from './editTimeline'
 import { SequencePreview, type SequencePreviewPart, type SequencePreviewState } from './sequencePreview'
 import { validateTranscriptRange } from './transcriptRange'
 import { intentSaveRecovered } from './intentSaveRecovery'
@@ -73,6 +75,10 @@ interface RangePickerTarget {
 }
 interface RangeSelection { startId: string; endId: string; preview: boolean }
 const rangePickerTarget = ref<RangePickerTarget | null>(null), rangePickerFailed = ref(false)
+const fineCutTarget = shallowRef<{ projectKey: string; parts: IntentOutput['parts']; videoUrl: string; timelineUrl: string;
+  title: string; owner: FineCutOwner; view: 'review' | 'deliveries' } | null>(null)
+const fineCutChoice = ref('')
+let fineCutOpener: HTMLElement | null = null
 const rangePickerEditor = ref<{ dirty: boolean; pending: boolean } | null>(null)
 let rangePickerVersion = 0, rangePickerOpener: HTMLElement | null = null
 const packageBusyId = ref(''), packageUrls = ref<Record<string, string>>({})
@@ -81,7 +87,16 @@ const intentView = ref<IntentView>('compose'), historyOpen = ref(false)
 const historyPanel = ref<HTMLElement | null>(null), historyToggle = ref<HTMLButtonElement | null>(null)
 const previewSection = ref<HTMLElement | null>(null)
 const intentPanel = ref<HTMLElement | null>(null), sourceContextOpen = ref(true)
-let contextObserver: ResizeObserver | undefined, compactContext = false
+let contextObserver: ResizeObserver | undefined
+const compactContext = ref(false)
+const sourceClockMs = ref<number | null>(null)
+interface TimelineSeek {
+  outputId: string; requestId: string; generation: number; selection: number; navigation: number
+  sourceUrl: string; signature: string; sourceMs: number; editMs: number; player: HTMLVideoElement
+}
+const timelineSeek = shallowRef<TimelineSeek | null>(null)
+let awaitingSeekMetadata = false
+const scrubFrame = shallowRef<{ player: HTMLVideoElement; sourceMs: number } | null>(null)
 let viewChosen = false, defaultViewRequest = '', navigationVersion = 0
 const sequenceState = ref<SequencePreviewState | null>(null), preparingSequence = ref(''), sequenceFeedback = ref('')
 const sequenceDescription = ref<{ id: string; title: string; partIndex?: number; joinIndex?: number; outputId: string } | null>(null)
@@ -149,6 +164,8 @@ const confirmedTimelines = computed(() => {
   }
   return urls
 })
+const confirmedOutputs = computed(() => selectedOutputs.value.filter(output => confirmedTimelines.value.has(output.output_id)))
+const fineCutOutput = computed(() => confirmedOutputs.value.find(output => output.output_id === fineCutChoice.value) ?? confirmedOutputs.value[0])
 const unresolved = computed(() => outputs.value.filter(value => value.status !== 'FOUND').length)
 const reviewableCount = computed(() => outputs.value.filter(value => value.status === 'NEEDS_REVIEW').length)
 const confirmed = computed(() => !!snapshot.value && snapshot.value.confirmed_revisions.includes(snapshot.value.revision))
@@ -323,6 +340,7 @@ function adoptManualReview(value: IntentSnapshot) {
   try { accept(newestIntentSnapshot(snapshot.value, upsert(value)), !planDirty.value && !saveNeedsCheck.value && !planRevisionConflict.value) } catch (value) { fail(value) }
 }
 function canChangeRequest() {
+  if (fineCutTarget.value) { error.value = '请先关闭人工精剪，再切换请求。'; return false }
   if (manualReviewEditor.value?.opened || manualReviewEditor.value?.dirty || manualReviewEditor.value?.needsCheck) { error.value = '请先关闭人工核对窗口，或核对原人工选用结果，再切换请求。'; return false }
   if (captionEditor.value?.dirty || captionEditor.value?.pending) { error.value = '请先保存或放弃字幕修改，等待提交完成后再切换剪辑请求。'; return false }
   if (rangePickerTarget.value) { error.value = '请先应用或取消当前原句选择，再切换剪辑请求。'; return false }
@@ -577,7 +595,7 @@ async function confirm() {
     const value = await verifyIntentManualReviewSnapshot(parseIntentSnapshot(raw, props.jobId, id))
     if (!validOperation(id, version) || !editorActive() || document.hidden) return
     accept(value, true)
-    notice.value = `方案 r${revision} 已确认。可下载所选目标的剪辑时间线，或生成独立 MP4。`
+    notice.value = `方案 r${revision} 已确认。可继续人工精剪，下载时间线，或直接生成 MP4。`
   } catch (value) { if (validOperation(id, version)) fail(value) }
   finally { if (validOperation(id, version)) action.value = '' }
 }
@@ -788,6 +806,28 @@ async function applyRangeSelection(token: number, selection: RangeSelection) {
     && snapshot.value?.source.video_sha256 === target.videoHash && snapshot.value?.source.transcript_hash === target.transcriptHash
     && snapshot.value?.source.duration_ms === target.durationMs && mediaActive('review') && current && rangeSignature(current) === signature) await previewSequence(current, target.partIndex)
 }
+function openFineCut(output: IntentOutput, event: Event) {
+  const current = snapshot.value, url = confirmedTimelines.value.get(output.output_id)
+  const saved = current?.plan?.outputs.find(item => item.output_id === output.output_id)
+  const view = intentView.value
+  if (view === 'compose' || !current?.plan_hash || !saved || !url || !partsForPreview(output) || !mediaActive(view) || document.hidden || !canExport.value) return
+  pauseMedia()
+  fineCutOpener = event.currentTarget instanceof HTMLElement ? event.currentTarget : null
+  fineCutTarget.value = {
+    projectKey: JSON.stringify([props.jobId, current.video_id, current.source.video_sha256, current.id, saved.output_id,
+      current.revision, current.plan_hash, current.manual_review?.review_hash ?? null]),
+    owner: { requestId: current.id, videoId: current.video_id, sourceHash: current.source.video_sha256, transcriptHash: current.source.transcript_hash,
+      revision: current.revision, planHash: current.plan_hash, outputId: saved.output_id, goalId: saved.goal_id,
+      durationMs: current.source.duration_ms, evidenceIds: [...saved.evidence_utterance_ids],
+      ...(current.manual_review ? { manualReviewHash: current.manual_review.review_hash } : {}) },
+    title: saved.title, parts: saved.parts.map(part => ({ ...part })), videoUrl: props.videoUrl, timelineUrl: url, view,
+  }
+}
+function closeFineCut(restoreFocus = true) {
+  const opener = fineCutOpener, view = fineCutTarget.value?.view
+  fineCutTarget.value = null; fineCutOpener = null
+  if (restoreFocus && view) void nextTick(() => { if (!fineCutTarget.value && mediaActive(view) && opener?.isConnected) opener.focus() })
+}
 function sequenceId(output: IntentOutput, partIndex?: number) { return partIndex === undefined ? `goal:${output.output_id}` : `part:${output.output_id}:${partIndex}` }
 function sequenceSelected(output: IntentOutput, partIndex?: number) {
   const id = sequenceId(output, partIndex)
@@ -799,6 +839,7 @@ function partsForPreview(output: IntentOutput, partIndex?: number) {
 }
 function canPreviewSequence(output: IntentOutput, partIndex?: number) { return previewPageVisible.value && !document.hidden && !pending.value && !!partsForPreview(output, partIndex) && mediaActive('review') }
 function stopSequencePreview(feedback = '') {
+  timelineSeek.value = null; awaitingSeekMetadata = false; scrubFrame.value = null
   preparedSequence = null; preparingSequence.value = ''; sequencePreparationVersion++
   window.clearTimeout(sequencePreparationTimer); sequencePreparationTimer = undefined
   sequence.cancel(); sequenceFeedback.value = feedback
@@ -818,7 +859,7 @@ async function startPreparedSequence(value: PreparedSequence) {
   if (value.player.readyState < 1) return
   preparedSequence = null; preparingSequence.value = ''
   window.clearTimeout(sequencePreparationTimer); sequencePreparationTimer = undefined
-  if (compactContext) value.player.scrollIntoView({ block: 'nearest' })
+  if (compactContext.value) value.player.scrollIntoView({ block: 'nearest' })
   const result = await sequence.start(value.player, { id: value.id, parts: value.parts })
   if (result === 'failed' && sequencePreparationVersion === value.generation) sequenceFeedback.value = '区间预览暂时未能播放。可先点击原视频播放按钮，再重试预览。'
 }
@@ -877,10 +918,66 @@ async function beginAudition(output: IntentOutput, detail: NonNullable<typeof se
   }, 15000)
   await startPreparedSequence(prepared)
 }
+function timelinePosition(output: IntentOutput) {
+  const seek = timelineSeek.value
+  if (seek?.outputId === output.output_id && (awaitingSeekMetadata || sourceClockMs.value === seek.sourceMs)) return seek.editMs
+  const parts = partsForPreview(output)
+  return parts && sourceClockMs.value !== null ? sourceToEdit(parts, sourceClockMs.value) : null
+}
+function readSourceClock(event: Event) {
+  const player = event.currentTarget as HTMLVideoElement
+  if (player !== sourcePlayer.value || !mediaActive('review') || document.hidden || player.readyState < 1) return
+  const actual = Math.round(player.currentTime * 1000)
+  if (!Number.isSafeInteger(actual) || actual < 0) return
+  sourceClockMs.value = actual
+  const seek = timelineSeek.value
+  if (compactContext.value && seek?.player === player && !awaitingSeekMetadata && !player.seeking && player.readyState >= 2) {
+    const parts = sequenceOptions.value.get(seek.outputId)?.all
+    if (parts && sourceToEdit(parts, actual) !== null) scrubFrame.value = { player, sourceMs: actual }
+    else { timelineSeek.value = null; scrubFrame.value = null }
+  }
+}
+function applyTimelineSeek(seek: TimelineSeek) {
+  const output = outputs.value.find(row => row.output_id === seek.outputId)
+  if (timelineSeek.value !== seek || sequencePreparationVersion !== seek.generation
+    || !validOperation(seek.requestId, seek.selection) || seek.navigation !== navigationVersion
+    || props.videoUrl !== seek.sourceUrl || sourcePlayer.value !== seek.player
+    || !output || !canPreviewSequence(output) || previewSignature(output) !== seek.signature) return
+  if (seek.player.readyState < 1) return
+  awaitingSeekMetadata = false
+  window.clearTimeout(sequencePreparationTimer); sequencePreparationTimer = undefined
+  try {
+    seek.player.pause()
+    seek.player.currentTime = seek.sourceMs / 1000
+    sourceClockMs.value = seek.sourceMs
+    if (compactContext.value && !seek.player.seeking && seek.player.readyState >= 2) scrubFrame.value = { player: seek.player, sourceMs: seek.sourceMs }
+  } catch { stopSequencePreview('暂时无法定位画面，请等待原视频加载后重试。') }
+}
+function scrubTo(output: IntentOutput, editMs: number) {
+  const player = sourcePlayer.value, parts = partsForPreview(output)
+  if (!player || !parts || !canPreviewSequence(output)) return
+  const point = editToSource(parts, editMs)
+  if (!point) return
+  stopSequencePreview()
+  player.pause()
+  if (!compactContext.value) sourceContextOpen.value = true
+  const seek = { player, sourceMs: point.sourceMs, editMs, outputId: output.output_id, sourceUrl: props.videoUrl,
+    requestId: selectedId.value, selection: selectionVersion, generation: sequencePreparationVersion,
+    navigation: navigationVersion, signature: previewSignature(output) }
+  awaitingSeekMetadata = true
+  timelineSeek.value = seek
+  if (player.readyState < 1) sequencePreparationTimer = window.setTimeout(() => {
+    if (timelineSeek.value === seek && awaitingSeekMetadata) stopSequencePreview('原视频尚未加载，暂时无法定位。')
+  }, 15000)
+  applyTimelineSeek(seek)
+}
 function sourceMetadata(event: Event) {
+  if (awaitingSeekMetadata && timelineSeek.value?.player === event.currentTarget) applyTimelineSeek(timelineSeek.value)
+  readSourceClock(event)
   if (preparedSequence?.player === event.currentTarget) void startPreparedSequence(preparedSequence)
 }
-function sourceSequenceTime(event: Event) { sequence.timeUpdate(event.currentTarget as HTMLVideoElement) }
+function sourceSequenceTime(event: Event) { readSourceClock(event); sequence.timeUpdate(event.currentTarget as HTMLVideoElement) }
+function sourceSeeked(event: Event) { readSourceClock(event); sequence.seeked(event.currentTarget as HTMLVideoElement) }
 function sourceSequenceSeeking(event: Event) {
   if (preparedSequence?.player === event.currentTarget) stopSequencePreview()
   sequence.seeking(event.currentTarget as HTMLVideoElement)
@@ -890,7 +987,7 @@ function sourceSequenceError(event: Event) {
 }
 function updatePreviewVisibility() {
   previewPageVisible.value = !document.hidden
-  if (!previewPageVisible.value && (preparedSequence || sequenceState.value)) stopSequencePreview()
+  if (!previewPageVisible.value && (preparedSequence || sequenceState.value || timelineSeek.value)) stopSequencePreview()
 }
 async function locate(id: string) {
   await locateTime(sourceTime(id))
@@ -898,14 +995,15 @@ async function locate(id: string) {
 async function locateTime(start: number) {
   stopSequencePreview()
   if (!Number.isSafeInteger(start) || start < 0 || !snapshot.value || start >= snapshot.value.source.duration_ms || !mediaActive('review')) return
-  const requestId = selectedId.value, version = selectionVersion, navigation = navigationVersion
+  const requestId = selectedId.value, version = selectionVersion, navigation = navigationVersion, generation = sequencePreparationVersion
   sourceContextOpen.value = true
   await nextTick()
-  if (!sourcePlayer.value || !validOperation(requestId, version) || navigation !== navigationVersion || !mediaActive('review')) return
+  if (!sourcePlayer.value || !validOperation(requestId, version) || navigation !== navigationVersion
+    || generation !== sequencePreparationVersion || !mediaActive('review') || document.hidden) return
   sourcePlayer.value.pause()
   try {
     sourcePlayer.value.currentTime = start / 1000
-    if (compactContext) sourcePlayer.value.scrollIntoView({ block: 'nearest' })
+    if (compactContext.value) sourcePlayer.value.scrollIntoView({ block: 'nearest' })
   }
   catch { error.value = '暂时无法定位原句，请等待视频加载后重试。' }
 }
@@ -914,7 +1012,7 @@ function duration(output: IntentOutput) { return output.parts.reduce((sum, part)
 function date(value: string) { return new Date(value).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) }
 function unload(event: BeforeUnloadEvent) { if (dirty.value || pending.value) { event.preventDefault(); event.returnValue = '' } }
 function pauseMedia() { stopSequencePreview(); sourcePlayer.value?.pause(); exportPlayer.value?.pause() }
-function mediaActive(view: IntentView, allowRangePicker = false) { return props.active !== false && !stopped && !manualReviewEditor.value?.opened && (allowRangePicker || !rangePickerTarget.value) && !(captionTarget.value && intentView.value === 'deliveries') && !historyOpen.value && intentView.value === view }
+function mediaActive(view: IntentView, allowRangePicker = false) { return props.active !== false && !stopped && !fineCutTarget.value && !manualReviewEditor.value?.opened && (allowRangePicker || !rangePickerTarget.value) && !(captionTarget.value && intentView.value === 'deliveries') && !historyOpen.value && intentView.value === view }
 function guardPlayback(event: Event) {
   const player = event.currentTarget as HTMLVideoElement
   if (!(player === sourcePlayer.value && sourceContextOpen.value && mediaActive('review')) && !(player === exportPlayer.value && mediaActive('deliveries'))) player.pause()
@@ -986,6 +1084,8 @@ watch(intentView, () => { focusVersion++; pauseMedia() }, { flush: 'sync' })
 watch(sourceContextOpen, open => { if (!open) { stopSequencePreview(); sourcePlayer.value?.pause() } }, { flush: 'sync' })
 watch(outputPartsSignature, () => { stopSequencePreview() }, { flush: 'sync' })
 watch(() => props.videoUrl, () => { pauseMedia() }, { flush: 'sync' })
+watch([selectedId, () => props.videoUrl, () => props.jobId], () => { sourceClockMs.value = null; fineCutChoice.value = ''; stopSequencePreview(); closeFineCut(false) }, { flush: 'sync' })
+watch([() => snapshot.value?.revision, () => snapshot.value?.plan_hash], () => { if (timelineSeek.value) stopSequencePreview() }, { flush: 'sync' })
 watch(pending, value => { if (value) stopSequencePreview() }, { flush: 'sync' })
 watch(() => props.active, value => { if (value === false) { focusVersion++; closeHistory(false); pauseMedia() } }, { flush: 'sync' })
 watch([() => props.active, previewPageVisible, pending, () => !!captionEditor.value?.pending], syncRefreshLifecycle, { flush: 'sync' })
@@ -1000,7 +1100,7 @@ onMounted(() => {
     const width = entries[0]?.contentRect.width
     if (stopped || !width) return
     const compact = width <= 760
-    if (compact !== compactContext) { compactContext = compact; sourceContextOpen.value = !compact }
+    if (compact !== compactContext.value) { compactContext.value = compact; sourceContextOpen.value = !compact }
   })
   if (intentPanel.value) contextObserver.observe(intentPanel.value)
 })
@@ -1009,7 +1109,7 @@ onBeforeUnmount(() => { stopped = true; historyVersion++; historyScope.dispose()
 
 <template>
   <section ref="intentPanel" class="panel intent-panel" aria-label="按需求找片段" @keydown.esc="closeHistory()">
-    <div class="intent-surface" :inert="historyOpen || manualReviewEditor?.opened ? true : undefined">
+    <div class="intent-surface" :inert="historyOpen || manualReviewEditor?.opened || fineCutTarget ? true : undefined">
       <header class="intent-toolbar"><h2>按需剪辑 <span v-if="snapshot" class="status">{{ waitingForStatus ? '状态待更新' : names[snapshot.status] }}</span></h2>
       <nav class="intent-view-tabs" role="tablist" aria-label="按需剪辑流程" @keydown="viewKey">
         <button :id="`intent-view-${jobId}-compose`" role="tab" :aria-controls="`intent-page-${jobId}-compose`" :aria-selected="intentView === 'compose'" :tabindex="intentView === 'compose' ? 0 : -1" @click="setView('compose')">剪辑要求<span v-if="instruction.trim()" class="draft-dot" aria-label="有未提交要求"></span></button>
@@ -1056,7 +1156,7 @@ onBeforeUnmount(() => { stopped = true; historyVersion++; historyScope.dispose()
             <aside class="intent-context" aria-label="剪辑原视频与执行信息">
               <h3 class="intent-reference-title">原视频回看</h3>
               <details class="intent-source-details" :open="sourceContextOpen" @toggle="sourceContextOpen = ($event.target as HTMLDetailsElement).open"><summary>回看原视频 <span>{{ sourceContextOpen ? '收起' : '展开' }}</span></summary>
-              <video ref="sourcePlayer" :src="videoUrl" controls preload="metadata" playsinline class="intent-source" @play="guardPlayback" @loadedmetadata="sourceMetadata" @timeupdate="sourceSequenceTime" @playing="sourceSequenceTime" @seeking="sourceSequenceSeeking" @seeked="sequence.seeked($event.currentTarget as HTMLVideoElement)" @pause="sequence.pause($event.currentTarget as HTMLVideoElement)" @ended="sequence.ended($event.currentTarget as HTMLVideoElement)" @ratechange="sequence.rateChange($event.currentTarget as HTMLVideoElement)" @error="sourceSequenceError"></video>
+              <video ref="sourcePlayer" :key="`${selectedId}:${videoUrl}`" :src="videoUrl" controls preload="metadata" playsinline class="intent-source" @play="guardPlayback" @loadedmetadata="sourceMetadata" @loadeddata="readSourceClock" @timeupdate="sourceSequenceTime" @playing="sourceSequenceTime" @seeking="sourceSequenceSeeking" @seeked="sourceSeeked" @pause="sequence.pause($event.currentTarget as HTMLVideoElement)" @ended="sequence.ended($event.currentTarget as HTMLVideoElement)" @ratechange="sequence.rateChange($event.currentTarget as HTMLVideoElement)" @error="sourceSequenceError"></video>
               <div v-if="preparingSequence || sequenceState" class="intent-sequence-preview"><div class="intent-sequence-heading"><strong>{{ sequenceDescription?.title }}</strong><button class="text-button" @click="stopSequencePreview('区间预览已停止。')">停止预览</button></div><p role="status">{{ preparingSequence ? '正在准备原视频…' : sequenceDescription?.partIndex !== undefined ? `正在回看保留第 ${sequenceDescription.partIndex + 1} 段` : `正在回看第 ${(sequenceState?.part_index ?? 0) + 1} / ${sequenceState?.part_count ?? 1} 段` }}</p><template v-if="sequenceState"><progress :value="sequenceState.played_ms" :max="sequenceState.total_ms" aria-label="目标区间预览进度" :aria-valuetext="`${topicTime(sequenceState.played_ms)} / ${topicTime(sequenceState.total_ms)}`"></progress><span class="intent-sequence-time">{{ topicTime(sequenceState.played_ms) }} / {{ topicTime(sequenceState.total_ms) }} · 当前 {{ topicTime(sequenceState.start_ms) }} → {{ topicTime(sequenceState.end_ms) }}</span></template><small>浏览器按原视频区间回看，正式拼接以导出文件为准。</small></div>
               <p v-if="sequenceFeedback" class="intent-sequence-feedback" role="status">{{ sequenceFeedback }}</p>
               <p class="help">点击候选原句可定位回看；多段内容按所列顺序拼接。</p>
@@ -1110,11 +1210,15 @@ onBeforeUnmount(() => { stopped = true; historyVersion++; historyScope.dispose()
             <details class="intent-reason-details" :open="output.status !== 'FOUND'"><summary>{{ output.title.trim() !== goal(output) ? '完整要求与选段说明' : '选段说明' }}</summary><p v-if="output.title.trim() !== goal(output)" class="intent-original">{{ goal(output) }}</p><p class="intent-reason">{{ output.reason }}</p></details>
             <EditJoinTimeline :key="`${snapshot.id}:${snapshot.revision}:${output.output_id}`" :parts="partsForPreview(output) ?? []"
               :video-url="videoUrl" :disabled="!canPreviewSequence(output)" :active-join="activeJoin(output)" :can-adjust="canAdjustRange(output)"
+              :position-ms="timelinePosition(output)" :show-frame="compactContext && timelineSeek?.outputId === output.output_id"
+              :frame="timelineSeek?.outputId === output.output_id ? scrubFrame : null" @scrub="scrubTo(output, $event)"
               @adjust-boundary="(index, field, event) => openRangePicker(output, index, field, event)"
               @audition="previewJoin(output, $event)" @stop="stopSequencePreview()" @seek="locateTime" />
-            <div v-if="confirmedTimelines.has(output.output_id)" class="intent-part-actions">
-              <a class="text-button" :href="confirmedTimelines.get(output.output_id)" download>下载已确认时间线 (.otio)</a>
-              <small>在支持 OTIO 的剪辑器中打开，并链接原视频。</small>
+            <div v-if="confirmedTimelines.has(output.output_id)" class="intent-fine-delivery">
+              <strong>已确认版本 r{{ snapshot.revision }}</strong>
+              <div class="intent-edit-tools"><button class="secondary intent-edit-main" @click="openFineCut(output, $event)">人工精剪</button>
+                <a class="secondary" :href="confirmedTimelines.get(output.output_id)" download>下载已确认时间线 (.otio)</a></div>
+              <small>在工作台微调，或把时间线与原视频一起带入外部剪辑器。</small>
             </div>
             <div v-for="(part, partIndex) in output.parts" :key="partIndex" class="intent-part">
               <div class="intent-part-label"><b>保留第 {{ partIndex + 1 }} 段</b><div class="intent-part-actions"><button class="text-button" :disabled="!canPreviewSequence(output, partIndex)" :aria-label="`${sequenceSelected(output, partIndex) ? '停止预览' : '预览'}目标 ${index + 1} 第 ${partIndex + 1} 段`" @click="previewSequence(output, partIndex)">{{ sequenceSelected(output, partIndex) ? '停止本段' : '预览本段' }}</button><button class="text-button" :disabled="pending" @click="locate(part.start_utterance_id)">定位原视频 ↗</button></div></div>
@@ -1173,14 +1277,18 @@ onBeforeUnmount(() => { stopped = true; historyVersion++; historyScope.dispose()
           <div v-else class="intent-empty"><p>还没有生成成片。先核对并确认所选目标，再生成 MP4。</p><button class="secondary" @click="setView('review')">回到核对方案</button></div>
         </div>
       </div>
-      <footer v-if="snapshot?.plan" v-show="intentView === 'review'" class="intent-save-row">
+      <footer v-if="snapshot?.plan" v-show="intentView === 'review' || (intentView === 'deliveries' && fineCutOutput)" class="intent-save-row">
         <p v-if="validation" class="intent-validation" role="status">{{ validation }}</p>
         <div class="intent-save-controls"><div class="intent-selection-summary">
           <strong>已选 {{ selectedCount }} / {{ outputs.length }} 个目标<span v-if="selectedCount"> · 合计 {{ topicTime(selectedDuration) }}</span></strong>
-          <small>{{ planRevisionConflict ? '草稿基于旧版本，请先核对。' : saveNeedsCheck ? '上次保存结果待核对。' : planDirty ? '本页有修改，保存后可确认所选目标。' : pendingCreate ? '有一笔新要求待核对。' : instruction.trim() || inputAnswerBinding ? '剪辑要求页有待处理的输入。' : manualReviewEditor?.needsCheck ? '请先核对原人工选用结果。' : !selectedCount ? '请勾选要导出的目标。' : confirmed ? `r${snapshot.revision} 已确认，可生成每个目标的 MP4。` : '确认后可生成 MP4 或下载剪辑时间线。' }}</small>
+          <small>{{ planRevisionConflict ? '草稿基于旧版本，请先核对。' : saveNeedsCheck ? '上次保存结果待核对。' : planDirty ? '本页有修改，保存后可确认所选目标。' : pendingCreate ? '有一笔新要求待核对。' : instruction.trim() || inputAnswerBinding ? '剪辑要求页有待处理的输入。' : manualReviewEditor?.needsCheck ? '请先核对原人工选用结果。' : !selectedCount ? '请勾选要导出的目标。' : confirmed ? `r${snapshot.revision} 已确认。人工精剪可微调剪点并交付 OTIO，MP4 使用已确认区间。` : '确认后可生成 MP4 或下载剪辑时间线。' }}</small>
         </div><div class="actions">
           <button v-if="!planDirty && (instruction.trim() || inputAnswerBinding || pendingCreate)" class="text-button" :disabled="pending" @click="setView('compose')">处理剪辑要求</button>
-          <button class="primary" :disabled="!primaryAction.enabled" @click="primaryAction.run">{{ primaryAction.label }}</button>
+          <select v-if="confirmedOutputs.length > 1" :value="fineCutOutput?.output_id" aria-label="选择要精剪的目标" @change="fineCutChoice = ($event.target as HTMLSelectElement).value">
+            <option v-for="output in confirmedOutputs" :key="output.output_id" :value="output.output_id">{{ output.title || goal(output) }}</option>
+          </select>
+          <button v-if="fineCutOutput" class="secondary" @click="openFineCut(fineCutOutput, $event)">精剪所选目标</button>
+          <button v-if="intentView === 'review'" class="primary" :disabled="!primaryAction.enabled" @click="primaryAction.run">{{ primaryAction.label }}</button>
         </div></div>
       </footer>
     </div>
@@ -1197,6 +1305,9 @@ onBeforeUnmount(() => { stopped = true; historyVersion++; historyScope.dispose()
       <div class="intent-history-pagination" role="group" aria-label="历史分页"><button class="secondary" :disabled="pending || historyLoading || !history.canNewer" @click="navigateHistory('newer')">较新一页</button><button class="secondary" :disabled="pending || historyLoading || !history.canOlder" @click="navigateHistory('older')">更早一页</button><button class="text-button" :disabled="pending || historyLoading" @click="navigateHistory('latest')">回到最新</button></div>
     </aside>
     <CaptionPanel v-if="captionTarget" :key="`${captionTarget.exportId}:${captionTarget.clipId}`" ref="captionEditor" :export-id="captionTarget.exportId" :clip-id="captionTarget.clipId" :content-url="captionTarget.contentUrl" :active="props.active !== false && intentView === 'deliveries' && !historyOpen" @close="captionTarget = null" />
+    <FineCutEditor v-if="fineCutTarget" :key="fineCutTarget.projectKey" :parts="fineCutTarget.parts" :owner="fineCutTarget.owner"
+      :video-url="fineCutTarget.videoUrl" :timeline-url="fineCutTarget.timelineUrl" :project-key="fineCutTarget.projectKey" :title="fineCutTarget.title"
+      :active="props.active !== false && intentView === fineCutTarget.view && !historyOpen" @close="closeFineCut()" />
     <PaperCutEditor v-if="rangePickerTarget?.paperCut && rangePickerTarget.planHash" :key="`paper-${rangePickerTarget.token}`" ref="rangePickerEditor"
       :context="{ requestId: rangePickerTarget.requestId, revision: rangePickerTarget.snapshotRevision, planHash: rangePickerTarget.planHash, outputId: rangePickerTarget.outputId }"
       :source="rangePickerTarget.paperCut" :title="rangePickerTarget.output.title" :goal="goal(rangePickerTarget.output)" :token="rangePickerTarget.token"

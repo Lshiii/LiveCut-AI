@@ -29,6 +29,7 @@ interface Playback {
   index: number
   completedMs: number
   totalMs: number
+  parkInsideEnd: boolean
   seekTarget: number | null
   timer: unknown | null
   resolveStart: ((result: StartResult) => void) | null
@@ -51,7 +52,7 @@ export class SequencePreview {
     scheduler: SequencePreviewScheduler = nativeScheduler,
   ) { this.changed = changed; this.scheduler = scheduler }
 
-  start(player: SequencePreviewPlayer, input: { id: string; parts: readonly SequencePreviewPart[] }): Promise<StartResult> {
+  start(player: SequencePreviewPlayer, input: { id: string; parts: readonly SequencePreviewPart[]; parkInsideEnd?: boolean }): Promise<StartResult> {
     // Replacing a preview on the same element must not enqueue an unnecessary pause event.
     if (this.playback) this.stop(this.playback, 'cancelled', this.playback.player !== player)
     let totalMs = 0, previousEnd = 0
@@ -67,7 +68,7 @@ export class SequencePreview {
     const parts = Object.freeze(input.parts.map(part => Object.freeze({ start_ms: part.start_ms, end_ms: part.end_ms })))
     let resolveStart!: (result: StartResult) => void
     const result = new Promise<StartResult>(resolve => { resolveStart = resolve })
-    const playback: Playback = { id: input.id, player, parts, index: 0, completedMs: 0, totalMs,
+    const playback: Playback = { id: input.id, player, parts, index: 0, completedMs: 0, totalMs, parkInsideEnd: input.parkInsideEnd === true,
       seekTarget: parts[0]!.start_ms, timer: null, resolveStart }
     this.playback = playback
     try {
@@ -161,7 +162,8 @@ export class SequencePreview {
   }
   private finish(playback: Playback) {
     if (!this.current(playback)) return
-    const end = playback.parts[playback.index]!.end_ms / 1000
+    // A timeline monitor parks on retained media even when the next source frame belongs to a removed section.
+    const end = (playback.parts[playback.index]!.end_ms - (playback.parkInsideEnd ? 1 : 0)) / 1000
     this.stop(playback, 'finished')
     // A consumer may start a new preview from the terminal notification.
     if (!this.playback || this.playback.player !== playback.player) playback.player.currentTime = end

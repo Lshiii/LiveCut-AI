@@ -21,6 +21,7 @@ test('range selection skips protected rows; filtering preserves batch selection 
   const placeholder = { render: () => null }
   const component = compileHostComponent(new URL('../PaperCutEditor.vue', import.meta.url), {
     './paperCut': paperCut, './sequencePreview': preview, './topics': { topicTime },
+    './editTimeline': editTimeline, './CutScrubber.vue': placeholder,
     './PaperCutBudget.vue': placeholder, './PaperCutSuggestion.vue': placeholder,
   })
   const rows = Array.from({ length: 62 }, (_, i) => ({
@@ -66,16 +67,19 @@ test('range selection skips protected rows; filtering preserves batch selection 
 })
 
 test('selecting a cut stops the previous audition and keeps the same source boundary after an earlier edit', async () => {
+  const scrub = { emits: ['seek'], setup(_: unknown, { emit }: { emit: (name: 'seek', ms: number) => void }) {
+    return () => h('button', { onClick: () => emit('seek', 123) }, '定位成片游标')
+  } }
   const component = compileHostComponent(new URL('../EditJoinTimeline.vue', import.meta.url), {
-    './editTimeline': editTimeline, './joinBlackFrames': {}, './topics': { topicTime },
+    './editTimeline': editTimeline, './joinBlackFrames': {}, './topics': { topicTime }, './CutScrubber.vue': scrub,
   })
-  const root = hostNode('root'), located: number[] = []
+  const root = hostNode('root'), located: number[] = [], scrubbed: number[] = []
   const edits: [number, string, Event][] = []
   let stops = 0, editable = true
   const parts = [2000, 4000, 6000].map(start_ms => ({ start_ms, end_ms: start_ms + 500 }))
   const render = async () => {
     hostRenderer.render(h(component, { parts: [...parts], videoUrl: '/video', disabled: false, activeJoin: 0, canAdjust: editable,
-      onStop: () => { stops++ }, onSeek: (ms: number) => located.push(ms),
+      onStop: () => { stops++ }, onSeek: (ms: number) => located.push(ms), onScrub: (ms: number) => scrubbed.push(ms),
       onAdjustBoundary: (index: number, field: string, event: Event) => edits.push([index, field, event]) }), root)
     await flushHost()
   }
@@ -100,5 +104,11 @@ test('selecting a cut stops the previous audition and keeps the same source boun
     await render()
     assert.equal(button(root, '调整前段结尾').props.disabled, true)
     assert.equal(button(root, '后段入点 00:06.000').props.disabled, false)
+    parts.splice(1)
+    await render()
+    assert.equal(pins().length, 0)
+    button(root, '定位成片游标').props.onClick()
+    assert.deepEqual(scrubbed, [123])
+    assert.deepEqual(located, [4499, 6000])
   } finally { hostRenderer.render(null, root) }
 })
