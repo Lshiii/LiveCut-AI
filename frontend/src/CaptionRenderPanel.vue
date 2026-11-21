@@ -9,7 +9,7 @@ import { captionRenderActive, captionRenderBase, captionRenderFrames, captionRen
 import FailureDiagnostic from './FailureDiagnostic.vue'
 import CaptionFramePreview from './CaptionFramePreview.vue'
 
-const props = withDefaults(defineProps<{ snapshot: CaptionSnapshot; captionDirty: boolean; captionPending: boolean; active?: boolean }>(), { active: true })
+const props = withDefaults(defineProps<{ snapshot: CaptionSnapshot; captionDirty: boolean; captionPending: boolean; initialCueId?: string; active?: boolean }>(), { active: true })
 const rows = ref<CaptionRenderSnapshot[]>([]), selectedId = ref(''), action = ref('')
 const error = ref(''), refreshError = ref(''), notice = ref(''), loading = ref(true)
 const revision = ref<number | null>(null), confirmedCaption = ref<CaptionSnapshot | null>(null), revisionBusy = ref(false)
@@ -33,7 +33,10 @@ const receipts = createCaptionRenderReceiptStore(`livecut-caption-render-create-
   getItem: key => localStorage.getItem(key), setItem: (key, value) => localStorage.setItem(key, value), removeItem: key => localStorage.removeItem(key),
 }, () => crypto.randomUUID())
 let fullscreenRequestVersion = 0
-defineExpose({ pending })
+function useCurrentRevision() {
+  if (props.snapshot.status === 'CONFIRMED') revision.value = props.snapshot.revision
+}
+defineExpose({ pending, useCurrentRevision })
 
 function message(value: unknown) {
   const raw = value instanceof ApiError ? value.code : value instanceof CaptionRenderResponseError ? 'INVALID_CAPTION_RENDER_RESPONSE'
@@ -205,7 +208,8 @@ onBeforeUnmount(() => { stopped = true; epoch++; revisionEpoch++; resetPreviewLa
         <label>字幕样式<select v-model="style" :disabled="pending" aria-label="烧录字幕样式"><option v-for="(name, key) in captionRenderStyles" :key="key" :value="key">{{ name }}</option></select></label>
         <label>输出画幅<select v-model="frame" :disabled="pending" aria-label="烧录输出画幅"><option v-for="(name, key) in captionRenderFrames" :key="key" :value="key">{{ name }}</option></select></label><p class="render-help">{{ frame === 'PORTRAIT_BLUR_720' ? '前景完整保留，用同源视频的柔化背景填充竖屏，减少黑边；背景仅作装饰。' : '横竖屏均保留完整画面，不裁切内容，空白处补边。' }}</p>
         <CaptionFramePreview v-if="confirmedCaption?.cues.length" :caption="confirmedCaption" :style-preset="style"
-          :frame="frame" :enabled="active && !pending && !captionDirty && !captionPending && !revisionBusy" />
+          :frame="frame" :initial-cue-id="confirmedCaption.revision === snapshot.revision && confirmedCaption.content_hash === snapshot.content_hash ? initialCueId : undefined"
+          :enabled="active && !pending && !captionDirty && !captionPending && !revisionBusy" />
         <p v-if="captionDirty" class="render-warning" role="status">字幕有未保存修改。请先回到校对页保存并确认，再生成；已有成片仍可查看和下载。</p>
         <p v-else-if="!confirmedRevisions.length" class="render-warning">请先在“校对字幕”中确认一个字幕版本。</p>
         <p v-else-if="confirmedCaption && !confirmedCaption.cues.length" class="render-warning">这个确认版本没有字幕，请校对并确认有字幕的版本。</p>
