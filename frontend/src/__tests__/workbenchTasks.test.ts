@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import type { AnalysisJob } from '../api.ts'
-import { workbenchTasks } from '../workbenchTasks.ts'
+import { continuationForVideo, workbenchTasks } from '../workbenchTasks.ts'
 
 const job = (id: string, video_id: string, generation: number, status: string, created_at: string) =>
   ({ id, video_id, generation, status, created_at } as AnalysisJob)
@@ -11,6 +11,13 @@ const jobs = [
   job('new-a', 'a', 2, 'REVIEW_READY', '2026-11-02T00:00:00Z'),
 ]
 const name = (id: string) => id === 'a' ? '缓存.mp4' : '课程.mp4'
+test('continue opens an editable result or tracks the latest active analysis for this video', () => {
+  const running = job('running-a', 'a', 5, 'RUNNING', '')
+  const failed = job('failed-a', 'a', 6, 'FAILED', '')
+  assert.equal(continuationForVideo([running, failed, ...jobs], 'a')?.id, 'new-a')
+  assert.equal(continuationForVideo([running, failed, jobs[1]!], 'a')?.id, 'running-a')
+  assert.equal(continuationForVideo([failed, jobs[1]!], 'a'), null)
+})
 test('recent videos show each latest generation without changing the input or hiding all-history access', () => {
   const original = [...jobs]
   assert.deepEqual(workbenchTasks(jobs, 'recent', '', 'ALL', name).map(j => j.id), ['new-b', 'new-a'])

@@ -2,6 +2,14 @@ import type { AnalysisJob } from './api.ts'
 
 export type TaskListScope = 'recent' | 'all'
 
+/** Prefer an editable result even if a later re-analysis is still running or failed. */
+export function continuationForVideo(jobs: AnalysisJob[], videoId: string) {
+  const sameVideo = jobs.filter(job => job.video_id === videoId).sort((a,b) => b.generation - a.generation)
+  return sameVideo.find(job => job.status === 'REVIEW_READY')
+    ?? sameVideo.find(job => job.status === 'RUNNING' || job.status === 'QUEUED')
+    ?? null
+}
+
 /** The latest analysis for each video; historical jobs remain searchable. */
 export function workbenchTasks(
   jobs: AnalysisJob[], scope: TaskListScope, query: string, status: string,

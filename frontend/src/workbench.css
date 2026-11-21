@@ -133,6 +133,16 @@
 
 .settings-grid { display: grid; grid-template-columns: minmax(0, 1.08fr) minmax(0, 1fr); gap: 20px; max-width: 1240px; margin: 0 auto; align-items: start; }
 .settings-side { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+.continue-analysis { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; margin: 16px 0 4px; padding: 14px; border-left: 3px solid var(--workspace-accent); border-radius: 4px; background: var(--workspace-accent-soft); }
+.continue-analysis h3 { margin: 0; font-size: 15px; }
+.continue-analysis p, .analysis-options summary span { color: var(--workspace-muted); font-size: 12px; }
+.continue-analysis button { min-height: 40px; }
+.new-run-toggle { margin: 6px 0; min-height: 36px; }
+.analysis-options { padding: 10px 12px; border: 1px solid var(--workspace-border); border-radius: 7px; }
+.analysis-options summary { cursor: pointer; font-weight: 600; }
+.analysis-options summary span { margin-left: 8px; font-weight: 400; }
+.analysis-options .field-label { margin-top: 16px; }
+.sidebar-empty .text-button { display: block; margin-top: 8px; }
 .workbench-shell .settings-side .panel { margin-top: 0; }
 .settings-grid .setup-panel, .settings-side .source-panel { border-radius: 12px; }
 .settings-side .source-panel > video { display: block; width: 100%; aspect-ratio: 16 / 9; max-height: 320px; background: var(--workspace-video); object-fit: contain; }

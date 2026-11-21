@@ -124,7 +124,11 @@ async function useVideo(item: SourceImportSnapshot) {
     const raw = await api<unknown>(`/api/videos/${item.video_id}`)
     const video = sourceImportVideo(raw, item.video_id)
     // Recheck the current editor guard after the asynchronous read.
-    if (current(version) && props.canStart()) { end(version); emit('complete', video); notice.value = '已选择导入的视频。请在创建分析中核对配置，再开始分析。' }
+    if (current(version) && props.canStart()) {
+      end(version)
+      expanded.value = false
+      emit('complete', video)
+    }
   } catch (value) { if (current(version)) error.value = sourceImportErrorText(value) }
   finally { end(version) }
 }

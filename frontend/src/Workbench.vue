@@ -12,15 +12,20 @@ import SourceImportPanel from './SourceImportPanel.vue'
 import FailureDiagnostic from './FailureDiagnostic.vue'
 import TextRequestProgress from './TextRequestProgress.vue'
 import ExecutorStatus from './ExecutorStatus.vue'
+import VideoAliasEditor from './VideoAliasEditor.vue'
+import { createVideoAliases, videoSearchName } from './videoAliases'
 import { DEFAULT_OCR_MAX_FRAMES, newAnalysisConfig, samplingLabel } from './sampling'
 import { SnapshotError, SnapshotStream, isAnalysisTerminal, parseAnalysisSnapshot, streamLabels, type StreamMode } from './snapshotStream'
 import { analysisCanResume, analysisResumeReceipt, analysisRetryExplanation, newestAnalysisSnapshot, parseResumedAnalysisSnapshot, type AnalysisResumeReceipt } from './analysisResume'
 import { DetailRecovery, isConnectionErrorCode } from './connectionRecovery'
-import { workbenchTasks, type TaskListScope } from './workbenchTasks'
+import { continuationForVideo, workbenchTasks, type TaskListScope } from './workbenchTasks'
 import './style.css'
 import './workbench.css'
 
 const videos = ref<VideoAsset[]>([]), jobs = ref<AnalysisJob[]>([])
+const videoAliases = createVideoAliases(() => window.localStorage)
+watch(() => videos.value.map(video => video.id), ids => videoAliases.load(ids), { flush: 'sync' })
+function videoStorageChanged(event: StorageEvent) { videoAliases.storageChanged(event.key) }
 const selectedVideoId = ref(''), selectedJob = ref<AnalysisJob | null>(null)
 const pending = ref(''), errorMessage = ref(''), listConnectionError = ref(''), detailConnectionError = ref(''), notice = ref('')
 const connectionError = computed(() => detailConnectionError.value || listConnectionError.value)
@@ -39,6 +44,9 @@ const activeTab = ref<WorkbenchTab>('task'), mobileTasksOpen = ref(false)
 const compactLayout = ref(window.matchMedia('(max-width: 1100px)').matches)
 const sidebarCollapsed = ref(new URL(location.href).searchParams.has('job'))
 const taskListScope = ref<TaskListScope>('recent')
+const newRunSettings = ref(false)
+const continuation = computed(() => continuationForVideo(jobs.value, selectedVideoId.value))
+watch(selectedVideoId, () => { newRunSettings.value = false })
 const taskListExpanded = computed(() => compactLayout.value ? mobileTasksOpen.value : !sidebarCollapsed.value)
 const compactQuery = window.matchMedia('(max-width: 1100px)')
 function updateCompactLayout() {
@@ -95,7 +103,7 @@ const stageOrder = ['MEDIA', 'ASR', 'SEGMENT', 'TIMELINE']
 const orderedStages = computed(() => [...(selectedJob.value?.stages ?? [])].sort((a, b) => stageOrder.indexOf(a.stage_type) - stageOrder.indexOf(b.stage_type)))
 const activeCount = computed(() => jobs.value.filter(j => ['QUEUED', 'RUNNING'].includes(j.status)).length)
 const reviewCount = computed(() => jobs.value.filter(j => j.status === 'REVIEW_READY').length)
-const visibleJobs = computed(() => workbenchTasks(jobs.value, taskListScope.value, query.value, filter.value, videoName))
+const visibleJobs = computed(() => workbenchTasks(jobs.value, taskListScope.value, query.value, filter.value, videoSearchText))
 const currentVideo = computed(() => videos.value.find(v => v.id === (selectedJob.value?.video_id || selectedVideoId.value)))
 const topicMode = computed(() => selectedJob.value?.config?.analysis_mode === 'topics')
 const completeCount = computed(() => selectedJob.value?.stages.filter(s => ['SUCCEEDED', 'SKIPPED'].includes(s.status)).length ?? 0)
@@ -125,7 +133,7 @@ function tabKey(event: KeyboardEvent) {
 function openNewAnalysis() {
   closeTasks()
   selectVideo()
-  if (!selectedJob.value) { activeTab.value = 'task'; closeTasks() }
+  if (!selectedJob.value) { activeTab.value = 'task'; newRunSettings.value = true; closeTasks() }
 }
 function openTask(id: string) {
   closeTasks()
@@ -171,7 +179,9 @@ function adoptHttpSnapshot(snapshot: AnalysisJob) {
     if (accepted) applySelectedSnapshot(accepted)
   }
 }
-function videoName(id: string) { return videos.value.find(v => v.id === id)?.original_filename ?? `视频 ${id.slice(0, 8)}` }
+function originalVideoName(id: string) { return videos.value.find(v => v.id === id)?.original_filename ?? `视频 ${id.slice(0, 8)}` }
+function videoName(id: string) { return videoAliases.names.get(id) || originalVideoName(id) }
+function videoSearchText(id: string) { return videoSearchName(originalVideoName(id), videoAliases.names.get(id)) }
 function stageLabel(type: string) {
   if (selectedJob.value?.resumed_from_job_id && type === 'MEDIA') return '复用音频'
   if (selectedJob.value?.resumed_from_job_id && type === 'ASR') return '复用语音转写'
@@ -219,6 +229,9 @@ async function loadDetail(id: string, background = false, allowPending = false) 
     if (stopped || version !== selectionVersion || !canSelect(id, allowPending)) return
     const result = parseAnalysisSnapshot(raw, id)
     adoptHttpSnapshot(result)
+    if (!background) {
+      try { localStorage.setItem('livecut.last-video', result.video_id) } catch { /* optional local preference */ }
+    }
     const url = new URL(location.href); url.searchParams.set('job', id); history.replaceState({}, '', url)
     if (!videos.value.some(v => v.id === result.video_id)) {
       const video = await api<VideoAsset>(`/api/videos/${encodeURIComponent(result.video_id)}`)
@@ -257,7 +270,11 @@ async function refresh() {
     videos.value = videoPage.items
     if (selected && !videos.value.some(v => v.id === selected.id)) videos.value.push(selected)
     jobs.value = jobPage.items.map(item => latestSnapshot(parseAnalysisSnapshot(item, item.id))); online.value = true; listConnectionError.value = ''
-    if (!selectedVideoId.value && videos.value[0]) selectedVideoId.value = videos.value[0].id
+    if (!selectedVideoId.value && videos.value[0]) {
+      let previous = ''
+      try { previous = localStorage.getItem('livecut.last-video') ?? '' } catch { /* optional local preference */ }
+      selectedVideoId.value = videos.value.find(video => video.id === previous)?.id ?? videos.value[0].id
+    }
     if (selectedAtStart && selectedJob.value?.id === selectedAtStart && selectionVersion === versionAtStart) {
       const snapshot = jobs.value.find(job => job.id === selectedAtStart)
       if (snapshot) adoptHttpSnapshot(snapshot)
@@ -286,6 +303,7 @@ function selectVideo() {
   }
   detailRecovery.cancel(); detailConnectionError.value = ''
   selectedJob.value = null; selectionVersion++; taskStream.select(null)
+  newRunSettings.value = false
   const url = new URL(location.href); url.searchParams.delete('job'); history.replaceState({}, '', url)
 }
 function canStartUpload() {
@@ -315,7 +333,9 @@ async function uploaded(video: VideoAsset) {
   // A delayed upload must not replace a task the user opened or edited while it ran.
   if (selectionVersion === uploadSelectionVersion && !editorsDirty.value && !editorsPending.value) {
     selectedVideoId.value = video.id; selectVideo()
-    notice.value = '视频已保存，可以创建分析任务。'
+    activeTab.value = 'task'
+    notice.value = '已选用该视频，可以继续已有分析或创建分析。'
+    void nextTick(() => document.getElementById('source-video')?.focus())
   } else notice.value = '视频已保存。当前审核和任务选择保持不变，可在视频来源中选择新视频。'
   await refresh()
 }
@@ -409,20 +429,21 @@ async function action(kind: 'cancel' | 'retry') {
   finally { pending.value = '' }
 }
 onMounted(async () => {
+  window.addEventListener('storage', videoStorageChanged)
   compactQuery.addEventListener('change', updateCompactLayout)
   const id = new URL(location.href).searchParams.get('job'), initialVersion = selectionVersion
   await refresh()
   if (!stopped && selectionVersion === initialVersion && id && /^[0-9a-f-]{36}$/i.test(id)) await loadDetail(id)
   if (!stopped) timer = window.setInterval(() => { if (!document.hidden) void refresh() }, 15000)
 })
-onUnmounted(() => { stopped = true; compactQuery.removeEventListener('change', updateCompactLayout); detailRecovery.cancel(); selectionVersion++; window.clearInterval(timer); taskStream.dispose() })
+onUnmounted(() => { stopped = true; window.removeEventListener('storage', videoStorageChanged); compactQuery.removeEventListener('change', updateCompactLayout); detailRecovery.cancel(); selectionVersion++; window.clearInterval(timer); taskStream.dispose() })
 </script>
 
 <template>
   <div class="workbench-shell" :class="{ 'sidebar-collapsed': sidebarCollapsed }" @keydown.esc="closeTasks">
     <button v-if="mobileTasksOpen" class="task-backdrop" aria-label="关闭任务列表" @click="closeTasks"></button>
     <aside id="workbench-tasks" class="workbench-sidebar" :class="{ open: mobileTasksOpen }" :role="compactLayout && mobileTasksOpen ? 'dialog' : undefined" :aria-modal="compactLayout && mobileTasksOpen ? true : undefined" aria-label="视频与分析任务" @keydown="taskDrawerKey">
-      <a class="brand" href="/" aria-label="LiveCut AI 首页" @click.prevent="openNewAnalysis">
+      <a class="brand" href="/" aria-label="LiveCut AI 首页" @click.prevent="selectVideo(); closeTasks()">
         <span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M8 5v14m4-10 5 3-5 3Z"/></svg></span>
         <strong>LiveCut <span>AI</span></strong>
       </a>
@@ -435,8 +456,9 @@ onUnmounted(() => { stopped = true; compactQuery.removeEventListener('change', u
       <select v-model="filter" class="sidebar-filter" aria-label="筛选任务状态"><option value="ALL">全部状态</option><option value="RUNNING">正在分析</option><option value="QUEUED">等待执行</option><option value="REVIEW_READY">待人工审核</option><option value="FAILED">执行失败</option><option value="CANCELLED">已取消</option></select>
       </div><p class="task-list-caption">{{ query.trim() ? '搜索覆盖全部历史分析' : taskListScope === 'recent' ? '每个视频只显示最近一次分析' : '保留每一次分析与处理结果' }}</p>
       <div v-if="loading" class="sidebar-empty">正在读取任务…</div>
-      <div v-else-if="!visibleJobs.length" class="sidebar-empty">{{ jobs.length ? '没有匹配的任务' : '暂无分析任务' }}</div>
-      <div v-else class="task-list" aria-label="分析任务列表"><button v-for="job in visibleJobs" :key="job.id" class="task-row" :class="{ active: selectedJob?.id === job.id }" :aria-current="selectedJob?.id === job.id ? 'true' : undefined" :disabled="!!pending" @click="openTask(job.id)"><span class="video-tile" aria-hidden="true"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M8 5v14l11-7Z"/></svg></span><span class="task-info"><strong :title="videoName(job.video_id)">{{ videoName(job.video_id) }}</strong><span>第 {{ job.generation }} 次分析 · {{ date(job.created_at) }}</span><span class="task-row-bottom"><span class="status" :class="job.status.toLowerCase()">{{ names[job.status] ?? job.status }}</span><small>#{{ job.id.slice(0, 8) }}</small></span></span></button></div>
+      <div v-else-if="!visibleJobs.length" class="sidebar-empty">{{ jobs.length ? '没有匹配的任务' : '暂无分析任务' }}
+        <button v-if="query || filter !== 'ALL'" class="text-button" @click="query = ''; filter = 'ALL'">清除筛选</button></div>
+      <div v-else class="task-list" aria-label="分析任务列表"><button v-for="job in visibleJobs" :key="job.id" class="task-row" :class="{ active: selectedJob?.id === job.id }" :aria-current="selectedJob?.id === job.id ? 'true' : undefined" :disabled="!!pending" @click="openTask(job.id)"><span class="video-tile" aria-hidden="true"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M8 5v14l11-7Z"/></svg></span><span class="task-info"><strong :title="videoSearchText(job.video_id)">{{ videoName(job.video_id) }}</strong><span>第 {{ job.generation }} 次分析 · {{ date(job.created_at) }}</span><span class="task-row-bottom"><span class="status" :class="job.status.toLowerCase()">{{ names[job.status] ?? job.status }}</span><small>#{{ job.id.slice(0, 8) }}</small></span></span></button></div>
       <div class="sidebar-footer"><span>本地工作区</span><span>{{ videos.length }} 个视频素材</span></div>
     </aside>
     <main class="workbench-main" :inert="compactLayout && mobileTasksOpen ? true : undefined">
@@ -444,7 +466,7 @@ onUnmounted(() => { stopped = true; compactQuery.removeEventListener('change', u
       <header class="workbench-header">
         <button id="workbench-task-toggle" class="mobile-task-toggle secondary" :aria-label="taskListExpanded ? '收起任务列表' : '打开任务列表'" :title="taskListExpanded ? '收起任务列表' : '打开任务列表'" :aria-expanded="taskListExpanded" aria-controls="workbench-tasks" @click="toggleTasks"><svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16M13 9h4M13 13h4"/></svg><span>任务列表</span></button>
         <span class="header-divider" aria-hidden="true"></span>
-        <div class="current-video"><h1 :title="selectedJob ? videoName(selectedJob.video_id) : ''">{{ selectedJob ? videoName(selectedJob.video_id) : '新建视频分析' }}</h1><div class="current-video-meta"><p v-if="selectedJob">第 {{ selectedJob.generation }} 次分析<span v-if="!resultsAvailable" class="header-stage-progress">{{ completeCount }}/{{ selectedJob.stages.length }} 阶段完成</span></p><div class="header-state"><span v-if="selectedJob" class="status" :class="selectedJob.status.toLowerCase()">{{ resultsAvailable ? '解析完成' : names[selectedJob.status] ?? selectedJob.status }}</span><span class="connection"><i :class="{ online }"></i>{{ online ? '服务已连接' : '服务未连接' }}</span></div></div></div>
+        <div class="current-video"><VideoAliasEditor v-if="currentVideo" :key="currentVideo.id" :original="currentVideo.original_filename" :alias="videoAliases.names.get(currentVideo.id) || ''" :temporary="videoAliases.temporary.has(currentVideo.id)" @save="videoAliases.save(currentVideo.id, $event)" /><h1 v-else>{{ selectedJob ? videoName(selectedJob.video_id) : '剪辑工作台' }}</h1><div class="current-video-meta"><p v-if="selectedJob">第 {{ selectedJob.generation }} 次分析<span v-if="!resultsAvailable" class="header-stage-progress">{{ completeCount }}/{{ selectedJob.stages.length }} 阶段完成</span></p><div class="header-state"><span v-if="selectedJob" class="status" :class="selectedJob.status.toLowerCase()">{{ resultsAvailable ? '解析完成' : names[selectedJob.status] ?? selectedJob.status }}</span><span class="connection"><i :class="{ online }"></i>{{ online ? '服务已连接' : '服务未连接' }}</span></div></div></div>
       </header>
       <div class="workspace-tabs" role="tablist" aria-label="视频工作区" @keydown="tabKey">
         <button id="workbench-tab-clips" role="tab" aria-controls="workbench-pane-clips" :aria-selected="activeTab === 'clips'" :tabindex="activeTab === 'clips' ? 0 : -1" :disabled="!topicResultsAvailable" @click="setTab('clips')"><svg class="workspace-tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="m8.5 7.5 12 13m-12-4 12-13"/></svg>按需剪辑<span v-if="intentEditor?.dirty" class="draft-dot" aria-label="有未提交修改"></span></button>
@@ -473,24 +495,26 @@ onUnmounted(() => { stopped = true; compactQuery.removeEventListener('change', u
         </div>
         <div id="workbench-pane-task" v-show="activeTab === 'task'" class="workbench-pane task-pane" role="tabpanel" aria-labelledby="workbench-tab-task"><div class="settings-grid">
           <section class="panel setup-panel">
-            <div v-if="selectedJob || videos.length" class="panel-heading"><h2>{{ selectedJob ? '任务详情' : '分析设置' }}</h2><span v-if="selectedJob" class="subtle-number">{{ streamLabels[streamMode] }} · #{{ selectedJob.id.slice(0, 8) }}</span></div>
+            <div v-if="selectedJob || videos.length" class="panel-heading"><h2>{{ selectedJob ? '任务详情' : '选择视频' }}</h2><span v-if="selectedJob" class="subtle-number">{{ streamLabels[streamMode] }} · #{{ selectedJob.id.slice(0, 8) }}</span></div>
             <div class="setup-body">
-              <div v-if="!videos.length && !selectedJob" class="source-upload-empty">
+              <div v-if="loading && !videos.length" class="source-upload-empty" role="status"><p>正在读取视频素材…</p></div>
+              <div v-else-if="!videos.length && !selectedJob" class="source-upload-empty">
                 <h2>从一段视频开始</h2>
                 <p>导入本地 MP4 或公开视频链接。分析完成后，可按话题浏览、查找原句或剪成片段。</p>
                 <div class="source-empty-actions"><button class="primary" :disabled="!!pending" @click="chooseUpload">上传本地视频</button><button class="secondary" :disabled="!!pending" @click="chooseSourceImport">从链接导入</button></div>
               </div>
               <template v-else>
-                <label class="field-label" for="source-video">视频来源</label><select id="source-video" v-model="selectedVideoId" :disabled="!!pending" @change="selectVideo"><option value="" disabled>选择视频素材</option><option v-for="video in videos" :key="video.id" :value="video.id">{{ video.original_filename }}</option></select>
+                <label class="field-label" for="source-video">视频来源</label><select id="source-video" v-model="selectedVideoId" :disabled="!!pending" @change="selectVideo"><option value="" disabled>选择视频素材</option><option v-for="video in videos" :key="video.id" :value="video.id">{{ videoSearchName(video.original_filename, videoAliases.names.get(video.id)) }}</option></select>
               </template>
               <template v-if="selectedJob">
                 <p class="help" aria-label="画面取证策略">{{ samplingLabel(selectedJob.config) }}</p>
                 <p v-if="selectedJob.resumed_from_job_id" class="help">本次分析继续自任务 #{{ selectedJob.resumed_from_job_id.slice(0, 8) }}。将复用已完成的音频与转写，不新增 ASR 请求；文本分析与预算独立。</p>
                 <div class="detail-status"><span class="status" :class="selectedJob.status.toLowerCase()">{{ names[selectedJob.status] ?? selectedJob.status }}</span><span>{{ completeCount }} / {{ selectedJob.stages.length }} 阶段完成</span></div>
                 <progress v-if="selectedJob.stages.length" class="stage-progress" :value="completeCount" :max="selectedJob.stages.length" aria-label="分析阶段完成进度"></progress>
+                <button v-if="resultsAvailable" class="primary create-button" @click="setTab(topicMode ? 'clips' : 'topics')">{{ topicMode ? '进入按需剪辑' : '打开片段审核' }} →</button>
                 <ol class="stages"><li v-for="(stage, index) in orderedStages" :key="stage.id" :class="stage.status.toLowerCase()"><span class="step">{{ stage.status === 'SUCCEEDED' ? '✓' : index + 1 }}</span><div><b>{{ stageLabel(stage.stage_type) }}</b><small>{{ names[stage.status] ?? stage.status }}<template v-if="stage.attempt"> · 第 {{ stage.attempt }} 次执行</template></small><TextRequestProgress v-if="stage.stage_type === 'SEGMENT'" :progress="stage.text_progress" :terminal="['SUCCEEDED', 'FAILED', 'CANCELLED', 'SKIPPED'].includes(stage.status)" /><FailureDiagnostic :diagnostic="stage.diagnostic" :error-code="stage.error_code" :attempt="stage.attempt" /></div></li></ol>
                 <div class="budget"><span>已预留模型请求</span><b>文本 {{ selectedJob.budget.text_calls_reserved }}/{{ selectedJob.budget.max_text_calls }} <i>·</i> ASR {{ selectedJob.budget.asr_calls_reserved }}/{{ selectedJob.budget.max_asr_submissions }}</b><small>次数上限，不代表人民币费用</small></div>
-                <p v-if="selectedJob.status === 'REVIEW_READY'" class="review-note">自动结果已就绪。请前往“话题切分”核对内容与边界，勾选需要切分的片段，再保存并确认。</p>
+
                 <p v-if="selectedJob.status === 'FAILED' && !selectedJob.actions?.can_retry" class="help" role="status">{{ retryExplanation }}</p>
                 <p v-else-if="selectedJob.actions?.can_retry" class="help">重试仅恢复失败阶段，每阶段最多执行 {{ selectedJob.actions.max_attempts }} 次；模型请求仍受本任务原预算限制。</p>
                 <div v-if="selectedJob.actions?.can_resume_from_asr" class="analysis-recovery">
@@ -500,19 +524,28 @@ onUnmounted(() => { stopped = true; compactQuery.removeEventListener('change', u
                 </div>
                 <p v-else-if="selectedJob.actions?.resume_from_asr_block_reason === 'PREPARATION_NOT_READY'" class="help">原任务的音频或转写尚未完成，暂时无法复用转写重新分析。</p>
                 <p v-else-if="selectedJob.actions?.resume_from_asr_block_reason === 'PREPARATION_SOURCE_INVALID'" class="help">原任务的音频或转写来源校验未通过，暂时无法复用，请检查源文件与已保存产物。</p>
-                <div class="actions"><button v-if="selectedJob.actions?.can_cancel" class="secondary" :disabled="!!pending" @click="action('cancel')">取消任务</button><button v-if="selectedJob.actions?.can_retry" class="secondary" :disabled="!!pending" @click="action('retry')">重试失败阶段</button><button class="text-button" :disabled="!!pending || editorsDirty || editorsPending" @click="selectVideo">新建一次分析 →</button></div>
+                <div class="actions"><button v-if="selectedJob.actions?.can_cancel" class="secondary" :disabled="!!pending" @click="action('cancel')">取消任务</button><button v-if="selectedJob.actions?.can_retry" class="secondary" :disabled="!!pending" @click="action('retry')">重试失败阶段</button><button class="text-button" :disabled="!!pending || editorsDirty || editorsPending" @click="openNewAnalysis">新建一次分析 →</button></div>
                 <p class="help">“新建一次分析”会从头处理视频，并重新提交 ASR。</p>
               </template>
               <template v-else-if="videos.length">
-                <p class="help">AI 从转写中识别连续话题，生成标题、摘要与时间区间。解析后由你勾选并调整。</p>
+                <div v-if="continuation" class="continue-analysis">
+                  <div><h3>{{ continuation.status === 'REVIEW_READY' ? '这段视频已经解析完成' : '这段视频正在分析' }}</h3>
+                    <p>第 {{ continuation.generation }} 次分析 · {{ date(continuation.created_at) }}</p></div>
+                  <button class="primary" :disabled="!!pending" @click="openTask(continuation.id)">{{ continuation.status === 'REVIEW_READY' ? (continuation.config?.analysis_mode === 'topics' ? '继续剪辑' : '继续审核') : '查看进度' }} →</button>
+                </div>
+                <button v-if="continuation" class="text-button new-run-toggle" :aria-expanded="newRunSettings" aria-controls="analysis-new-settings" @click="newRunSettings = !newRunSettings">{{ newRunSettings ? '收起新分析设置' : '重新分析此视频' }}</button>
+                <div v-if="!continuation || newRunSettings" id="analysis-new-settings">
+                <p class="help">{{ continuation ? '新分析会重新提交语音转写。' : '开始分析后，可从原句选片、调整剪点并导出。' }}</p>
+                <details class="analysis-options"><summary>分析选项 <span>{{ visualProvider === 'ocr' ? '语音 + 画面文字' : '语音转写' }} · 文本上限 {{ maxTextCalls }} 次</span></summary>
                 <label class="field-label" for="visual-provider">画面证据</label><select id="visual-provider" v-model="visualProvider"><option value="ocr">本地 OCR · 识别画面文字</option><option value="none">仅使用语音转写</option></select>
                 <template v-if="visualProvider === 'ocr'">
                   <label class="field-label" for="ocr-frame-budget">画面取样上限</label><div class="number-field"><input id="ocr-frame-budget" v-model.number="maxOcrFrames" type="number" min="1" max="120" step="1"><span>帧 / 本次分析</span></div>
                   <p class="help">按视频时长在整段取样，用画面文字辅助语音判断。提高上限会增加本地识别耗时，也可能增加模型输入；取样不代表全程视觉核验。</p>
                 </template>
                 <label class="field-label" for="text-budget">文本请求上限</label><div class="number-field"><input id="text-budget" v-model.number="maxTextCalls" type="number" min="1" max="100" step="1"><span>次 / 本次分析</span></div><p class="help">每 10 分钟语音窗口通常需要 1 次文本请求，格式修复最多再请求 1 次。短暂服务故障会自动恢复，恢复请求也计入次数。默认上限 24 次；超长视频可提高。ASR 默认最多提交 1 次。</p>
-                <button class="primary create-button" :disabled="!selectedVideoId || !!pending || !online" @click="createJob">{{ pending === 'create' ? '正在创建…' : '创建分析任务' }} <span>→</span></button>
+                </details><button class="primary create-button" :disabled="!selectedVideoId || !!pending || !online" @click="createJob">{{ pending === 'create' ? '正在创建…' : '创建分析任务' }} <span>→</span></button>
                 <p class="footnote">关闭页面后，任务仍在后台运行。</p>
+                </div>
               </template>
             </div>
           </section>
