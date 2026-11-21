@@ -1,15 +1,15 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { filmstripTimes, readFilmstrip } from './filmstrip'
+import { filmstripCellCount, filmstripTimes, readFilmstrip } from './filmstrip'
 import type { SequencePreviewPart } from './sequencePreview'
 
-const props = defineProps<{ url: string; parts: readonly SequencePreviewPart[]; fromMs: number; toMs: number }>()
+const props = defineProps<{ url: string; parts: readonly SequencePreviewPart[]; fromMs: number; toMs: number; sourceAspect: number }>()
 const emit = defineEmits<{ cover: [url: string, image: string] }>()
-const el = ref<HTMLElement | null>(null), width = ref(0), visible = ref(false), pageVisible = ref(!document.hidden)
-const count = computed(() => Math.min(12, Math.max(3, Math.round(width.value / 96))))
+const el = ref<HTMLElement | null>(null), size = ref({ width: 0, height: 0 }), visible = ref(false), pageVisible = ref(!document.hidden)
+const count = computed(() => filmstripCellCount(size.value.width, size.value.height, props.sourceAspect))
 const times = computed(() => filmstripTimes(props.parts, props.fromMs, props.toMs, count.value))
 const images = ref<string[]>([])
-let observer: IntersectionObserver | undefined, size: ResizeObserver | undefined
+let observer: IntersectionObserver | undefined, resize: ResizeObserver | undefined
 function visibility() { pageVisible.value = !document.hidden }
 watch([() => props.url, () => times.value.join(','), visible, pageVisible], ([url, signature, inView, shown], _, cleanup) => {
   images.value = []
@@ -27,11 +27,14 @@ watch([() => props.url, () => times.value.join(','), visible, pageVisible], ([ur
 }, { flush: 'sync' })
 onMounted(() => {
   if (!el.value) return
-  size = new ResizeObserver(entries => { width.value = entries[0]?.contentRect.width ?? 0 }); size.observe(el.value)
+  resize = new ResizeObserver(([entry]) => {
+    if (entry) size.value = { width: entry.contentRect.width, height: entry.contentRect.height }
+  })
+  resize.observe(el.value)
   observer = new IntersectionObserver(entries => { visible.value = !!entries[0]?.isIntersecting }); observer.observe(el.value)
   document.addEventListener('visibilitychange', visibility)
 })
-onBeforeUnmount(() => { size?.disconnect(); observer?.disconnect(); document.removeEventListener('visibilitychange', visibility) })
+onBeforeUnmount(() => { resize?.disconnect(); observer?.disconnect(); document.removeEventListener('visibilitychange', visibility) })
 </script>
 <template>
   <div ref="el" class="frame-strip" aria-hidden="true">

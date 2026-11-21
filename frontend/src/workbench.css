@@ -279,7 +279,7 @@
 .asset-card:hover { background:var(--studio-raised); }
 .asset-card.chosen { border-color:#42605b; background:#202d2c; }
 .asset-preview { width:65px; height:44px; display:grid; place-items:center; flex:none; background:var(--studio-well); border-radius:3px; overflow:hidden; }
-.asset-preview img { width:100%; height:100%; object-fit:cover; }
+.asset-preview img { width:100%; height:100%; object-fit:contain; }
 .asset-preview svg { width:24px; height:24px; fill:none; stroke:var(--workspace-muted); stroke-width:1.4; }
 .asset-label { display:grid; min-width:0; gap:3px; }
 .asset-label strong { font-size:12px; font-weight:550; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }

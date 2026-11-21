@@ -105,7 +105,7 @@ onBeforeUnmount(() => { player.value?.pause(); document.removeEventListener('vis
       <template v-if="duration && video">
         <div class="ruler"><span v-for="(tick, i) in ticks" :key="i">{{ tick }}</span></div>
         <div class="film-row" :style="{ '--head': percent + '%' }">
-          <FrameStrip v-if="active" :url="video.content_url" :parts="parts" :from-ms="0" :to-ms="duration" @cover="(url, img) => emit('cover', url, img)" />
+          <FrameStrip v-if="active" :url="video.content_url" :source-aspect="height ? width / height : 0" :parts="parts" :from-ms="0" :to-ms="duration" @cover="(url, img) => emit('cover', url, img)" />
           <div class="clip-name">{{ video.original_filename }}</div>
           <span class="playhead" aria-hidden="true"></span>
           <input type="range" min="0" :max="duration" step="1" :value="at" aria-label="原片播放位置" :aria-valuetext="topicTime(at)" @input="seek(($event.target as HTMLInputElement).valueAsNumber)">

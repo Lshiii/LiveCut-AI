@@ -206,7 +206,8 @@ onBeforeUnmount(() => {
             <button v-if="joinAfter" class="secondary" :disabled="!ready || invalidInput || working" @click="listenJoin">试听第 {{ joinAfter.partIndex }} 个剪点</button></div>
         </section>
         <section class="fine-timeline" aria-label="精剪成片时间线">
-          <CutScrubber :parts="cuts" :position-ms="cursor" :video-url="active ? videoUrl : ''" :disabled="working || invalidInput" @seek="seek" />
+          <CutScrubber :parts="cuts" :position-ms="cursor" :video-url="active ? videoUrl : ''"
+            :source-aspect="ready && player?.videoHeight ? player.videoWidth / player.videoHeight : 0" :disabled="working || invalidInput" @seek="seek" />
         </section>
         <section v-if="current && original" class="fine-inspector" aria-label="调整片段">
           <label class="fine-segment">调整片段 <select :value="selected" :disabled="working || invalidInput" @change="choose(Number(($event.target as HTMLSelectElement).value))">

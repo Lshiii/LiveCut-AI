@@ -5,7 +5,7 @@ import { topicTime } from './topics'
 import FrameStrip from './FrameStrip.vue'
 import type { SequencePreviewPart } from './sequencePreview'
 
-const props = defineProps<{ parts: readonly SequencePreviewPart[]; positionMs: number | null; disabled?: boolean; videoUrl?: string }>()
+const props = defineProps<{ parts: readonly SequencePreviewPart[]; positionMs: number | null; disabled?: boolean; videoUrl?: string; sourceAspect?: number }>()
 const emit = defineEmits<{ seek: [editMs: number] }>()
 const track = ref<HTMLElement | null>(null), hintId = useId()
 const spans = computed(() => editSpans(props.parts))
@@ -123,7 +123,7 @@ onBeforeUnmount(release)
       :aria-valuenow="position ?? start" :aria-valuetext="current ? '成片 ' + topicTime(position!) + '，原片 ' + topicTime(current.sourceMs) : '原片位置在保留区间外'"
       :aria-describedby="hintId" @keydown="keydown" @pointerdown="begin" @pointermove="dragTo" @pointerup="finish"
       @pointercancel="finish" @lostpointercapture="finish">
-      <FrameStrip v-if="videoUrl" :url="videoUrl" :parts="parts" :from-ms="start" :to-ms="end" />
+      <FrameStrip v-if="videoUrl" :url="videoUrl" :source-aspect="sourceAspect ?? 0" :parts="parts" :from-ms="start" :to-ms="end" />
       <span v-for="part in viewportSegments" :key="part.index" aria-hidden="true" class="scrub-segment"
         :class="{ alternate: part.index % 2, current: current?.partIndex === part.index }"
         :style="{ left: part.left + '%', width: part.width + '%' }"><span v-if="part.width >= 13">第 {{ part.index + 1 }} 段</span></span>

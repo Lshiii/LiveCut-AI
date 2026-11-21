@@ -185,7 +185,8 @@ onBeforeUnmount(() => { stopped = true; document.removeEventListener('visibility
             <button class="secondary paper-play" :disabled="!enabled || !ready" @click="playDraft">{{ playback?.id === 'paper-cut' ? '停止试听' : cursor && cursor < cut.durationMs ? '从游标试听' : '试听草稿' }}</button>
           </div>
           <p class="paper-delta" role="status">{{ cut.parts.length }} 段 · 已剪掉 {{ history.removed.size }} 句 · 缩短 {{ topicTime(source.originalDurationMs - cut.durationMs) }}</p>
-          <CutScrubber :parts="cut.parts" :position-ms="cursor" :video-url="enabled ? videoUrl : ''" :disabled="!enabled || !ready" @seek="seekDraft" />
+          <CutScrubber :parts="cut.parts" :position-ms="cursor" :video-url="enabled ? videoUrl : ''"
+            :source-aspect="ready && player?.videoHeight ? player.videoWidth / player.videoHeight : 0" :disabled="!enabled || !ready" @seek="seekDraft" />
           <p v-if="playback && playback.id !== 'paper-cut'" class="paper-now">{{ playback.id.startsWith('row:') ? '正在试听原句' : '正在试听删句建议' }}</p>
           <p v-if="mediaError" role="status">无法载入原视频。仍可按原句编辑。</p>
         </section>

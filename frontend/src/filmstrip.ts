@@ -1,10 +1,24 @@
 import { editSpans } from './editTimeline.ts'
 import type { SequencePreviewPart } from './sequencePreview.ts'
 
+const maxCells = 48
+
+/** Lay portraits closer together and keep the number of video seeks bounded on wide screens. */
+export function filmstripCellCount(width: number, height: number, sourceAspect: number) {
+  if (![width, height, sourceAspect].every(value => Number.isFinite(value) && value > 0)) return 0
+  const cellWidth = Math.max(32, height * sourceAspect)
+  return Math.min(maxCells, Math.max(1, Math.round(width / cellWidth)))
+}
+
+export function thumbnailSize(sourceWidth: number, sourceHeight: number) {
+  const scale = Math.min(1, 240 / Math.max(sourceWidth, sourceHeight))
+  return { width: Math.max(1, Math.round(sourceWidth * scale)), height: Math.max(1, Math.round(sourceHeight * scale)) }
+}
+
 /** Sample the visible edit in equal time cells. A thumbnail always comes from retained footage. */
 export function filmstripTimes(parts: readonly SequencePreviewPart[], from: number, to: number, count: number) {
   const spans = editSpans(parts)
-  if (!Number.isSafeInteger(count) || count < 1 || count > 12 || !Number.isSafeInteger(from)
+  if (!Number.isSafeInteger(count) || count < 1 || count > maxCells || !Number.isSafeInteger(from)
       || !Number.isSafeInteger(to) || from < 0 || to <= from || to > (spans.at(-1)?.editEndMs ?? 0)) return []
   return Array.from({ length: count }, (_, i) => {
     const at = from + Math.floor((to - from) * (i + .5) / count)
@@ -26,7 +40,6 @@ export async function readFilmstrip(url: string, times: readonly number[], signa
   publish: (index: number, image: string) => void) {
   let media: HTMLVideoElement | undefined
   const canvas = document.createElement('canvas')
-  canvas.width = 136; canvas.height = 76
   const ctx = canvas.getContext('2d')
   if (!ctx) return
   function waitFor(video: HTMLVideoElement, event: string, action: () => void) {
@@ -52,17 +65,18 @@ export async function readFilmstrip(url: string, times: readonly number[], signa
       if (!media) {
         media = document.createElement('video'); media.muted = true; media.playsInline = true; media.preload = 'metadata'
         await waitFor(media, 'loadedmetadata', () => { media!.src = url })
+        if (!media.videoWidth || !media.videoHeight) return
+        const size = thumbnailSize(media.videoWidth, media.videoHeight)
+        canvas.width = size.width
+        canvas.height = size.height
       }
       if (!Number.isFinite(media.duration) || ms >= media.duration * 1000) return
       if (media.currentTime !== ms / 1000 || media.readyState < 2) {
         await waitFor(media, 'seeked', () => { media!.currentTime = ms / 1000 })
       }
       if (signal.aborted || !media.videoWidth || !media.videoHeight) return
-      // Preserve portrait and letterboxed sources in the filmstrip.
-      const scale = Math.min(canvas.width / media.videoWidth, canvas.height / media.videoHeight)
-      const w = media.videoWidth * scale, h = media.videoHeight * scale
-      ctx.fillStyle = '#0b0d10'; ctx.fillRect(0, 0, canvas.width, canvas.height)
-      ctx.drawImage(media, (canvas.width - w) / 2, (canvas.height - h) / 2, w, h)
+      // Cache the full frame at its native aspect. Each timeline fits it to its own cell.
+      ctx.drawImage(media, 0, 0, canvas.width, canvas.height)
       const image = canvas.toDataURL('image/jpeg', .68)
       keep(key, image); publish(index, image)
     }
