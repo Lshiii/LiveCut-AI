@@ -85,13 +85,13 @@ onBeforeUnmount(() => { stopped = true; uploader.destroy() })
 </template>
 
 <style scoped>
-.upload-completed { display: flex; align-items: center; gap: 10px; min-width: 0; margin-bottom: 12px; padding: 8px 12px; border: 1px solid #dce8df; border-radius: 7px; background: #f4f8f5; color: #4b6956; font-size: 13px; line-height: 20px; }
+.upload-completed { display: flex; align-items: center; gap: 10px; min-width: 0; margin-bottom: 12px; padding: 8px 12px; border: 1px solid var(--workspace-border); border-radius: 7px; background: var(--workspace-accent-soft); color: var(--workspace-accent); font-size: 13px; line-height: 20px; }
 .upload-completed-label { flex: none; white-space: nowrap; }
 .upload-completed strong { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 500; }
 .upload-completed > button { flex: none; }
-.upload-completed .text-button { color: #526a5b; font-size: 12px; }
-.upload-completed-close { display: inline-flex; justify-content: center; align-items: center; width: 28px; height: 28px; padding: 0; background: none; border-radius: 4px; color: #64748b; font-size: 20px; }
-.upload-completed-close:hover { background: #e8efea; }
+.upload-completed .text-button { color: var(--workspace-accent); font-size: 12px; }
+.upload-completed-close { display: inline-flex; justify-content: center; align-items: center; width: 28px; height: 28px; padding: 0; background: none; border-radius: 4px; color: var(--workspace-muted); font-size: 20px; }
+.upload-completed-close:hover { background: var(--workspace-accent-soft); }
 @media (max-width: 420px) {
   .upload-completed { gap: 6px; padding-inline: 8px; font-size: 12px; }
   .upload-completed strong { font-size: 12px; }

@@ -2,9 +2,10 @@
 import { computed, onBeforeUnmount, ref, useId, watch } from 'vue'
 import { editSpans, editToSource } from './editTimeline'
 import { topicTime } from './topics'
+import FrameStrip from './FrameStrip.vue'
 import type { SequencePreviewPart } from './sequencePreview'
 
-const props = defineProps<{ parts: readonly SequencePreviewPart[]; positionMs: number | null; disabled?: boolean }>()
+const props = defineProps<{ parts: readonly SequencePreviewPart[]; positionMs: number | null; disabled?: boolean; videoUrl?: string }>()
 const emit = defineEmits<{ seek: [editMs: number] }>()
 const track = ref<HTMLElement | null>(null), hintId = useId()
 const spans = computed(() => editSpans(props.parts))
@@ -117,14 +118,15 @@ onBeforeUnmount(release)
     </div>
     <div class="scrub-scale" aria-hidden="true"><span>{{ topicTime(start) }}</span>
       <span v-if="windowMs > 1">{{ topicTime(start + Math.round(windowMs / 2)) }}</span><span>{{ topicTime(end) }}</span></div>
-    <div ref="track" class="scrub-track" role="slider" aria-label="成片播放位置" aria-orientation="horizontal"
+    <div ref="track" class="scrub-track" :class="{ 'has-frames': !!videoUrl }" role="slider" aria-label="成片播放位置" aria-orientation="horizontal"
       :tabindex="disabled ? -1 : 0" :aria-disabled="!!disabled" :aria-valuemin="0" :aria-valuemax="total"
       :aria-valuenow="position ?? start" :aria-valuetext="current ? '成片 ' + topicTime(position!) + '，原片 ' + topicTime(current.sourceMs) : '原片位置在保留区间外'"
       :aria-describedby="hintId" @keydown="keydown" @pointerdown="begin" @pointermove="dragTo" @pointerup="finish"
       @pointercancel="finish" @lostpointercapture="finish">
+      <FrameStrip v-if="videoUrl" :url="videoUrl" :parts="parts" :from-ms="start" :to-ms="end" />
       <span v-for="part in viewportSegments" :key="part.index" aria-hidden="true" class="scrub-segment"
         :class="{ alternate: part.index % 2, current: current?.partIndex === part.index }"
-        :style="{ left: part.left + '%', width: part.width + '%' }"><span v-if="part.width >= 13">{{ part.index + 1 }}</span></span>
+        :style="{ left: part.left + '%', width: part.width + '%' }"><span v-if="part.width >= 13">第 {{ part.index + 1 }} 段</span></span>
       <i v-if="cursorVisible" aria-hidden="true" class="scrub-cursor" :style="{ left: percent(position!) + '%' }"></i>
     </div>
     <div class="scrub-tools">
@@ -155,20 +157,23 @@ onBeforeUnmount(release)
 .scrub-time output,.scrub-time small,.scrub-source,.scrub-scale { font-family:var(--workspace-mono,monospace); font-variant-numeric:tabular-nums; }
 .scrub-time output { font-weight:600; }
 .scrub-source,.scrub-time small,.scrub-hint,.scrub-tools label,.scrub-scale { color:var(--workspace-muted,#675f56); font-size:.8rem; }
-.scrub-scale { display:flex; justify-content:space-between; margin-top:4px; gap:4px; }
-.scrub-track { position:relative; height:34px; margin:0 1px; cursor:crosshair; touch-action:none; user-select:none; background:#e5ded4; border-radius:3px; }
-.scrub-track:focus-visible,.scrub-tools :focus-visible { outline:2px solid var(--workspace-accent,#a94424); outline-offset:2px; }
+.scrub-scale { display:flex; justify-content:space-between; gap:4px; margin-top:4px; padding-bottom:8px; background:repeating-linear-gradient(90deg,var(--workspace-control-border) 0 1px,transparent 1px 2.5%) left bottom/100% 4px no-repeat; }
+.scrub-track { position:relative; height:34px; margin:0 1px; cursor:crosshair; touch-action:none; user-select:none; background:var(--studio-well); border-radius:4px; }
+.scrub-track.has-frames { height:clamp(42px,7.5vh,72px); }
+.scrub-track:focus-visible,.scrub-tools :focus-visible { outline:2px solid var(--workspace-accent); outline-offset:2px; }
 .scrub-track[aria-disabled='true'] { cursor:default; opacity:.65; }
-.scrub-segment { position:absolute; inset-block:3px; display:grid; place-items:center; overflow:hidden; background:#d8c8b5; color:#3e3227; box-shadow:inset 1px 0 #fff; pointer-events:none; font-size:.78rem; font-weight:600; }
-.scrub-segment.alternate { background:#c4b5a2; }
-.scrub-segment.current { background:#9a5031; color:#fff; }
-.scrub-cursor { pointer-events:none; position:absolute; inset-block:-2px; width:2px; background:#231b14; box-shadow:0 0 0 1px #fff; transform:translateX(-50%); }
-.scrub-cursor::before { content:''; position:absolute; left:50%; transform:translateX(-50%); top:0; border-inline:4px solid transparent; border-top:6px solid #231b14; }
+.scrub-segment { position:absolute; inset-block:0; display:flex; align-items:flex-start; overflow:hidden; background:#344944; color:#e4f4ef; border:1px solid #57766e; border-radius:3px; pointer-events:none; font-size:.78rem; font-weight:600; }
+.scrub-segment.alternate { background:#344149; border-color:#667780; }
+.scrub-segment.current { border-color:var(--workspace-accent); background:#28594f; }
+.has-frames .scrub-segment { background:transparent; border-width:1px 2px; }
+.scrub-segment > span { margin:3px; padding:0 4px; border-radius:2px; background:#101a19e8; color:#e6f2ef; }
+.scrub-cursor { pointer-events:none; position:absolute; inset-block:-4px; width:2px; background:var(--workspace-accent); transform:translateX(-50%); }
+.scrub-cursor::before { content:''; position:absolute; left:50%; transform:translateX(-50%); top:-2px; width:10px; height:9px; background:var(--workspace-accent); clip-path:polygon(0 0,100% 0,100% 50%,50% 100%,0 50%); }
 .scrub-tools { gap:4px 8px; }
 .scrub-tools:empty { display:none; }
 .scrub-tools label { gap:5px; }
 .scrub-zoom,.scrub-pan { gap:3px; }
-.scrub-tools button,.scrub-tools select { min-height:30px; min-width:30px; padding:2px 6px; border:1px solid var(--workspace-border,#d8cfc2); border-radius:4px; background:#fff; color:inherit; font:inherit; }
+.scrub-tools button,.scrub-tools select { min-height:30px; min-width:30px; padding:2px 6px; border:1px solid var(--workspace-border); border-radius:4px; background:var(--studio-raised); color:inherit; font:inherit; }
 .scrub-tools button:disabled { opacity:.48; }
 .scrub-hint { line-height:1.4; }
 @container (max-width:225px) { .scrub-scale > span:nth-child(2):not(:last-child) { visibility:hidden; width:0; overflow:hidden; } }

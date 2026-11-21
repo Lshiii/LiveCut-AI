@@ -19,8 +19,8 @@ onBeforeUnmount(() => { if (timer !== undefined) clearInterval(timer) })
 </template>
 
 <style scoped>
-.text-recovery { margin: 9px 0; border-left: 3px solid #96a981; padding: 9px 11px; background: #f3f6ef; color: #56684a; line-height: 1.7; overflow-wrap: anywhere; min-width: 0; }
+.text-recovery { margin: 9px 0; border-left: 3px solid var(--workspace-accent); padding: 9px 11px; background: var(--workspace-accent-soft); color: var(--workspace-accent); line-height: 1.7; overflow-wrap: anywhere; min-width: 0; }
 .text-recovery strong { display: block; font-size: 12px; font-weight: 600; }
 .text-recovery p { margin: 3px 0 0; font-size: 11px; }
-.text-recovery.exhausted { border-color: #dc9f70; background: #fcf4ed; color: #936541; }
+.text-recovery.exhausted { border-color: color-mix(in srgb, var(--studio-warning) 55%, var(--workspace-border)); background: color-mix(in srgb, var(--studio-warning) 12%, var(--workspace-surface)); color: var(--studio-warning); }
 </style>

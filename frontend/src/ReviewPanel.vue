@@ -165,57 +165,57 @@ onBeforeUnmount(() => { stopped = true; loadVersion++; player.value?.pause(); wi
 .review-fields { min-width: 0; margin: 0; padding: 0; border: 0; }
 .review-panel > .message { margin: 0 23px 20px; }
 .panel-heading .actions { margin: 0; }
-.review-video-layout { display: grid; grid-template-columns: 1fr 1fr; border-block: 1px solid #e4eadf; }
-.review-video-layout video { width: 100%; height: 300px; background: #202720; object-fit: contain; }
-.review-instructions { padding: 28px; font-size: 12px; line-height: 1.9; color: #647b58; }
-.review-instructions h3 { color: #485f40; font-size: 18px; font-weight: 500; }
+.review-video-layout { display: grid; grid-template-columns: 1fr 1fr; border-block: 1px solid var(--workspace-border); }
+.review-video-layout video { width: 100%; height: 300px; background: var(--workspace-video); object-fit: contain; }
+.review-instructions { padding: 28px; font-size: 12px; line-height: 1.9; color: var(--workspace-muted); }
+.review-instructions h3 { color: var(--workspace-muted); font-size: 18px; font-weight: 500; }
 .review-instructions p { margin: 12px 0; }
 .review-instructions small { font-size: 10px; }
-.review-count { margin: 18px 0 9px; } .review-count b { font-size: 24px; margin-right: 6px; color: #d77b51; }
-.review-timeline { position: relative; height: 30px; margin: 24px 23px 10px; background: #f0f3ec; border-radius: 5px; }
-.review-timeline button { position: absolute; height: 100%; background: #c6d8b9; border: 1px solid white; border-radius: 4px; }
-.review-timeline .disabled { background: #e6e9e1; } .review-timeline .focused { background: #e99b75; }
-.timeline-labels { display: flex; justify-content: space-between; margin: 0 23px 22px; color: #819374; font-size: 10px; }
-.products-editor { border-block: 1px solid #e4eadf; padding: 18px 23px; color: #667c59; font-size: 12px; }
+.review-count { margin: 18px 0 9px; } .review-count b { font-size: 24px; margin-right: 6px; color: var(--workspace-accent); }
+.review-timeline { position: relative; height: 30px; margin: 24px 23px 10px; background: var(--studio-raised); border-radius: 5px; }
+.review-timeline button { position: absolute; height: 100%; background: color-mix(in srgb, var(--workspace-accent) 45%, var(--studio-raised)); border: 1px solid var(--studio-well); border-radius: 4px; }
+.review-timeline .disabled { background: var(--studio-raised); } .review-timeline .focused { background: var(--workspace-accent); }
+.timeline-labels { display: flex; justify-content: space-between; margin: 0 23px 22px; color: var(--workspace-muted); font-size: 10px; }
+.products-editor { border-block: 1px solid var(--workspace-border); padding: 18px 23px; color: var(--workspace-muted); font-size: 12px; }
 .products-editor summary { cursor: pointer; }
 .product-edit-list { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-top: 18px; }
 .product-edit-list label { display: flex; align-items: center; gap: 8px; }
-.product-edit-list span { font-size: 10px; color: #90a383; }
-.product-edit-list input { width: 120px; padding: 7px; border: 1px solid #dbe5d4; border-radius: 4px; }
+.product-edit-list span { font-size: 10px; color: var(--workspace-muted); }
+.product-edit-list input { width: 120px; padding: 7px; border: 1px solid var(--workspace-control-border); border-radius: 4px; }
 .review-edit-layout { display: grid; grid-template-columns: minmax(0, 2fr) minmax(210px, 1fr); }
 .review-edit-layout > div { padding: 22px 23px; }
 .review-tools { display: flex; justify-content: space-between; gap: 12px; margin-bottom: 18px; }
 .review-tools select { max-width: 55%; }
-.segment-card { border: 1px solid #e3e9de; border-radius: 7px; padding: 15px; margin-bottom: 12px; }
-.segment-card.focused { border-color: #e4ac8d; background: #fefaf5; }
+.segment-card { border: 1px solid var(--workspace-border); border-radius: 7px; padding: 15px; margin-bottom: 12px; }
+.segment-card.focused { border-color: var(--workspace-accent); background: var(--workspace-accent-soft); }
 .segment-heading { display: flex; align-items: center; gap: 12px; font-size: 12px; }
 .segment-heading label { flex: 1; overflow-wrap: anywhere; }
-.segment-heading > span { font-size: 10px; color: #9aaa90; }
+.segment-heading > span { font-size: 10px; color: var(--workspace-muted); }
 .segment-inputs { display: grid; grid-template-columns: 1fr 1fr 1.2fr; gap: 12px; margin-top: 18px; }
-.segment-inputs label { font-size: 10px; color: #839776; min-width: 0; }
-.segment-inputs input, .segment-inputs select { width: 100%; padding: 8px; border: 1px solid #dde6d5; border-radius: 4px; font-size: 12px; margin-top: 7px; }
+.segment-inputs label { font-size: 10px; color: var(--workspace-muted); min-width: 0; }
+.segment-inputs input, .segment-inputs select { width: 100%; padding: 8px; border: 1px solid var(--workspace-control-border); border-radius: 4px; font-size: 12px; margin-top: 7px; }
 .segment-footer { display: flex; gap: 15px; align-items: center; margin-top: 14px; }
-.segment-footer > span { flex: 1; font-size: 10px; color: #92a282; }
-.prediction-risk { color: #b4895c; font-size: 10px; margin-top: 13px; overflow-wrap: anywhere; line-height: 1.8; }
-.evidence-panel { padding: 24px 20px; background: #f9fbf6; border-left: 1px solid #e4eadf; max-height: 900px; overflow: auto; }
-.evidence-panel h3 { font-size: 12px; font-weight: 500; color: #637e54; margin-bottom: 18px; }
-.evidence-panel h3 span { color: #9aaf8b; margin-left: 6px; font-size: 10px; }
-.utterance { display: block; width: 100%; text-align: left; background: none; padding: 12px 0; border-bottom: 1px solid #e8eee1; }
-.utterance span { color: #91a87e; font-size: 10px; } .utterance p { color: #697f5a; font-size: 12px; line-height: 1.9; margin-top: 7px; }
-.review-savebar { display: flex; align-items: center; gap: 12px; padding: 20px 23px; border-top: 1px solid #e3e9db; background: #fff; position: sticky; bottom: 0; }
-.review-savebar > div { flex: 1; } .review-savebar b { font-size: 12px; font-weight: 500; color: #5e7750; }
-.review-savebar small { display: block; margin-top: 7px; color: #97ac87; font-size: 10px; }
+.segment-footer > span { flex: 1; font-size: 10px; color: var(--workspace-muted); }
+.prediction-risk { color: var(--studio-warning); font-size: 10px; margin-top: 13px; overflow-wrap: anywhere; line-height: 1.8; }
+.evidence-panel { padding: 24px 20px; background: var(--studio-raised); border-left: 1px solid var(--workspace-border); max-height: 900px; overflow: auto; }
+.evidence-panel h3 { font-size: 12px; font-weight: 500; color: var(--workspace-muted); margin-bottom: 18px; }
+.evidence-panel h3 span { color: var(--workspace-muted); margin-left: 6px; font-size: 10px; }
+.utterance { display: block; width: 100%; text-align: left; background: none; padding: 12px 0; border-bottom: 1px solid var(--workspace-border); }
+.utterance span { color: var(--workspace-muted); font-size: 10px; } .utterance p { color: var(--workspace-text); font-size: 12px; line-height: 1.9; margin-top: 7px; }
+.review-savebar { display: flex; align-items: center; gap: 12px; padding: 20px 23px; border-top: 1px solid var(--workspace-border); background: var(--workspace-surface); position: sticky; bottom: 0; }
+.review-savebar > div { flex: 1; } .review-savebar b { font-size: 12px; font-weight: 500; color: var(--workspace-muted); }
+.review-savebar small { display: block; margin-top: 7px; color: var(--workspace-muted); font-size: 10px; }
 .review-savebar .primary { padding: 10px 15px; }
-@media(max-width:800px) { .review-video-layout { grid-template-columns: 1fr; } .review-video-layout video { height: 280px; } .review-edit-layout { grid-template-columns: 1fr; } .evidence-panel { max-height: 340px; border: 0; border-top: 1px solid #e4eadf; } }
+@media(max-width:800px) { .review-video-layout { grid-template-columns: 1fr; } .review-video-layout video { height: 280px; } .review-edit-layout { grid-template-columns: 1fr; } .evidence-panel { max-height: 340px; border: 0; border-top: 1px solid var(--workspace-border); } }
 @media(max-width:450px) { .review-panel .panel-heading { flex-wrap: wrap; } .review-instructions { padding: 22px 18px; } .review-edit-layout > div { padding: 18px 14px; } .segment-inputs { grid-template-columns: 1fr 1fr; } .segment-inputs label:last-child { grid-column: 1 / -1; } .segment-heading > span { display: none; } .review-savebar { flex-wrap: wrap; padding: 18px 14px; } .review-savebar > div { width: 100%; flex-basis: 100%; } .review-tools { flex-wrap: wrap; } }
-.workbench-shell .review-panel { margin: 0; border: 0; border-radius: 0; color: #1f2937; font-size: 14px; }
-.workbench-shell .review-panel h2 { color: #1f2937; font-size: 20px; }
-.workbench-shell .review-panel h3 { color: #334155; }
-.workbench-shell .review-instructions, .workbench-shell .review-instructions p { color: #475569; font-size: 14px; line-height: 1.75; }
-.workbench-shell .segment-heading, .workbench-shell .segment-card input, .workbench-shell .segment-card select { color: #1f2937; font-size: 14px; }
-.workbench-shell .segment-inputs label, .workbench-shell .segment-footer, .workbench-shell .review-tools, .workbench-shell .utterance p { color: #475569; font-size: 13px; }
-.workbench-shell .segment-heading > span, .workbench-shell .utterance span, .workbench-shell .review-savebar small { color: #64748b; font-size: 12px; }
-.workbench-shell .evidence-panel { background: #f8fafc; border-color: #e2e8f0; }
-.workbench-shell .segment-card, .workbench-shell .review-savebar { border-color: #e2e8f0; }
-.workbench-shell .review-savebar b { color: #334155; font-size: 14px; }
+.workbench-shell .review-panel { margin: 0; border: 0; border-radius: 0; color: var(--workspace-text); font-size: 14px; }
+.workbench-shell .review-panel h2 { color: var(--workspace-text); font-size: 20px; }
+.workbench-shell .review-panel h3 { color: var(--workspace-text); }
+.workbench-shell .review-instructions, .workbench-shell .review-instructions p { color: var(--workspace-text); font-size: 14px; line-height: 1.75; }
+.workbench-shell .segment-heading, .workbench-shell .segment-card input, .workbench-shell .segment-card select { color: var(--workspace-text); font-size: 14px; }
+.workbench-shell .segment-inputs label, .workbench-shell .segment-footer, .workbench-shell .review-tools, .workbench-shell .utterance p { color: var(--workspace-text); font-size: 13px; }
+.workbench-shell .segment-heading > span, .workbench-shell .utterance span, .workbench-shell .review-savebar small { color: var(--workspace-muted); font-size: 12px; }
+.workbench-shell .evidence-panel { background: var(--studio-raised); border-color: var(--workspace-border); }
+.workbench-shell .segment-card, .workbench-shell .review-savebar { border-color: var(--workspace-border); }
+.workbench-shell .review-savebar b { color: var(--workspace-text); font-size: 14px; }
 </style>

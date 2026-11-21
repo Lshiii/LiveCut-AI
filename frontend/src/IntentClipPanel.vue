@@ -11,6 +11,7 @@ import VideoPackagePanel from './VideoPackagePanel.vue'
 import TranscriptRangePicker from './TranscriptRangePicker.vue'
 import PaperCutEditor from './PaperCutEditor.vue'
 import FineCutEditor from './FineCutEditor.vue'
+import SourceStudio from './SourceStudio.vue'
 import type { FineCutOwner } from './fineCutProject'
 import ProductReplacementPanel from './ProductReplacementPanel.vue'
 import { replaceComponent, type ComponentSelection } from './componentCandidates'
@@ -35,7 +36,7 @@ import { intentCanCancel, intentCanConfirm, intentCanExport, intentCanResume, in
   IntentReadScope, IntentResponseError, newestIntentSnapshot, parseIntentSnapshot, refreshIntentEvidence,
   parseResumedIntentSnapshot, type IntentOutput, type IntentResumeReceipt, type IntentSnapshot, type IntentUtterance } from './intentClips'
 
-const props = defineProps<{ jobId: string; videoUrl: string; videoId?: string; videoHash?: string; active?: boolean }>()
+const props = defineProps<{ jobId: string; videoUrl: string; videoId?: string; videoHash?: string; videoName?: string; active?: boolean }>()
 const instruction = ref(''), maxCalls = ref<number | string>(6)
 const history = ref(new IntentHistoryPager()), details = ref(new Map<string, IntentSnapshot>()), historyLoading = ref(false)
 const historyScope = new IntentReadScope()
@@ -1120,8 +1121,11 @@ onBeforeUnmount(() => { stopped = true; historyVersion++; historyScope.dispose()
       <div class="intent-feedback"><div v-if="error" class="message error" role="alert"><span>{{ error }}</span><button aria-label="关闭剪辑错误" @click="error = ''">×</button></div><p v-if="planRevisionConflict" class="intent-warning" role="status">服务端已更新为 r{{ snapshot?.revision }}，与当前基于 r{{ draftRevision }} 的草稿不同。请先核对保存结果；本地修改仍保留。</p><p v-else-if="saveNeedsCheck" class="intent-warning" role="status">上次保存结果尚未确认。请先核对服务端，当前修改仍保留。</p><p v-if="refreshError" class="intent-warning" role="status">{{ refreshError }} 后台状态会继续刷新，当前修改不受影响。</p><p v-if="notice" class="intent-notice" role="status">{{ notice }}</p></div>
       <DraftBackupPanel kind="intent" :document-id="jobId" :value="backupValue" :blocked="backupBlocked" :assess="assessBackup" @restore="restoreBackup" />
       <div class="intent-views">
-        <div v-show="intentView === 'compose'" :id="`intent-page-${jobId}-compose`" class="intent-compose-view" role="tabpanel" :aria-labelledby="`intent-view-${jobId}-compose`">
-          <div class="intent-compose-title"><h3>想从视频里剪出什么？</h3><p>写下要保留的内容，以及要拼成一条还是分别成片。找到候选后可以回看原句、调整剪点。</p></div>
+        <div v-show="intentView === 'compose'" :id="`intent-page-${jobId}-compose`" class="intent-compose-view studio-compose" role="tabpanel" :aria-labelledby="`intent-view-${jobId}-compose`">
+          <SourceStudio compose :video="{ id: videoId || jobId, content_url: videoUrl, original_filename: videoName || '原视频' }"
+            :active="active !== false && intentView === 'compose' && !historyOpen && !manualReviewEditor?.opened">
+          <div class="studio-brief">
+          <div class="intent-compose-title"><h3>剪辑要求</h3><p>写下要保留的内容，找到候选后可继续调整剪点。</p></div>
           <div v-if="pendingCreate" class="intent-anchor-receipt" role="status"><strong>原提交结果待核对</strong><p>原要求：{{ pendingCreatePayload?.instruction }}</p><p>原预算上限 {{ pendingCreatePayload?.max_text_calls }} 次；{{ pendingCreate.source_answer ? `锚定回答 #${pendingCreate.source_answer.turn_id.slice(0, 8)} · ${pendingCreate.source_answer.utterance_ids.length} 条原句` : '普通文字要求' }}。不会自动换键或退回普通请求。</p><button class="secondary" :disabled="pending || active === false || planDirty || saveNeedsCheck || planRevisionConflict" @click="create(true)">核对原提交</button></div>
           <details v-if="inputAnswerBinding" class="intent-answer-anchor" :open="inputAnswerBinding.utterance_ids.length <= 3"><summary>围绕所选原句剪辑 · 1 个目标 · {{ inputAnswerBinding.utterance_ids.length }} 句</summary><p>来自视频回答 #{{ inputAnswerBinding.turn_id.slice(0, 8) }}<template v-if="answerSelection"> · {{ answerSelection.question }}</template></p><p>这些原句位于视频中的具体位置，将共同组成一个片段。可补充前后解释，所选句会完整保留。初始候选仅核对这些原句及相邻上下文，不代表全文检索。</p><blockquote v-for="citation in answerSelection?.citations ?? []" :key="citation.utterance_id"><strong>原视频 {{ topicTime(citation.start_ms) }} → {{ topicTime(citation.end_ms) }}</strong><p>{{ citation.text }}</p></blockquote><p v-if="!answerSelection">原句标识：{{ inputAnswerBinding.utterance_ids.join('、') }}。核对原提交后显示冻结引用。</p><button class="text-button" :disabled="pending || !!pendingCreate || manualReviewProtected" @click="removeAnswerAnchor">取消绑定，保留文字要求</button></details>
           <div class="intent-compose">
@@ -1150,6 +1154,7 @@ onBeforeUnmount(() => { stopped = true; historyVersion++; historyScope.dispose()
           <p v-if="saveNeedsCheck || planRevisionConflict" class="intent-draft-hint">当前方案的保存结果需要核对，新要求仍保留。<button class="text-button" @click="setView('review')">回到核对方案 →</button></p>
           <p v-else-if="planDirty" class="intent-draft-hint">当前方案有未保存修改。新要求会保留，先回到核对方案保存或放弃修改，再查找。<button class="text-button" @click="setView('review')">回到核对方案 →</button></p>
           <div v-if="instruction.length || maxCalls !== 6 || inputAnswerBinding" class="intent-compose-actions"><button class="text-button" :disabled="pending || !!pendingCreate" @click="discardInput">放弃新要求与请求上限修改</button></div>
+          </div></SourceStudio>
         </div>
         <div v-show="intentView === 'review'" :id="`intent-page-${jobId}-review`" class="intent-review-view" role="tabpanel" :aria-labelledby="`intent-view-${jobId}-review`">
           <div v-if="snapshot" class="intent-review-layout">

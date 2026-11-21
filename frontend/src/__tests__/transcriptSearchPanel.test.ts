@@ -206,7 +206,7 @@ test('Workbench starts topic results in editing and keyboard navigation follows 
   const fn = ast.statements.find(value => ts.isFunctionDeclaration(value) && value.name?.text === 'tabKey')!.getText(ast)
   const code = ts.transpileModule(`${fn}; exports.tabKey = tabKey`, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } }).outputText
   const activeTab = { value: 'clips' }, topic = { value: true }, results = { value: true }, focused: string[] = [], exported: { tabKey?: (event: any) => void } = {}
-  new Function('activeTab', 'topicResultsAvailable', 'resultsAvailable', 'setTab', 'nextTick', 'document', 'exports', code)(activeTab, topic, results,
+  new Function('activeTab', 'topicToolsAvailable', 'toolsAvailable', 'setTab', 'nextTick', 'document', 'exports', code)(activeTab, topic, results,
     (value: string) => { activeTab.value = value }, (callback: () => void) => Promise.resolve().then(callback),
     { getElementById: (id: string) => ({ focus: () => focused.push(id) }) }, exported)
   const key = async (key: string) => { exported.tabKey!({ key, preventDefault() {} }); await flushHost(); return activeTab.value }

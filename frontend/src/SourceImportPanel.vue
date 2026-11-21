@@ -189,8 +189,8 @@ defineExpose({ open, pending, refresh })
 .source-import button, .source-toggle { min-height: 36px; padding: 8px 12px; border-radius: 8px; font-size: 13px; font-weight: 500; line-height: 20px; }
 .source-import .text-button, .source-toggle { color: var(--workspace-muted, #675f56); background: transparent; }
 .source-import .text-button:hover:not(:disabled), .source-toggle:hover { color: var(--workspace-text, #292621); background: var(--workspace-hover, #eeece6); }
-.source-import .primary { background: var(--workspace-accent, #a94424); color: #fff; box-shadow: none; }
-.source-import .primary:hover:not(:disabled) { background: #91391d; }
+.source-import .primary { background: var(--workspace-accent, #a94424); color: var(--studio-ink); box-shadow: none; }
+.source-import .primary:hover:not(:disabled) { background: var(--workspace-accent-hover); }
 .source-import .secondary { border: 1px solid var(--workspace-border, #e4e0d8); background: var(--workspace-surface, #fff); color: var(--workspace-text, #292621); }
 .source-import .secondary:hover:not(:disabled) { background: var(--workspace-hover, #eeece6); }
 .source-import button:focus-visible, .source-toggle:focus-visible, .source-input-row input:focus-visible { outline: 2px solid var(--workspace-accent, #a94424); outline-offset: 3px; }
@@ -220,7 +220,8 @@ defineExpose({ open, pending, refresh })
 .source-item-top strong { display: flex; align-items: center; gap: 8px; font-size: 14px; line-height: 20px; font-weight: 500; }
 .source-item-top strong::before { content: ''; flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--workspace-muted, #675f56); }
 .source-item-running .source-item-top strong::before { background: var(--workspace-accent, #a94424); }
-.source-item-completed .source-item-top strong::before { background: #39704d; }
+.source-item-completed .source-item-top strong::before { background: var(--workspace-accent); }
+.source-item-failed .source-item-top strong::before { background: var(--studio-danger); }
 .source-item-top span { color: var(--workspace-muted, #675f56); font-size: 12px; line-height: 20px; font-variant-numeric: tabular-nums; }
 .source-url { margin-top: 8px; color: var(--workspace-muted, #675f56); font-size: 13px; line-height: 20px; }
 .source-download-note { margin-top: 8px; font-variant-numeric: tabular-nums; }
@@ -229,7 +230,7 @@ defineExpose({ open, pending, refresh })
 .source-receipt { margin: 16px 0; padding: 16px; border: 1px solid var(--workspace-border, #e4e0d8); border-radius: 8px; background: var(--workspace-canvas, #f4f3ef); }
 .source-receipt > strong { font-size: 14px; line-height: 20px; font-weight: 500; }
 .source-receipt p { margin-top: 8px; color: var(--workspace-muted, #675f56); font-size: 13px; line-height: 20px; }
-.source-failure { margin-top: 8px; color: #a13e2b; font-size: 13px; line-height: 20px; overflow-wrap: anywhere; }
+.source-failure { margin-top: 8px; color: var(--studio-danger); font-size: 13px; line-height: 20px; overflow-wrap: anywhere; }
 .source-list progress { display: block; width: 100%; height: 8px; margin-top: 12px; accent-color: var(--workspace-accent, #a94424); }
 .source-import .message { margin: 16px 0; padding: 12px 16px; font-size: 13px; line-height: 20px; overflow-wrap: anywhere; }
 @media (max-width: 520px) {

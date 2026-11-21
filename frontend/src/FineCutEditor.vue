@@ -192,29 +192,34 @@ onBeforeUnmount(() => {
   <dialog ref="dialog" class="fine-editor" aria-label="人工精剪" @cancel.prevent="close" @keydown.esc.stop>
     <header><div><h2>人工精剪</h2><p>{{ title }}</p></div>
       <button class="secondary" @click="close">{{ closing ? '放弃未保存内容并关闭' : '关闭' }}</button></header>
-    <div class="fine-body">
-      <section class="fine-monitor" aria-label="精剪预览">
-        <video ref="player" :src="videoUrl" preload="metadata" playsinline @loadedmetadata="metadata"
-          @error="ready = false; mediaFailed = true; stop()" @play="guardPlay" @playing="guardPlay"
-          @timeupdate="sequence.timeUpdate($event.currentTarget as HTMLVideoElement)" @seeking="sequence.seeking($event.currentTarget as HTMLVideoElement)"
-          @seeked="sequence.seeked($event.currentTarget as HTMLVideoElement)" @pause="sequence.pause($event.currentTarget as HTMLVideoElement)"
-          @ended="sequence.ended($event.currentTarget as HTMLVideoElement)" @ratechange="sequence.rateChange($event.currentTarget as HTMLVideoElement)" />
-        <p v-if="mediaFailed" role="status">原片载入失败。可编辑剪点并下载时间线。</p>
-        <CutScrubber :parts="cuts" :position-ms="cursor" :disabled="working || invalidInput" @seek="seek" />
-        <div class="fine-actions"><button class="secondary" :disabled="!ready || invalidInput || working" @click="listen">{{ playback ? '停止试听' : cursor === total ? '从头试听' : '从游标试听' }}</button>
-          <button v-if="joinAfter" class="secondary" :disabled="!ready || invalidInput || working" @click="listenJoin">试听第 {{ joinAfter.partIndex }} 个剪点</button></div>
-      </section>
-      <section v-if="current && original" class="fine-inspector" aria-label="调整片段">
-        <label class="fine-segment">调整片段 <select :value="selected" :disabled="working || invalidInput" @change="choose(Number(($event.target as HTMLSelectElement).value))">
-          <option v-for="(part, i) in cuts" :key="i" :value="i">第 {{ i + 1 }} 段 · {{ topicTime(part.end_ms - part.start_ms) }}</option>
-        </select></label>
-        <p>拖动上方手柄调整入点，下方手柄调整出点。也可直接输入原片时间。</p>
-        <FineCutBounds :key="selected" :base="original" :cut="current" :disabled="working"
-          :can-listen="ready && !invalidInput" @edge="edit" @listen="listenEdge"
-          @invalid="invalidInput = $event" @begin-drag="drag = 'begin'" />
-        <div class="fine-actions"><button class="secondary" :disabled="!past.length || working" @click="undo">撤销上次调整</button>
-          <button class="secondary" :disabled="working || (!invalidInput && current.start_ms === original.start_ms && current.end_ms === original.end_ms)" @click="restore">还原本段</button></div>
-      </section>
+    <div class="fine-workspace">
+      <div class="fine-body">
+        <section class="fine-monitor" aria-label="精剪预览">
+          <div class="fine-monitor-head"><strong>预览监视器</strong><time>成片 {{ topicTime(cursor) }}</time></div>
+          <video ref="player" :src="videoUrl" preload="metadata" playsinline @loadedmetadata="metadata"
+            @error="ready = false; mediaFailed = true; stop()" @play="guardPlay" @playing="guardPlay"
+            @timeupdate="sequence.timeUpdate($event.currentTarget as HTMLVideoElement)" @seeking="sequence.seeking($event.currentTarget as HTMLVideoElement)"
+            @seeked="sequence.seeked($event.currentTarget as HTMLVideoElement)" @pause="sequence.pause($event.currentTarget as HTMLVideoElement)"
+            @ended="sequence.ended($event.currentTarget as HTMLVideoElement)" @ratechange="sequence.rateChange($event.currentTarget as HTMLVideoElement)" />
+          <p v-if="mediaFailed" role="status">原片载入失败。可编辑剪点并下载时间线。</p>
+          <div class="fine-actions"><button class="secondary" :disabled="!ready || invalidInput || working" @click="listen">{{ playback ? '停止试听' : cursor === total ? '从头试听' : '从游标试听' }}</button>
+            <button v-if="joinAfter" class="secondary" :disabled="!ready || invalidInput || working" @click="listenJoin">试听第 {{ joinAfter.partIndex }} 个剪点</button></div>
+        </section>
+        <section class="fine-timeline" aria-label="精剪成片时间线">
+          <CutScrubber :parts="cuts" :position-ms="cursor" :video-url="active ? videoUrl : ''" :disabled="working || invalidInput" @seek="seek" />
+        </section>
+        <section v-if="current && original" class="fine-inspector" aria-label="调整片段">
+          <label class="fine-segment">调整片段 <select :value="selected" :disabled="working || invalidInput" @change="choose(Number(($event.target as HTMLSelectElement).value))">
+            <option v-for="(part, i) in cuts" :key="i" :value="i">第 {{ i + 1 }} 段 · {{ topicTime(part.end_ms - part.start_ms) }}</option>
+          </select></label>
+          <p>拖动上方手柄调整入点，下方手柄调整出点。也可直接输入原片时间。</p>
+          <FineCutBounds :key="selected" :base="original" :cut="current" :disabled="working"
+            :can-listen="ready && !invalidInput" @edge="edit" @listen="listenEdge"
+            @invalid="invalidInput = $event" @begin-drag="drag = 'begin'" />
+          <div class="fine-actions"><button class="secondary" :disabled="!past.length || working" @click="undo">撤销上次调整</button>
+            <button class="secondary" :disabled="working || (!invalidInput && current.start_ms === original.start_ms && current.end_ms === original.end_ms)" @click="restore">还原本段</button></div>
+        </section>
+      </div>
     </div>
     <footer><div><strong>精剪时长 {{ topicTime(total) }}</strong> <span>· 已缩短 {{ topicTime(originalMs - total) }}</span>
       <p>{{ saved }} · 精剪交付为 OTIO 工程</p><p v-if="status" role="status">{{ status }}</p>
@@ -224,29 +229,56 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
-.fine-editor { width:min(1030px,96vw); max-width:96vw; max-height:94dvh; padding:0; border:1px solid var(--workspace-control-border,#999086); border-radius:10px; background:white; color:var(--workspace-text,#292621); }
-.fine-editor[open] { display:flex; flex-direction:column; }
-.fine-editor::backdrop { background:#211d18a6; }
-header,footer,.fine-actions,.fine-segment { display:flex; align-items:center; gap:9px; }
-header,footer { justify-content:space-between; padding:12px 18px; flex:none; }
-header { border-bottom:1px solid var(--workspace-border,#ddd7cc); }
-h2,p { margin:0; } h2 { font-size:1.25rem; }
-p,footer span { color:var(--workspace-muted,#675f56); font-size:.85rem; line-height:1.5; }
-header div,footer div { min-width:0; overflow-wrap:anywhere; } header button,footer button { flex:none; }
-.fine-body { display:grid; grid-template-columns:minmax(0,1.4fr) minmax(275px,1fr); min-height:0; overflow:auto; }
-.fine-monitor,.fine-inspector { min-width:0; display:grid; align-content:start; gap:12px; padding:16px; }
-.fine-monitor { background:var(--workspace-canvas,#f4f3ef); }
-video { width:100%; max-height:36dvh; aspect-ratio:16/9; object-fit:contain; border-radius:6px; background:#211f1b; }
-.fine-actions { flex-wrap:wrap; } .fine-segment { flex-wrap:wrap; font-weight:600; }
-.fine-segment select,.secondary { min-height:34px; border:1px solid var(--workspace-control-border,#aaa096); border-radius:5px; padding:4px 9px; background:#fff; color:inherit; }
-footer { border-top:1px solid var(--workspace-border,#ddd7cc); }
-footer strong { font-variant-numeric:tabular-nums; }
-footer .primary { min-height:38px; padding:6px 12px; }
-footer a { font-size:.85rem; overflow-wrap:anywhere; }
-@media(max-width:700px) {
-  .fine-editor { max-width:100%; width:100%; max-height:96dvh; }
-  .fine-body { display:block; } .fine-monitor,.fine-inspector { padding:10px 12px; gap:8px; }
-  video { max-height:24dvh; }
-  header,footer { padding:8px 12px; flex-wrap:wrap; }
+.fine-editor {
+  color-scheme:dark; width:min(1190px,96vw); max-width:96vw; height:min(840px,94dvh); max-height:94dvh; padding:0;
+  color:var(--workspace-text,#eff2f4); background:var(--workspace-surface,#1b1e24);
+  border:1px solid var(--workspace-control-border,#49505b); border-radius:12px; box-shadow:0 24px 80px #0008;
+}
+.fine-editor[open] { display:flex; flex-direction:column; overflow:hidden; }
+.fine-editor::backdrop { background:#080a0dcc; }
+.fine-editor header,.fine-editor footer,.fine-actions,.fine-segment,.fine-monitor-head { display:flex; align-items:center; gap:10px; }
+.fine-editor header,.fine-editor footer { justify-content:space-between; flex:none; padding:12px 20px; background:var(--workspace-surface,#1b1e24); }
+.fine-editor header { border-bottom:1px solid var(--workspace-border,#363b44); }
+.fine-editor header > div { display:flex; align-items:baseline; flex-wrap:wrap; gap:2px 14px; }
+.fine-editor header > div,.fine-editor footer > div { min-width:0; overflow-wrap:anywhere; }
+.fine-editor header button,.fine-editor footer button { flex:none; }
+.fine-editor h2,.fine-editor p { margin:0; }
+.fine-editor h2 { color:var(--workspace-text,#eff2f4); font-size:1.25rem; font-weight:650; }
+.fine-editor p,.fine-editor footer span { color:var(--workspace-muted,#a5adb7); font-size:.86rem; line-height:1.5; }
+.fine-workspace { display:flex; flex:1; min-height:0; }
+.fine-body { display:grid; flex:1; min-width:0; min-height:0; grid-template:"monitor inspector" minmax(0,1fr) "timeline timeline" auto / minmax(0,1.58fr) minmax(330px,1fr); }
+.fine-monitor,.fine-inspector { min-width:0; min-height:0; overflow:auto; padding:14px 18px; }
+.fine-monitor { grid-area:monitor; display:flex; flex-direction:column; gap:10px; background:var(--studio-well,#101215); }
+.fine-monitor-head { justify-content:space-between; font-size:.88rem; color:var(--workspace-muted,#a5adb7); }
+.fine-monitor-head time { color:var(--workspace-accent,#70e3cd); font:500 .9rem var(--workspace-mono,monospace); }
+.fine-monitor video { flex:1 1 0; width:100%; min-height:70px; max-height:100%; object-fit:contain; border:1px solid #ffffff12; border-radius:4px; background:#08090c; }
+.fine-inspector { grid-area:inspector; display:grid; align-content:start; gap:12px; border-left:1px solid var(--workspace-border,#363b44); }
+.fine-actions { flex-wrap:wrap; gap:6px 8px; }
+.fine-inspector > .fine-actions { padding-top:8px; border-top:1px solid var(--workspace-border,#363b44); }
+.fine-segment { justify-content:space-between; flex-wrap:wrap; font-weight:650; }
+.fine-segment select { max-width:100%; }
+.fine-editor .secondary,.fine-segment select { min-height:34px; padding:5px 10px; border:1px solid var(--workspace-control-border,#49505b); border-radius:5px; background:var(--studio-raised,#252a31); color:var(--workspace-text,#eff2f4); font:inherit; font-size:.9rem; }
+.fine-editor .secondary:hover:not(:disabled) { border-color:var(--workspace-accent,#70e3cd); }
+.fine-timeline { grid-area:timeline; min-width:0; padding:12px 18px; border-block:1px solid var(--workspace-border,#363b44); background:var(--studio-well,#101215); }
+.fine-editor footer strong { font-variant-numeric:tabular-nums; }
+.fine-editor footer .primary { min-height:38px; padding:6px 14px; border:0; border-radius:5px; background:var(--workspace-accent,#70e3cd); color:var(--studio-ink,#092320); font-weight:650; }
+.fine-editor footer a { color:var(--workspace-accent,#70e3cd); text-decoration:underline; }
+.fine-editor :focus-visible { outline:2px solid var(--workspace-accent,#70e3cd); outline-offset:2px; }
+@media(max-width:740px) {
+  .fine-editor { width:100%; max-width:100%; height:98dvh; max-height:98dvh; border-radius:8px; }
+  .fine-workspace { display:block; overflow:auto; }
+  .fine-body { display:block; }
+  .fine-monitor,.fine-inspector { overflow:visible; padding:10px 12px; gap:9px; }
+  .fine-monitor video { flex:none; height:clamp(105px,26dvh,230px); }
+  .fine-inspector { border-left:0; border-top:1px solid var(--workspace-border,#363b44); }
+  .fine-editor header,.fine-editor footer { padding:8px 12px; }
+  .fine-editor footer { flex-wrap:wrap; }
+  .fine-timeline { padding:10px 12px; }
+}
+@media(max-height:500px) {
+  .fine-editor[open] { display:block; overflow:auto; height:98dvh; max-height:98dvh; }
+  .fine-workspace { display:block; overflow:visible; }
+  .fine-monitor,.fine-inspector { overflow:visible; }
+  .fine-monitor video { flex:0 0 auto; height:clamp(105px,43dvh,190px); }
 }
 </style>

@@ -104,16 +104,16 @@ async function preview() {
 </template>
 
 <style scoped>
-.frame-preview { display: grid; min-width: 0; margin-top: 14px; padding: 12px; gap: 9px; border: 1px solid #dedbd4; border-radius: 8px; background: #fcfbf8; font-size: 14px; }
+.frame-preview { display: grid; min-width: 0; margin-top: 14px; padding: 12px; gap: 9px; border: 1px solid var(--workspace-border); border-radius: 8px; background: var(--studio-raised); font-size: 14px; }
 .frame-preview-title, .frame-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 10px; }
 .frame-preview-title { justify-content: space-between; }
 .frame-preview-title label { display: flex; align-items: center; gap: 5px; margin: 0; }
-.frame-preview-title input { width: 10ch; padding: 4px; border: 1px solid #d5d8dc; border-radius: 4px; font: inherit; font-variant-numeric: tabular-nums; }
+.frame-preview-title input { width: 10ch; padding: 4px; border: 1px solid var(--workspace-control-border); border-radius: 4px; font: inherit; font-variant-numeric: tabular-nums; }
 .frame-preview input[type=range], .frame-preview img { width: 100%; min-width: 0; }
-.frame-preview blockquote { margin: 0; padding-left: 8px; border-left: 2px solid #d4a089; color: #344252; overflow-wrap: anywhere; }
-.frame-actions button { padding: 5px 9px; min-height: 34px; border: 1px solid #d5d8dc; border-radius: 5px; background: white; color: #334155; font: inherit; cursor: pointer; }
+.frame-preview blockquote { margin: 0; padding-left: 8px; border-left: 2px solid var(--workspace-accent); color: var(--workspace-text); overflow-wrap: anywhere; }
+.frame-actions button { padding: 5px 9px; min-height: 34px; border: 1px solid var(--workspace-border); border-radius: 5px; background: var(--workspace-surface); color: var(--workspace-text); font: inherit; cursor: pointer; }
 .frame-actions button:disabled { opacity: .5; cursor: default; }
-.frame-actions .render-button { margin-left: auto; color: #994126; }
-.frame-preview img { max-height: 42dvh; object-fit: contain; background: #171a1b; border-radius: 4px; }
-.frame-preview p { margin: 0; color: #902f2a; }
+.frame-actions .render-button { margin-left: auto; color: var(--workspace-accent); }
+.frame-preview img { max-height: 42dvh; object-fit: contain; background: var(--workspace-video); border-radius: 4px; }
+.frame-preview p { margin: 0; color: var(--studio-danger); }
 </style>

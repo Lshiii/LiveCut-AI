@@ -162,7 +162,7 @@ onBeforeUnmount(stopReads)
 </template>
 
 <style scoped>
-.cut-instruction { padding: 8px 16px; border-bottom: 1px solid #dce2dc; max-height: 36dvh; overflow: auto; flex-shrink: 0; }
+.cut-instruction { padding: 8px 16px; border-bottom: 1px solid var(--workspace-border); max-height: 36dvh; overflow: auto; flex-shrink: 0; }
 .cut-instruction summary { cursor: pointer; font-weight: 600; }
 .cut-instruction form,.cut-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: 8px 0; }
 .cut-instruction label { flex: 1 1 260px; display: flex; align-items: center; gap: 8px; }
@@ -170,5 +170,5 @@ onBeforeUnmount(stopReads)
 .cut-instruction .seconds { flex: 0 0 auto; }
 .cut-instruction .seconds input { width: 4.8em; }
 .cut-instruction ul { padding-left: 1.5em; }
-.cut-instruction small { color: #526258; }
+.cut-instruction small { color: var(--workspace-muted); }
 </style>

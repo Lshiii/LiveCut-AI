@@ -189,9 +189,9 @@ onBeforeUnmount(() => { stopped = true; stopPlayback(); workspace.dispose(); doc
 .transcript-search-form input { display: block; width: 100%; margin-top: 8px; padding: 12px; border: 1px solid var(--workspace-border, #e4e0d8); border-radius: 8px; background: var(--workspace-surface, #fff); color: var(--workspace-text, #292621); font: inherit; font-size: 14px; }
 .transcript-search-form button { flex: none; min-height: 44px; }
 .transcript-help, .transcript-results-summary, .transcript-read-status, .transcript-read-error { font-size: 13px; line-height: 1.8; margin-top: 8px; color: var(--workspace-muted, #675f56); overflow-wrap: anywhere; }
-.transcript-read-error { padding: 12px; background: #fff4eb; border-radius: 8px; }
+.transcript-read-error { padding: 12px; background: color-mix(in srgb, var(--studio-warning) 12%, var(--workspace-surface)); border-radius: 8px; }
 .transcript-read-error button { margin: 8px 8px 0 0; }
-.transcript-error { font-size: 13px; line-height: 1.8; color: #9b5837; margin: 8px 0; overflow-wrap: anywhere; }
+.transcript-error { font-size: 13px; line-height: 1.8; color: var(--studio-danger); margin: 8px 0; overflow-wrap: anywhere; }
 .transcript-layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(300px, .9fr); align-items: start; gap: 20px; margin-top: 16px; }
 .transcript-results { min-width: 0; }
 .transcript-results ol { list-style: none; padding: 0; margin: 0; }
@@ -200,7 +200,7 @@ onBeforeUnmount(() => { stopped = true; stopPlayback(); workspace.dispose(); doc
 .transcript-result.selected, .transcript-result.selected:hover { border-color: var(--workspace-accent, #a94424); background: var(--workspace-accent-soft, #f7ebe5); }
 .transcript-result-time { display: block; font-size: 12px; color: var(--workspace-muted, #675f56); margin-bottom: 8px; }
 .transcript-result-text { display: block; font-size: 14px; line-height: 1.8; white-space: pre-wrap; overflow-wrap: anywhere; }
-.transcript-result mark { background: #f3d99b; color: inherit; }
+.transcript-result mark { background: var(--studio-warning); color: var(--studio-ink); border-radius: 2px; }
 .transcript-pagination { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; justify-content: space-between; padding-top: 8px; }
 .transcript-pagination span { font-size: 12px; color: var(--workspace-muted, #675f56); flex: 1; min-width: 110px; }
 .transcript-reference { min-width: 0; position: sticky; top: 12px; padding: 16px; background: var(--workspace-canvas, #f4f3ef); border: 1px solid var(--workspace-border, #e4e0d8); border-radius: 12px; }

@@ -212,5 +212,5 @@ defineExpose({ pending, unresolved })
 </template>
 
 <style scoped>
-.answer-replay{flex:none;max-height:min(38vh,340px);overflow:auto;margin:8px 0;padding:10px;border:1px solid #d8dfeb;border-radius:8px;background:#f6f8fc;font-size:12px;line-height:1.65;overflow-wrap:anywhere}.answer-replay h3{margin:0;font-size:14px}.answer-replay p{margin:5px 0}.answer-replay article{border-top:1px solid #dce3ee;margin-top:8px;padding-top:8px}.answer-replay small{display:block;margin:4px 0;color:#536174}.answer-replay article>div{display:flex;flex-wrap:wrap;gap:6px}.answer-replay button{max-width:100%;margin:4px 5px 0 0;white-space:normal}.answer-replay [role=alert]{color:#985c32}
+.answer-replay{flex:none;max-height:min(38vh,340px);overflow:auto;margin:8px 0;padding:10px;border:1px solid var(--workspace-border);border-radius:8px;background:var(--studio-raised);font-size:12px;line-height:1.65;overflow-wrap:anywhere}.answer-replay h3{margin:0;font-size:14px}.answer-replay p{margin:5px 0}.answer-replay article{border-top:1px solid var(--workspace-border);margin-top:8px;padding-top:8px}.answer-replay small{display:block;margin:4px 0;color:var(--workspace-muted)}.answer-replay article>div{display:flex;flex-wrap:wrap;gap:6px}.answer-replay button{max-width:100%;margin:4px 5px 0 0;white-space:normal}.answer-replay [role=alert]{color:var(--studio-danger)}
 </style>

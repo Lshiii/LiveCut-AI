@@ -9,6 +9,7 @@ import TranscriptSearchPanel from './TranscriptSearchPanel.vue'
 import type { AnswerClipSelection } from './answerClip'
 import UploadPanel from './UploadPanel.vue'
 import SourceImportPanel from './SourceImportPanel.vue'
+import SourceStudio from './SourceStudio.vue'
 import FailureDiagnostic from './FailureDiagnostic.vue'
 import TextRequestProgress from './TextRequestProgress.vue'
 import ExecutorStatus from './ExecutorStatus.vue'
@@ -72,7 +73,17 @@ function taskDrawerKey(event: KeyboardEvent) {
   if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus() }
   else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus() }
 }
-const taskPreview = ref<HTMLVideoElement | null>(null)
+const covers = ref(new Map<string, string>()), libraryExpanded = ref(false)
+const libraryVideos = computed(() => libraryExpanded.value ? videos.value : videos.value.slice(0, 4))
+function rememberCover(url: string, image: string) {
+  if (covers.value.size >= 32 && !covers.value.has(url)) covers.value.delete(covers.value.keys().next().value!)
+  covers.value.set(url, image)
+}
+function pickAsset(video: VideoAsset) {
+  if (pending.value || editorsPending.value || editorsDirty.value) { selectVideo(); return }
+  selectedVideoId.value = video.id
+  selectVideo(); activeTab.value = 'task'; closeTasks()
+}
 const editorsDirty = computed(() => !!reviewEditor.value?.dirty || !!intentEditor.value?.dirty || !!agentEditor.value?.dirty || !!transcriptEditor.value?.dirty)
 const editorsPending = computed(() => !!reviewEditor.value?.pending || !!intentEditor.value?.pending || !!agentEditor.value?.pending || !!transcriptEditor.value?.pending)
 const canResumeFromAsr = computed(() => analysisCanResume(selectedJob.value, editorsDirty.value, !!pending.value || editorsPending.value))
@@ -110,20 +121,35 @@ const completeCount = computed(() => selectedJob.value?.stages.filter(s => ['SUC
 const retryExplanation = computed(() => analysisRetryExplanation(selectedJob.value))
 const resultsAvailable = computed(() => selectedJob.value?.status === 'REVIEW_READY' && !!currentVideo.value)
 const topicResultsAvailable = computed(() => resultsAvailable.value && topicMode.value)
+const toolSource = computed(() => selectedJob.value ?? continuation.value)
+const toolsAvailable = computed(() => !!currentVideo.value && toolSource.value?.status === 'REVIEW_READY')
+const topicToolsAvailable = computed(() => toolsAvailable.value && toolSource.value?.config?.analysis_mode === 'topics')
+let requestedTab = 0, openingTool = false
 watch(() => selectedJob.value?.id, (id, previous) => {
   if (id === previous) return
   activeTab.value = id && selectedJob.value?.status === 'REVIEW_READY' ? topicMode.value ? 'clips' : 'topics' : 'task'
   closeTasks()
 })
-watch(activeTab, value => { if (value !== 'task') taskPreview.value?.pause() }, { flush: 'sync' })
-function setTab(tab: WorkbenchTab) {
+async function setTab(tab: WorkbenchTab) {
+  const request = ++requestedTab
+  if (tab === 'task' && openingTool) { selectionVersion++; openingTool = false }
+  if (!selectedJob.value && tab !== 'task') {
+    const id = continuation.value?.id
+    if (!id || !toolsAvailable.value || (tab !== 'topics' && !topicToolsAvailable.value)) return
+    openingTool = true
+    await loadDetail(id)
+    await nextTick()
+    if (request !== requestedTab) return
+    openingTool = false
+    if (!resultsAvailable.value || toolSource.value?.id !== id) return
+  }
   if ((tab === 'agent' || tab === 'transcript' || tab === 'clips') && !topicResultsAvailable.value) return
   if (tab === 'topics' && !resultsAvailable.value) return
   activeTab.value = tab
 }
 function tabKey(event: KeyboardEvent) {
   if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return
-  const tabs: WorkbenchTab[] = topicResultsAvailable.value ? ['clips', 'agent', 'transcript', 'topics', 'task'] : resultsAvailable.value ? ['topics', 'task'] : ['task']
+  const tabs: WorkbenchTab[] = topicToolsAvailable.value ? ['clips', 'agent', 'transcript', 'topics', 'task'] : toolsAvailable.value ? ['topics', 'task'] : ['task']
   event.preventDefault()
   const index = tabs.indexOf(activeTab.value)
   const next = event.key === 'Home' ? tabs[0]! : event.key === 'End' ? tabs.at(-1)! : tabs[(index + (event.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length]!
@@ -136,6 +162,7 @@ function openNewAnalysis() {
   if (!selectedJob.value) { activeTab.value = 'task'; newRunSettings.value = true; closeTasks() }
 }
 function openTask(id: string) {
+  requestedTab++; openingTool = false
   closeTasks()
   void loadDetail(id)
 }
@@ -302,6 +329,7 @@ function selectVideo() {
     selectedVideoId.value = selectedJob.value?.video_id ?? selectedVideoId.value
     errorMessage.value = '审核、剪辑方案或对话有未提交内容，请先保存或在相应区域放弃修改。'; return
   }
+  requestedTab++; openingTool = false
   detailRecovery.cancel(); detailConnectionError.value = ''
   notice.value = ''
   selectedJob.value = null; selectionVersion++; taskStream.select(null)
@@ -446,12 +474,22 @@ onUnmounted(() => { stopped = true; window.removeEventListener('storage', videoS
     <button v-if="mobileTasksOpen" class="task-backdrop" aria-label="关闭任务列表" @click="closeTasks"></button>
     <aside id="workbench-tasks" class="workbench-sidebar" :class="{ open: mobileTasksOpen }" :role="compactLayout && mobileTasksOpen ? 'dialog' : undefined" :aria-modal="compactLayout && mobileTasksOpen ? true : undefined" aria-label="视频与分析任务" @keydown="taskDrawerKey">
       <a class="brand" href="/" aria-label="LiveCut AI 首页" @click.prevent="selectVideo(); closeTasks()">
-        <span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M8 5v14m4-10 5 3-5 3Z"/></svg></span>
+        <span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 32 32" fill="currentColor"><path d="M4 5h8v17h9l-4 5H4zM16 5h12l-4 5h-8zm0 8h8l-4 5h-4z"/></svg></span>
         <strong>LiveCut <span>AI</span></strong>
       </a>
       <button id="workbench-task-close" class="mobile-sidebar-close" aria-label="收起任务列表" @click="closeTasks">×</button>
-      <div class="sidebar-actions"><button class="secondary" :disabled="!!pending" @click="chooseUpload">上传视频</button><button class="secondary" :disabled="!!pending" @click="chooseSourceImport">链接导入</button><button class="secondary sidebar-new-analysis" :disabled="!!pending" @click="openNewAnalysis">新建分析</button></div>
-      <div class="sidebar-heading"><h2>视频与任务</h2><button class="text-button" :disabled="loading" aria-label="刷新任务列表" @click="refresh"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M20 10a8 8 0 1 0 .1 3M20 4v6h-6"/></svg></button></div>
+      <div class="library-scroll">
+      <div class="sidebar-heading"><h2>素材库</h2><span class="bin-count">{{ videos.length }}</span></div>
+      <div class="bin-actions"><button class="secondary" :disabled="!!pending" @click="chooseUpload">＋ 上传视频</button><button class="secondary" :disabled="!!pending" @click="chooseSourceImport">链接导入</button></div>
+      <div v-if="videos.length" class="asset-bin">
+        <button v-for="video in libraryVideos" :key="video.id" class="asset-card" :class="{ chosen: currentVideo?.id === video.id }" :disabled="!!pending" :aria-label="'选用素材 ' + videoName(video.id)" @click="pickAsset(video)">
+          <span class="asset-preview"><img v-if="covers.get(video.content_url)" :src="covers.get(video.content_url)" alt=""><svg v-else viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="m10 9 5 3-5 3z"/></svg></span>
+          <span class="asset-label"><strong :title="videoName(video.id)">{{ videoName(video.id) }}</strong><small>MP4 · {{ (video.size_bytes / 1024 / 1024).toFixed(1) }} MB</small></span>
+        </button>
+        <button v-if="videos.length > 4" class="text-button" :aria-expanded="libraryExpanded" @click="libraryExpanded = !libraryExpanded">{{ libraryExpanded ? '收起素材' : '查看全部 ' + videos.length + ' 个素材' }}</button>
+      </div>
+      <div class="sidebar-heading task-group"><h2>分析记录</h2><button class="text-button" :disabled="loading" aria-label="刷新任务列表" @click="refresh"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M20 10a8 8 0 1 0 .1 3M20 4v6h-6"/></svg></button></div>
+      <button class="text-button sidebar-create" :disabled="!!pending" @click="openNewAnalysis">＋ 新建分析</button>
       <div v-if="activeCount || reviewCount" class="sidebar-counts"><span v-if="activeCount">分析中 {{ activeCount }}</span><span v-if="reviewCount">待审核 {{ reviewCount }}</span></div>
       <div class="task-scope" role="group" aria-label="任务列表范围"><button :aria-pressed="taskListScope === 'recent'" @click="taskListScope = 'recent'">最近视频</button><button :aria-pressed="taskListScope === 'all'" @click="taskListScope = 'all'">全部分析 <span v-if="jobs.length">{{ jobs.length }}</span></button></div>
       <div class="sidebar-filters"><label class="search sidebar-search"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/></svg><input id="task-search" v-model="query" placeholder="搜索视频或任务" aria-label="搜索任务"></label>
@@ -461,7 +499,7 @@ onUnmounted(() => { stopped = true; window.removeEventListener('storage', videoS
       <div v-else-if="!visibleJobs.length" class="sidebar-empty">{{ jobs.length ? '没有匹配的任务' : '暂无分析任务' }}
         <button v-if="query || filter !== 'ALL'" class="text-button" @click="query = ''; filter = 'ALL'">清除筛选</button></div>
       <div v-else class="task-list" aria-label="分析任务列表"><button v-for="job in visibleJobs" :key="job.id" class="task-row" :class="{ active: selectedJob?.id === job.id }" :aria-current="selectedJob?.id === job.id ? 'true' : undefined" :disabled="!!pending" @click="openTask(job.id)"><span class="video-tile" aria-hidden="true"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M8 5v14l11-7Z"/></svg></span><span class="task-info"><strong :title="videoSearchText(job.video_id)">{{ videoName(job.video_id) }}</strong><span>第 {{ job.generation }} 次分析 · {{ date(job.created_at) }}</span><span class="task-row-bottom"><span class="status" :class="job.status.toLowerCase()">{{ names[job.status] ?? job.status }}</span><small>#{{ job.id.slice(0, 8) }}</small></span></span></button></div>
-      <div class="sidebar-footer"><span>本地工作区</span><span>{{ videos.length }} 个视频素材</span></div>
+      </div><div class="sidebar-footer"><span>本地工作区</span><span>{{ videos.length }} 个视频素材</span></div>
     </aside>
     <main class="workbench-main" :inert="compactLayout && mobileTasksOpen ? true : undefined">
       <div class="workspace-toolbar">
@@ -471,10 +509,10 @@ onUnmounted(() => { stopped = true; window.removeEventListener('storage', videoS
         <div class="current-video"><VideoAliasEditor v-if="currentVideo" :key="currentVideo.id" :original="currentVideo.original_filename" :alias="videoAliases.names.get(currentVideo.id) || ''" :temporary="videoAliases.temporary.has(currentVideo.id)" @save="videoAliases.save(currentVideo.id, $event)" /><h1 v-else>{{ selectedJob ? videoName(selectedJob.video_id) : '剪辑工作台' }}</h1><div class="current-video-meta"><p v-if="selectedJob">第 {{ selectedJob.generation }} 次分析<span v-if="!resultsAvailable" class="header-stage-progress">{{ completeCount }}/{{ selectedJob.stages.length }} 阶段完成</span></p><div class="header-state"><span v-if="selectedJob" class="status" :class="selectedJob.status.toLowerCase()">{{ resultsAvailable ? '解析完成' : names[selectedJob.status] ?? selectedJob.status }}</span><span class="connection"><i :class="{ online }"></i>{{ online ? '服务已连接' : '服务未连接' }}</span></div></div></div>
       </header>
       <div class="workspace-tabs" role="tablist" aria-label="视频工作区" @keydown="tabKey">
-        <button id="workbench-tab-clips" role="tab" aria-controls="workbench-pane-clips" :aria-selected="activeTab === 'clips'" :tabindex="activeTab === 'clips' ? 0 : -1" :disabled="!topicResultsAvailable" @click="setTab('clips')"><svg class="workspace-tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="m8.5 7.5 12 13m-12-4 12-13"/></svg>按需剪辑<span v-if="intentEditor?.dirty" class="draft-dot" aria-label="有未提交修改"></span></button>
-        <button id="workbench-tab-agent" role="tab" aria-controls="workbench-pane-agent" :aria-selected="activeTab === 'agent'" :tabindex="activeTab === 'agent' ? 0 : -1" :disabled="!topicResultsAvailable" @click="setTab('agent')"><svg class="workspace-tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M5 4h14a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H9l-6 3V6a2 2 0 0 1 2-2Z"/><path d="M7 9h10M7 13h6"/></svg>视频对话<span v-if="agentEditor?.dirty" class="draft-dot" aria-label="有未提交输入"></span></button>
-        <button id="workbench-tab-transcript" role="tab" aria-controls="workbench-pane-transcript" :aria-selected="activeTab === 'transcript'" :tabindex="activeTab === 'transcript' ? 0 : -1" :disabled="!topicResultsAvailable" @click="setTab('transcript')"><svg class="workspace-tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5M7 9h7M7 12h5"/></svg>原句搜索</button>
-        <button id="workbench-tab-topics" role="tab" aria-controls="workbench-pane-topics" :aria-selected="activeTab === 'topics'" :tabindex="activeTab === 'topics' ? 0 : -1" :disabled="!resultsAvailable" @click="setTab('topics')"><svg class="workspace-tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M8 4v16M15 4v16"/></svg>{{ selectedJob && !topicMode ? '片段审核' : '话题切分' }}<span v-if="reviewEditor?.dirty" class="draft-dot" aria-label="有未保存修改"></span></button>
+        <button id="workbench-tab-clips" role="tab" aria-controls="workbench-pane-clips" :aria-selected="activeTab === 'clips'" :tabindex="activeTab === 'clips' ? 0 : -1" :disabled="!topicToolsAvailable" @click="setTab('clips')"><svg class="workspace-tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="m8.5 7.5 12 13m-12-4 12-13"/></svg>按需剪辑<span v-if="intentEditor?.dirty" class="draft-dot" aria-label="有未提交修改"></span></button>
+        <button id="workbench-tab-agent" role="tab" aria-controls="workbench-pane-agent" :aria-selected="activeTab === 'agent'" :tabindex="activeTab === 'agent' ? 0 : -1" :disabled="!topicToolsAvailable" @click="setTab('agent')"><svg class="workspace-tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M5 4h14a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H9l-6 3V6a2 2 0 0 1 2-2Z"/><path d="M7 9h10M7 13h6"/></svg>视频对话<span v-if="agentEditor?.dirty" class="draft-dot" aria-label="有未提交输入"></span></button>
+        <button id="workbench-tab-transcript" role="tab" aria-controls="workbench-pane-transcript" :aria-selected="activeTab === 'transcript'" :tabindex="activeTab === 'transcript' ? 0 : -1" :disabled="!topicToolsAvailable" @click="setTab('transcript')"><svg class="workspace-tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5M7 9h7M7 12h5"/></svg>原句搜索</button>
+        <button id="workbench-tab-topics" role="tab" aria-controls="workbench-pane-topics" :aria-selected="activeTab === 'topics'" :tabindex="activeTab === 'topics' ? 0 : -1" :disabled="!toolsAvailable" @click="setTab('topics')"><svg class="workspace-tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M8 4v16M15 4v16"/></svg>{{ toolsAvailable && !topicToolsAvailable ? '片段审核' : '话题切分' }}<span v-if="reviewEditor?.dirty" class="draft-dot" aria-label="有未保存修改"></span></button>
         <button id="workbench-tab-task" role="tab" aria-controls="workbench-pane-task" :aria-selected="activeTab === 'task'" :tabindex="activeTab === 'task' ? 0 : -1" @click="setTab('task')"><svg class="workspace-tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M5 4h14v16H5zM8 8h8M8 12h8M8 16h5"/></svg>{{ selectedJob ? '任务详情' : '创建分析' }}</button>
       </div>
       <div id="workbench-material-actions" class="workspace-material-actions" role="group" aria-label="视频素材操作"><button class="header-upload secondary" aria-label="上传视频" title="上传视频" :disabled="!!pending" @click="chooseUpload"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M12 16V4m-4 4 4-4 4 4M5 15v4a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-4"/></svg><span class="header-upload-label">上传视频</span><span class="header-upload-short">上传</span></button></div>
@@ -493,11 +531,11 @@ onUnmounted(() => { stopped = true; window.removeEventListener('storage', videoS
           <ReviewPanel v-else-if="selectedJob?.status === 'REVIEW_READY' && currentVideo" :key="selectedJob.id" ref="reviewEditor" :active="activeTab === 'topics'" :job-id="selectedJob.id" :video-url="currentVideo.content_url" />
         </div>
         <div id="workbench-pane-clips" v-show="activeTab === 'clips'" class="workbench-pane intent-workspace-pane" role="tabpanel" aria-labelledby="workbench-tab-clips">
-          <IntentClipPanel v-if="selectedJob?.status === 'REVIEW_READY' && currentVideo && topicMode" :key="`intent-${selectedJob.id}`" ref="intentEditor" :active="activeTab === 'clips'" :job-id="selectedJob.id" :video-url="currentVideo.content_url" :video-id="currentVideo.id" :video-hash="currentVideo.content_hash" />
+          <IntentClipPanel v-if="selectedJob?.status === 'REVIEW_READY' && currentVideo && topicMode" :key="`intent-${selectedJob.id}`" ref="intentEditor" :video-name="currentVideo.original_filename" :active="activeTab === 'clips'" :job-id="selectedJob.id" :video-url="currentVideo.content_url" :video-id="currentVideo.id" :video-hash="currentVideo.content_hash" />
         </div>
-        <div id="workbench-pane-task" v-show="activeTab === 'task'" class="workbench-pane task-pane" role="tabpanel" aria-labelledby="workbench-tab-task"><div class="settings-grid">
+        <div id="workbench-pane-task" v-show="activeTab === 'task'" class="workbench-pane task-pane" role="tabpanel" aria-labelledby="workbench-tab-task"><SourceStudio :video="currentVideo" :active="activeTab === 'task'" @cover="rememberCover">
           <section class="panel setup-panel">
-            <div v-if="selectedJob || videos.length" class="panel-heading"><h2>{{ selectedJob ? '任务详情' : '选择视频' }}</h2><span v-if="selectedJob" class="subtle-number">{{ streamLabels[streamMode] }} · #{{ selectedJob.id.slice(0, 8) }}</span></div>
+            <div v-if="selectedJob || videos.length" class="panel-heading"><h2>{{ selectedJob ? '任务详情' : '素材属性' }}</h2><span v-if="selectedJob" class="subtle-number">{{ streamLabels[streamMode] }} · #{{ selectedJob.id.slice(0, 8) }}</span></div>
             <div class="setup-body">
               <div v-if="loading && !videos.length" class="source-upload-empty" role="status"><p>正在读取视频素材…</p></div>
               <div v-else-if="!videos.length && !selectedJob" class="source-upload-empty">
@@ -507,6 +545,7 @@ onUnmounted(() => { stopped = true; window.removeEventListener('storage', videoS
               </div>
               <template v-else>
                 <label class="field-label" for="source-video">视频来源</label><select id="source-video" v-model="selectedVideoId" :disabled="!!pending" @change="selectVideo"><option value="" disabled>选择视频素材</option><option v-for="video in videos" :key="video.id" :value="video.id">{{ videoSearchName(video.original_filename, videoAliases.names.get(video.id)) }}</option></select>
+                <dl v-if="currentVideo && !selectedJob" class="asset-facts"><dt>文件大小</dt><dd>{{ (currentVideo.size_bytes / 1024 / 1024).toFixed(1) }} MB</dd><dt>入库时间</dt><dd>{{ date(currentVideo.created_at) }}</dd></dl>
               </template>
               <template v-if="selectedJob">
                 <p class="help" aria-label="画面取证策略">{{ samplingLabel(selectedJob.config) }}</p>
@@ -551,8 +590,8 @@ onUnmounted(() => { stopped = true; window.removeEventListener('storage', videoS
               </template>
             </div>
           </section>
-          <div class="settings-side"><section v-if="currentVideo" class="panel source-panel"><div class="panel-heading"><div><h2>原视频预览</h2><p>{{ currentVideo.original_filename }}</p></div><span class="subtle-number">{{ (currentVideo.size_bytes / 1024 / 1024).toFixed(1) }} MB</span></div><video ref="taskPreview" :key="currentVideo.id" :src="currentVideo.content_url" controls preload="metadata" playsinline @play="activeTab !== 'task' && taskPreview?.pause()"></video><p class="source-caption">分析、原句定位与导出均使用此视频。</p></section><ExecutorStatus :key="selectedJob?.id ?? 'workspace'" :job="selectedJob" /></div>
-        </div></div>
+          <ExecutorStatus :key="selectedJob?.id ?? 'workspace'" :job="selectedJob" />
+        </SourceStudio></div>
       </div>
     </main>
   </div>

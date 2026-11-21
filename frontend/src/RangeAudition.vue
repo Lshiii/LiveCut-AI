@@ -75,7 +75,7 @@ onBeforeUnmount(() => { document.removeEventListener('visibilitychange', changeV
 .range-listen strong { font-size: 14px; }
 .range-listen small { color: var(--workspace-muted,#675f56); font-size: 12px; }
 .range-listen-actions { display: flex; flex-wrap: wrap; gap: 5px; }
-.range-listen-actions button { min-height: 34px; border: 1px solid var(--workspace-border,#ddd); border-radius: 6px; padding: 4px 9px; background: white; color: var(--workspace-text,#292621); font: inherit; font-size: 13px; }
+.range-listen-actions button { min-height: 34px; border: 1px solid var(--workspace-border,#ddd); border-radius: 6px; padding: 4px 9px; background: var(--workspace-surface); color: var(--workspace-text,#292621); font: inherit; font-size: 13px; }
 .range-listen-actions button[aria-pressed=true] { color: var(--workspace-accent,#a94424); border-color: currentColor; }
 @media(max-width:700px) {
   .range-monitor { display: grid; grid-template-columns: minmax(72px, 27%) 1fr; align-items: center; gap: 10px; }

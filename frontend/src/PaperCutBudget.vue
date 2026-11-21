@@ -81,7 +81,7 @@ onBeforeUnmount(clear)
 </template>
 
 <style scoped>
-.cut-budget { padding: .55rem 1rem; border-bottom: 1px solid #d3ded1; background: #f5f8f3; overflow-y: auto; max-height: 33dvh; flex-shrink: 0; }
+.cut-budget { padding: .55rem 1rem; border-bottom: 1px solid var(--workspace-border); background: var(--studio-raised); overflow-y: auto; max-height: 33dvh; flex-shrink: 0; }
 .budget-controls, .budget-result { display: flex; align-items: center; gap: .4rem .75rem; flex-wrap: wrap; }
 .budget-controls label { display: flex; gap: .45rem; align-items: center; font-size: .9rem; }
 .budget-controls input { width: 5.5rem; min-height: 30px; }

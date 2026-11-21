@@ -138,26 +138,26 @@ defineExpose({ flush: leaving })
 </template>
 
 <style scoped>
-.draft-backup { flex: none; min-width: 0; max-height: min(260px, 35%); overflow-y: auto; overscroll-behavior: contain; border-bottom: 1px solid #e2e8f0; background: #f8fafc; padding: 7px 14px; color: #64748b; font: 12px/1.7 system-ui, sans-serif; }
-.draft-backup-idle { padding-block: 1px; background: #fff; }
-.draft-backup-idle .draft-backup-status { padding-block: 0; background: #fff; }
+.draft-backup { flex: none; min-width: 0; max-height: min(260px, 35%); overflow-y: auto; overscroll-behavior: contain; border-bottom: 1px solid var(--workspace-border); background: var(--studio-raised); padding: 7px 14px; color: var(--workspace-muted); font: 12px/1.7 system-ui, sans-serif; }
+.draft-backup-idle { padding-block: 1px; background: var(--workspace-surface); }
+.draft-backup-idle .draft-backup-status { padding-block: 0; background: var(--workspace-surface); }
 .draft-backup-idle .draft-backup-status > span { font-size: 11px; }
-.draft-backup-idle button { min-height: 28px; color: #64748b; }
+.draft-backup-idle button { min-height: 28px; color: var(--workspace-muted); }
 .draft-backup p { margin: 4px 0; overflow-wrap: anywhere; }
 .draft-backup-status, .draft-backup-actions, .draft-backup-record > div:first-child { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; min-width: 0; }
 .draft-backup-status > span { margin-right: auto; }
-.draft-backup-status { position: sticky; top: 0; z-index: 1; padding-block: 2px; background: #f8fafc; }
-.draft-backup button { min-height: 28px; padding: 3px 0; border: 0; background: transparent; color: #9d5b3f; font: inherit; text-align: left; cursor: pointer; }
+.draft-backup-status { position: sticky; top: 0; z-index: 1; padding-block: 2px; background: var(--studio-raised); }
+.draft-backup button { min-height: 28px; padding: 3px 0; border: 0; background: transparent; color: var(--workspace-accent); font: inherit; text-align: left; cursor: pointer; }
 .draft-backup button:disabled { opacity: .45; cursor: not-allowed; }
-.draft-backup button:focus-visible { outline: 2px solid #e89778; outline-offset: 2px; }
+.draft-backup button:focus-visible { outline: 2px solid var(--workspace-accent); outline-offset: 2px; }
 .draft-backup-file { display: none; }
-.draft-backup-error { color: #9a4f32; }
-.draft-backup-hint { color: #64748b; }
+.draft-backup-error { color: var(--studio-danger); }
+.draft-backup-hint { color: var(--workspace-muted); }
 .draft-backup-history { padding-top: 5px; }
-.draft-backup-record { margin-top: 7px; padding: 8px 10px; border: 1px solid #e2e8f0; border-radius: 6px; background: #fff; }
-.draft-backup-record strong { color: #475569; font-weight: 600; overflow-wrap: anywhere; }
-.draft-backup-record time { margin-left: auto; color: #64748b; font-size: 11px; }
-.draft-backup-remove { padding: 7px 9px; border-radius: 5px; background: #fff7ed; }
+.draft-backup-record { margin-top: 7px; padding: 8px 10px; border: 1px solid var(--workspace-border); border-radius: 6px; background: var(--workspace-surface); }
+.draft-backup-record strong { color: var(--workspace-text); font-weight: 600; overflow-wrap: anywhere; }
+.draft-backup-record time { margin-left: auto; color: var(--workspace-muted); font-size: 11px; }
+.draft-backup-remove { padding: 7px 9px; border-radius: 5px; background: color-mix(in srgb, var(--studio-warning) 12%, var(--workspace-surface)); }
 .draft-backup-remove button { margin-right: 14px; }
 @media (max-width: 600px) { .draft-backup { padding-inline: 10px; max-height: min(230px, 34%); } }
 @media (max-height: 480px) { .draft-backup { max-height: 130px; } }

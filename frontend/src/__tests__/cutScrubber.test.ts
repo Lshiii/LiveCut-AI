@@ -6,7 +6,7 @@ import { topicTime } from '../topics.ts'
 import { allHostNodes, compileHostComponent, flushHost, hostNode, hostRenderer } from './support/vueHost.ts'
 
 test('only explicit scrubbing emits seeks, with a stable zoom window during a drag and keyboard millisecond precision', async () => {
-  const component = compileHostComponent(new URL('../CutScrubber.vue', import.meta.url), { './editTimeline': mapping, './topics': { topicTime } })
+  const component = compileHostComponent(new URL('../CutScrubber.vue', import.meta.url), { './editTimeline': mapping, './topics': { topicTime }, './FrameStrip.vue': { render: () => null } })
   const root = hostNode('root'), events: number[] = []
   let positionMs: number | null = 7000, disabled = false
   const render = async () => {

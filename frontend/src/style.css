@@ -1,15 +1,21 @@
 :root {
-  --workspace-canvas: #f4f3ef;
-  --workspace-surface: #fff;
-  --workspace-hover: #eeece6;
-  --workspace-border: #e4e0d8;
-  --workspace-control-border: #93897d;
-  --workspace-text: #292621;
-  --workspace-muted: #675f56;
-  --workspace-accent: #a94424;
-  --workspace-accent-hover: #8b351a;
-  --workspace-accent-soft: #f8eee8;
-  --workspace-video: #211f1b;
+  color-scheme: dark;
+  --workspace-canvas: #101215;
+  --workspace-surface: #191c21;
+  --workspace-hover: #2c323a;
+  --workspace-border: #31363d;
+  --workspace-control-border: #525b65;
+  --workspace-text: #e8ecef;
+  --workspace-muted: #abb4bd;
+  --workspace-accent: #70e3cd;
+  --workspace-accent-hover: #96efdc;
+  --workspace-accent-soft: #1d3734;
+  --workspace-video: #090b0d;
+  --studio-raised: #252a31;
+  --studio-well: #101215;
+  --studio-ink: #092320;
+  --studio-warning: #f2c184;
+  --studio-danger: #ffacaa;
   --workspace-font: 'Segoe UI', 'PingFang SC', 'Microsoft YaHei UI', 'Microsoft YaHei', sans-serif;
   --workspace-mono: ui-monospace, 'Cascadia Mono', Consolas, monospace;
   font-family: var(--workspace-font);
@@ -39,7 +45,7 @@ h1, h2, h3, p { margin: 0; }
 .nav-item { display: flex; align-items: center; gap: 10px; padding: 13px 15px; border-radius: 8px; font-size: 13px; }
 .nav-item > span { font-size: 20px; }
 .nav-item b { margin-left: auto; font-size: 11px; font-weight: 500; background: #fff3eb; padding: 2px 7px; border-radius: 4px; }
-.selected { background: #fbede6; color: #b74e2c; font-weight: 600; }
+.rail .selected { background: var(--workspace-accent-soft); color: var(--workspace-accent); font-weight: 600; }
 .rail-note { border: 1px solid #e3e8de; border-radius: 8px; padding: 13px 10px; margin-top: 32px; font-size: 12px; }
 .small-dot { display: inline-block; width: 6px; height: 6px; background: #74947f; border-radius: 50%; margin: 0 5px; }
 .rail-note p { font-size: 10px; color: #929e8b; margin: 7px 0 0 12px; }
@@ -57,7 +63,7 @@ main { margin-left: 220px; width: calc(100% - 220px); }
 h1 { font-size: 26px; letter-spacing: -1px; font-weight: 600; }
 h1 > span { color: #e5734d; }
 .page-title p { margin-top: 12px; font-size: 12px; color: #8a987f; }
-.primary { border-radius: 8px; background: var(--workspace-accent); color: white; font-size: 13px; font-weight: 600; }
+.primary { border-radius: 6px; background: var(--workspace-accent); color: var(--studio-ink); font-size: 13px; font-weight: 600; }
 .primary:hover:not(:disabled) { background: var(--workspace-accent-hover); }
 .upload-button { padding: 12px 18px; white-space: nowrap; }
 .upload-button > span { margin-right: 7px; font-size: 18px; font-weight: 400; }

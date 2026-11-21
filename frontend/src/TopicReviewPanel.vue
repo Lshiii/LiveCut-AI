@@ -234,7 +234,7 @@ onBeforeUnmount(() => { stopped = true; version++; preview.cancel(); player.valu
 .topic-view-switch > button { min-height: 44px; padding: 11px 0 9px; border: 0; border-bottom: 2px solid transparent; border-radius: 0; background: none; color: var(--workspace-muted, #675f56); font: inherit; white-space: nowrap; }
 .topic-view-switch > button[aria-selected=true] { color: var(--workspace-accent, #a94424); border-bottom-color: var(--workspace-accent, #a94424); font-weight: 600; }
 .topic-draft-mark, .topic-version-count { margin-left: 6px; font-size: 13px; font-weight: 400; color: var(--workspace-muted, #675f56); }
-.topic-draft-mark { color: #b06138; }
+.topic-draft-mark { color: var(--studio-warning); }
 .topic-review-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin-left: auto; color: var(--workspace-muted, #675f56); font-size: 13px; }
 .topic-review-meta .status { padding: 0; border: 0; background: transparent; color: var(--workspace-muted, #675f56); font-size: 13px; }
 .topic-review-meta .text-button { min-height: 36px; padding: 7px 4px; font-size: 13px; }
@@ -253,7 +253,7 @@ onBeforeUnmount(() => { stopped = true; version++; preview.cancel(); player.valu
 .topic-playback-meta { flex: none; min-width: 0; }
 .topic-timeline { position: relative; height: 16px; margin: 0 0 5px; background: var(--workspace-hover, #eeebe4); border-radius: 3px; overflow: hidden; }
 .topic-timeline button { position: absolute; height: 100%; background: var(--workspace-border, #e4e0d8); border: 1px solid var(--workspace-surface, #fff); border-radius: 2px; }
-.topic-timeline .enabled { background: #b3c8b0; }
+.topic-timeline .enabled { background: color-mix(in srgb, var(--workspace-accent) 45%, var(--studio-raised)); }
 .topic-timeline .focused { background: var(--workspace-accent, #a94424); }
 .timeline-labels { display: flex; justify-content: space-between; gap: 6px; color: var(--workspace-muted, #675f56); font-size: 13px; font-variant-numeric: tabular-nums; line-height: 1.5; }
 .preview-status { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: center; margin: 5px 0 0; color: var(--workspace-muted, #675f56); font-size: 13px; line-height: 1.5; }
@@ -298,7 +298,7 @@ onBeforeUnmount(() => { stopped = true; version++; preview.cancel(); player.valu
 .topic-card-footer { display: flex; justify-content: flex-end; align-items: center; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
 .topic-card-footer > span { margin-right: auto; font-size: 13px; color: var(--workspace-muted, #675f56); }
 .topic-card-footer > .text-button { min-height: 36px; padding: 7px 10px; border: 1px solid var(--workspace-border, #e4e0d8); border-radius: 8px; background: var(--workspace-surface, #fff); font-size: 13px; }
-.topic-validation { flex: none; max-height: 48px; overflow-y: auto; margin: 0 12px 7px; color: #a95032; font-size: 13px; line-height: 1.5; }
+.topic-validation { flex: none; max-height: 48px; overflow-y: auto; margin: 0 12px 7px; color: var(--studio-danger); font-size: 13px; line-height: 1.5; }
 .topic-savebar { flex: none; display: flex; flex-wrap: wrap; align-items: center; gap: 10px 12px; padding: 12px 16px; border-top: 1px solid var(--workspace-border, #e4e0d8); background: var(--workspace-surface, #fff); position: relative; z-index: 2; }
 .topic-savebar > div { flex: 1; min-width: 140px; display: flex; flex-wrap: wrap; align-items: center; gap: 3px 10px; }
 .topic-savebar b { font-size: 14px; font-weight: 600; color: var(--workspace-text, #292621); }

@@ -250,3 +250,75 @@
 @container workspace (max-width: 900px) {
   .settings-grid { grid-template-columns: minmax(0, 1fr); }
 }
+
+/* Shared workbench chrome, material bin and docked inspector. */
+.workbench-shell { --workspace-preview-width:clamp(320px,42%,630px); }
+.workbench-shell .panel { background:var(--workspace-surface); }
+.workbench-shell .secondary { background:var(--studio-raised); color:var(--workspace-text); }
+.workbench-shell .primary { color:var(--studio-ink); }
+.workbench-shell :where(input:not([type=range]):not([type=checkbox]):not([type=radio]), select, textarea) { background-color:var(--studio-well); color:var(--workspace-text); }
+.workbench-shell option { background:var(--studio-raised); color:var(--workspace-text); }
+.workbench-shell .status.review_ready,.workbench-shell .status.confirmed,.workbench-shell .succeeded .step { color:var(--workspace-accent); background:var(--workspace-accent-soft); }
+.workbench-shell .status.running,.workbench-shell .running .step { color:var(--studio-warning); background:#392f22; }
+.workbench-shell .status.failed,.workbench-shell .failed .step { color:var(--studio-danger); background:#3f2729; }
+.workbench-shell .message.error { color:var(--studio-danger); border-color:#6e4346; background:#332427; }
+.workbench-shell .message.notice { color:#baead7; border-color:#365749; background:#1c3028; }
+.workbench-shell .connection i.online { background:var(--workspace-accent); }
+.workbench-sidebar { background:#16191e; padding-inline:14px; }
+.workbench-sidebar .brand { gap:10px; margin:0 -2px 16px; padding:0 2px 16px; border-bottom:1px solid var(--workspace-border); }
+.workbench-sidebar .brand-mark { width:34px; height:34px; color:var(--studio-ink); background:var(--workspace-accent); border-radius:8px; }
+.workbench-sidebar .brand-mark svg { width:26px; height:26px; }
+.workbench-sidebar .brand strong { font-size:21px; letter-spacing:-.6px; }
+.workbench-sidebar .brand strong > span { color:var(--workspace-accent); }
+.library-scroll { flex:1; min-height:0; overflow-y:auto; scrollbar-width:thin; padding:0 2px 12px; }
+.bin-count { padding:1px 6px; border-radius:4px; color:var(--workspace-muted); background:var(--studio-raised); font:11px/1.5 var(--workspace-mono); }
+.bin-actions { display:flex; gap:6px; margin:8px 0; }
+.bin-actions button { flex:1; min-height:34px; }
+.asset-bin { display:grid; gap:6px; }
+.asset-card { display:flex; align-items:center; gap:9px; min-width:0; width:100%; text-align:left; padding:5px; border:1px solid transparent; background:transparent; color:var(--workspace-text); border-radius:6px; }
+.asset-card:hover { background:var(--studio-raised); }
+.asset-card.chosen { border-color:#42605b; background:#202d2c; }
+.asset-preview { width:65px; height:44px; display:grid; place-items:center; flex:none; background:var(--studio-well); border-radius:3px; overflow:hidden; }
+.asset-preview img { width:100%; height:100%; object-fit:cover; }
+.asset-preview svg { width:24px; height:24px; fill:none; stroke:var(--workspace-muted); stroke-width:1.4; }
+.asset-label { display:grid; min-width:0; gap:3px; }
+.asset-label strong { font-size:12px; font-weight:550; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.asset-label small { color:var(--workspace-muted); font:10px/1.5 var(--workspace-mono); }
+.task-group { margin-top:20px; padding-top:12px; border-top:1px solid var(--workspace-border); }
+.sidebar-create { display:block; margin:0 0 8px auto; }
+.workbench-sidebar .task-row { background:transparent; }
+.workbench-sidebar .task-list { overflow:visible; margin:0; padding:0; }
+.workbench-shell .sidebar-search { background:var(--studio-well); border-color:var(--workspace-border); }
+.workbench-sidebar .sidebar-search input { background:transparent; }
+.workspace-toolbar { background:#171a1f; }
+.workbench-shell .workspace-tabs > button[aria-selected=true] { color:var(--workspace-accent); }
+.workbench-shell .workspace-tabs > button:disabled { opacity:.65; }
+.workbench-pane.task-pane { padding:10px; }
+.studio-inspector .setup-panel,.studio-inspector .executor-status { border:0; background:transparent; border-radius:0; }
+.workbench-shell .studio-inspector .panel-heading { padding:11px 15px; min-height:45px; border-bottom:1px solid var(--workspace-border); }
+.workbench-shell .studio-inspector .panel-heading h2 { font-size:14px; }
+.workbench-shell .studio-inspector .setup-body { padding:13px 15px; }
+.workbench-shell .studio-inspector .setup-panel select { border-color:var(--workspace-border); background:var(--studio-well); min-height:36px; border-radius:5px; }
+.studio-inspector .executor-status { border-top:1px solid var(--workspace-border); padding:14px 15px; }
+.studio-inspector .asset-facts { display:grid; grid-template-columns:1fr auto; gap:6px 8px; margin:13px 0; font-size:12px; color:var(--workspace-muted); }
+.studio-inspector .asset-facts dd { margin:0; color:var(--workspace-text); font-family:var(--workspace-mono); }
+.studio-inspector .continue-analysis { display:grid; gap:9px; margin:12px 0 0; padding:12px; background:var(--studio-raised); border:0; border-radius:6px; }
+.studio-inspector .continue-analysis h3 { font-size:14px; }
+.studio-inspector .continue-analysis button { min-height:36px; }
+.workbench-shell .intent-compose-view.studio-compose { max-width:none; padding:8px; }
+.studio-brief { padding:16px; }
+.studio-brief .intent-compose-title { margin-bottom:14px; }
+.studio-brief .intent-compose-title h3 { font-size:19px; }
+.studio-brief .intent-compose-title p { font-size:13px; }
+.studio-brief .intent-compose { border:0; padding:0; }
+.studio-brief .intent-compose > label { position:absolute; width:1px; height:1px; overflow:hidden; clip-path:inset(50%); }
+.studio-brief textarea { min-height:100px; }
+.studio-brief .intent-create-row { gap:10px; }
+.studio-brief .intent-create-row .primary { flex:none; white-space:nowrap; }
+@media(min-width:1101px) {
+  .workbench-shell:not(.sidebar-collapsed) { grid-template-columns:236px minmax(0,1fr); }
+}
+@media(min-width:761px) and (min-height:680px) {
+  .task-pane > .studio-desk { min-height:100%; grid-template-rows:minmax(0,1fr) auto; }
+}
+@media(max-width:760px) { .workbench-pane.task-pane { padding:6px; } }
