@@ -1,14 +1,15 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import type { VideoAsset } from './api'
-import { topicTime } from './topics'
+import { parseTopicTime, topicTime } from './topics'
 import FrameStrip from './FrameStrip.vue'
 
-const props = defineProps<{ video?: Pick<VideoAsset, 'id' | 'content_url' | 'original_filename'>; active: boolean; compose?: boolean }>()
+const props = defineProps<{ video?: Pick<VideoAsset, 'id' | 'content_url' | 'original_filename'>; active: boolean; compose?: boolean; setupFirst?: boolean; playheads?: Map<string, number> }>()
 const emit = defineEmits<{ cover: [url: string, image: string] }>()
 const player = ref<HTMLVideoElement | null>(null)
 const duration = ref(0), at = ref(0), width = ref(0), height = ref(0), playing = ref(false), muted = ref(false)
 const rate = ref(1), volume = ref(1), error = ref(''), fullscreen = ref(false)
+const clockDraft = ref<string | null>(null), clockError = ref('')
 const parts = computed(() => duration.value ? [{ start_ms: 0, end_ms: duration.value }] : [])
 const ticks = computed(() => [0, .25, .5, .75, 1].map(fraction => topicTime(Math.round(duration.value * fraction)).split('.')[0]))
 const percent = computed(() => duration.value ? 100 * at.value / duration.value : 0)
@@ -17,13 +18,22 @@ function metadata(event: Event) {
   const video = event.currentTarget as HTMLVideoElement
   if (video !== player.value || !Number.isFinite(video.duration)) return
   duration.value = Math.floor(video.duration * 1000); width.value = video.videoWidth; height.value = video.videoHeight
-  if (duration.value > 2000 && video.currentTime === 0 && props.active) video.currentTime = 1
+  if (props.active) restorePosition(video)
   sync()
+}
+function restorePosition(video: HTMLVideoElement) {
+  const saved = props.video && props.playheads?.get(props.video.content_url)
+  const atMs = saved ?? (duration.value > 2000 ? 1000 : 0)
+  if (duration.value && Math.abs(video.currentTime * 1000 - atMs) >= 1) video.currentTime = Math.min(duration.value, atMs) / 1000
+}
+function rememberPosition(ms: number) {
+  if (props.active && props.video && duration.value) props.playheads?.set(props.video.content_url, ms)
 }
 function sync() {
   const video = player.value
   if (!video) return
   at.value = Math.min(duration.value, Math.round(video.currentTime * 1000))
+  rememberPosition(at.value)
   playing.value = !video.paused && !video.ended; muted.value = video.muted; rate.value = video.playbackRate
   volume.value = video.volume
 }
@@ -32,9 +42,16 @@ function seek(ms: number) {
   if (video && props.active && duration.value && Number.isFinite(ms)) {
     video.pause()
     const target = Math.max(0, Math.min(ms, duration.value))
-    try { video.currentTime = target / 1000; at.value = target } catch { error.value = '暂时无法定位原片，请等待媒体加载。' }
+    try { video.currentTime = target / 1000; at.value = target; rememberPosition(target) } catch { error.value = '暂时无法定位原片，请等待媒体加载。' }
   }
 }
+function jumpTime(event: KeyboardEvent) {
+  if (event.isComposing || clockDraft.value === null) return
+  const ms = parseTopicTime(clockDraft.value)
+  if (ms === null || ms > duration.value) { clockError.value = '请输入原片时长内的时间，如 12:30。'; return }
+  seek(ms); (event.currentTarget as HTMLInputElement).blur()
+}
+function clearClock() { clockDraft.value = null; clockError.value = '' }
 async function togglePlay() {
   const video = player.value
   if (!video || !props.active || !duration.value) return
@@ -65,14 +82,17 @@ async function expand() {
 }
 function onFullscreen() { fullscreen.value = !!player.value && document.fullscreenElement === player.value }
 function onVisibility() { if (document.hidden) player.value?.pause() }
-watch(() => props.video?.id, clear, { flush: 'sync' })
-watch(() => props.active, active => { if (!active) player.value?.pause() }, { flush: 'sync' })
+watch(() => props.video?.id, () => { clear(); clearClock() }, { flush: 'sync' })
+watch(() => props.active, active => {
+  if (!active) { player.value?.pause(); clearClock() }
+  else if (player.value && duration.value) restorePosition(player.value)
+}, { flush: 'sync' })
 onMounted(() => { document.addEventListener('visibilitychange', onVisibility); document.addEventListener('fullscreenchange', onFullscreen) })
 onBeforeUnmount(() => { player.value?.pause(); document.removeEventListener('visibilitychange', onVisibility); document.removeEventListener('fullscreenchange', onFullscreen) })
 </script>
 
 <template>
-  <div class="studio-desk" :class="{ 'compose-desk': compose }">
+  <div class="studio-desk" :class="{ 'compose-desk': compose, 'has-start': !!$slots.start, 'setup-first': setupFirst }">
     <section class="monitor" aria-label="素材监看">
       <header><h2><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8m-4-4v4"/></svg>素材监看</h2>
         <span v-if="width && height" class="readout">{{ width }} × {{ height }}</span></header>
@@ -84,7 +104,10 @@ onBeforeUnmount(() => { player.value?.pause(); document.removeEventListener('vis
         <p v-if="error" class="monitor-error" role="status">{{ error }}</p>
       </div>
       <div class="transport" v-if="video">
-        <strong>{{ topicTime(at) }}</strong><span class="duration">/ {{ topicTime(duration) }}</span>
+        <input class="jump-time" aria-label="跳到原片时间" title="输入分:秒，按回车跳转" inputmode="text" :disabled="!duration"
+          :value="clockDraft ?? topicTime(at)" :aria-invalid="!!clockError" @focus="clockDraft = topicTime(at); ($event.target as HTMLInputElement).select()"
+          @input="clockDraft = ($event.target as HTMLInputElement).value; clockError = ''" @keydown.enter.prevent="jumpTime" @keydown.esc.stop="($event.target as HTMLInputElement).blur()" @blur="clearClock">
+        <span class="duration">/ {{ topicTime(duration) }}</span>
         <div class="transport-keys">
           <button aria-label="后退五秒" title="后退五秒" :disabled="!duration" @click="seek(at - 5000)"><svg viewBox="0 0 24 24"><path d="M5 5v14m14-14L8 12l11 7z"/></svg></button>
           <button class="play-key" :aria-label="playing ? '暂停原片' : '播放原片'" :title="playing ? '暂停原片' : '播放原片'" :disabled="!duration" @click="togglePlay"><svg viewBox="0 0 24 24"><path v-if="playing" d="M8 5v14m8-14v14"/><path v-else d="m8 5 11 7-11 7z" fill="currentColor"/></svg></button>
@@ -97,8 +120,9 @@ onBeforeUnmount(() => { player.value?.pause(); document.removeEventListener('vis
         </div>
         <button aria-label="全屏预览" title="全屏预览" :disabled="!duration" @click="expand"><svg viewBox="0 0 24 24"><path d="M3 9V4h6m6 0h6v5M3 15v5h6m6 0h6v-5"/></svg></button>
       </div>
+      <p v-if="clockError" class="clock-error" role="alert">{{ clockError }}</p>
     </section>
-    <aside class="studio-inspector" :aria-label="compose ? '剪辑要求' : '素材与任务设置'"><slot /></aside>
+    <aside class="studio-inspector" :aria-label="compose ? '剪辑要求' : '素材与任务设置'"><slot name="start"/><slot /></aside>
     <section class="source-timeline" aria-label="原片时间线">
       <header><h2><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="7" rx="1.5"/><path d="M3 15h12m-12 4h8m5-4h5"/></svg>原片时间线</h2>
         <span v-if="duration" class="readout">{{ topicTime(duration) }}</span></header>
@@ -137,6 +161,9 @@ header svg { color:var(--workspace-muted); }
 .transport button,.transport select { display:grid; place-items:center; min-width:32px; min-height:32px; border:0; border-radius:5px; background:transparent; color:var(--workspace-muted); }
 .transport button:hover,.transport select:hover { color:var(--workspace-text); background:var(--studio-raised); }
 .transport .play-key { color:var(--workspace-text); background:var(--studio-raised); }
+.transport .jump-time { width:10ch; min-width:0; padding:5px 3px; border:1px solid transparent; border-radius:4px; background:transparent; color:var(--workspace-accent); font:600 13px var(--workspace-mono); }
+.transport .jump-time:hover,.transport .jump-time:focus-visible { border-color:var(--workspace-control-border); background:var(--studio-well); }
+.clock-error { color:var(--studio-warning); font-size:12px; padding:0 12px 8px; }
 .transport select { font-size:12px; }
 .volume-control { position:relative; }
 .volume-popup { display:none; position:absolute; z-index:1; bottom:100%; right:0; padding:10px; background:var(--studio-raised); border:1px solid var(--workspace-control-border); border-radius:5px; }
@@ -163,5 +190,9 @@ header svg { color:var(--workspace-muted); }
   .source-timeline { grid-row:2; } .transport { padding-inline:8px; }
   .transport button { min-width:28px; } .duration { display:none; }
   .compose-desk .studio-inspector { grid-row:1; } .compose-desk .source-timeline { grid-row:3; }
+  .setup-first .studio-inspector { grid-row:1; } .setup-first .source-timeline { grid-row:3; }
+  .has-start .studio-inspector { display:contents; }
+  .has-start .studio-inspector > :deep(.edit-start) { grid-row:1; }
+  .has-start .monitor { grid-row:2; } .has-start .source-timeline { grid-row:3; }
 }
 </style>

@@ -10,6 +10,7 @@ import type { AnswerClipSelection } from './answerClip'
 import UploadPanel from './UploadPanel.vue'
 import SourceImportPanel from './SourceImportPanel.vue'
 import SourceStudio from './SourceStudio.vue'
+import EditStartPanel from './EditStartPanel.vue'
 import FailureDiagnostic from './FailureDiagnostic.vue'
 import TextRequestProgress from './TextRequestProgress.vue'
 import ExecutorStatus from './ExecutorStatus.vue'
@@ -34,16 +35,18 @@ const online = ref(false), loading = ref(true), query = ref(''), filter = ref('A
 const visualProvider = ref<'ocr' | 'none'>('none'), maxTextCalls = ref(24), maxOcrFrames = ref(DEFAULT_OCR_MAX_FRAMES)
 const recoveryBudget = ref(12)
 const pendingResumes = new Map<string, AnalysisResumeReceipt>()
-const uploadPanel = ref<{ chooseFile: () => void } | null>(null)
+const uploadPanel = ref<{ chooseFile(): void; uploadFile(file: File): Promise<void> } | null>(null)
+const dragOver = ref(false)
 const sourceImportPanel = ref<{ open: () => void } | null>(null)
 const reviewEditor = ref<{ dirty: boolean; pending: boolean } | null>(null)
-const intentEditor = ref<{ dirty: boolean; pending: boolean; prefillInstruction(value: string): boolean; prefillAnswerClip(value: AnswerClipSelection): boolean } | null>(null)
+const intentEditor = ref<{ dirty: boolean; pending: boolean; openComposer(): void; prefillInstruction(value: string): boolean; prefillAnswerClip(value: AnswerClipSelection): boolean } | null>(null)
 const agentEditor = ref<{ dirty: boolean; pending: boolean } | null>(null)
-const transcriptEditor = ref<{ dirty: boolean; pending: boolean } | null>(null)
+const transcriptEditor = ref<{ dirty: boolean; pending: boolean; openRangeSelection(): void } | null>(null)
 type WorkbenchTab = 'agent' | 'transcript' | 'topics' | 'clips' | 'task'
 const activeTab = ref<WorkbenchTab>('task'), mobileTasksOpen = ref(false)
 const compactLayout = ref(window.matchMedia('(max-width: 1100px)').matches)
 const sidebarCollapsed = ref(new URL(location.href).searchParams.has('job'))
+const historyExpanded = ref(new URL(location.href).searchParams.has('job'))
 const taskListScope = ref<TaskListScope>('recent')
 const newRunSettings = ref(false)
 const continuation = computed(() => continuationForVideo(jobs.value, selectedVideoId.value))
@@ -56,6 +59,7 @@ function updateCompactLayout() {
   if (focusInTasks && (compactLayout.value || sidebarCollapsed.value)) void nextTick(() => document.getElementById('workbench-task-toggle')?.focus())
 }
 function toggleTasks() {
+  if (!taskListExpanded.value && selectedJob.value) historyExpanded.value = true
   // A bookmarked historical analysis should still be visible when opening its library.
   if (!taskListExpanded.value && selectedJob.value && !query.value.trim() && taskListScope.value === 'recent'
       && !workbenchTasks(jobs.value, 'recent', '', 'ALL', videoName).some(job => job.id === selectedJob.value?.id)) taskListScope.value = 'all'
@@ -73,6 +77,7 @@ function taskDrawerKey(event: KeyboardEvent) {
   if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus() }
   else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus() }
 }
+const sourcePlayheads = new Map<string, number>()
 const covers = ref(new Map<string, string>()), libraryExpanded = ref(false)
 const libraryVideos = computed(() => libraryExpanded.value ? videos.value : videos.value.slice(0, 4))
 function rememberCover(url: string, image: string) {
@@ -130,7 +135,7 @@ watch(() => selectedJob.value?.id, (id, previous) => {
   activeTab.value = id && selectedJob.value?.status === 'REVIEW_READY' ? topicMode.value ? 'clips' : 'topics' : 'task'
   closeTasks()
 })
-async function setTab(tab: WorkbenchTab) {
+async function setTab(tab: WorkbenchTab, entry?: 'compose' | 'range') {
   const request = ++requestedTab
   if (tab === 'task' && openingTool) { selectionVersion++; openingTool = false }
   if (!selectedJob.value && tab !== 'task') {
@@ -146,6 +151,12 @@ async function setTab(tab: WorkbenchTab) {
   if ((tab === 'agent' || tab === 'transcript' || tab === 'clips') && !topicResultsAvailable.value) return
   if (tab === 'topics' && !resultsAvailable.value) return
   activeTab.value = tab
+  if (entry) {
+    await nextTick()
+    if (request !== requestedTab || activeTab.value !== tab) return
+    if (entry === 'compose') intentEditor.value?.openComposer()
+    else transcriptEditor.value?.openRangeSelection()
+  }
 }
 function tabKey(event: KeyboardEvent) {
   if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return
@@ -171,6 +182,13 @@ async function chooseUpload() {
   // The file input lives in main, which is inert while the task drawer is open.
   await nextTick()
   uploadPanel.value?.chooseFile()
+}
+function dropVideo(event: DragEvent) {
+  dragOver.value = false
+  const files = event.dataTransfer?.files
+  if (!files?.length || pending.value) return
+  if (files.length !== 1) { errorMessage.value = '请每次导入一个 MP4 视频。'; return }
+  void uploadPanel.value?.uploadFile(files[0]!)
 }
 async function chooseSourceImport() {
   closeTasks()
@@ -488,7 +506,9 @@ onUnmounted(() => { stopped = true; window.removeEventListener('storage', videoS
         </button>
         <button v-if="videos.length > 4" class="text-button" :aria-expanded="libraryExpanded" @click="libraryExpanded = !libraryExpanded">{{ libraryExpanded ? '收起素材' : '查看全部 ' + videos.length + ' 个素材' }}</button>
       </div>
-      <div class="sidebar-heading task-group"><h2>分析记录</h2><button class="text-button" :disabled="loading" aria-label="刷新任务列表" @click="refresh"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M20 10a8 8 0 1 0 .1 3M20 4v6h-6"/></svg></button></div>
+      <button class="history-expand" aria-controls="workbench-history" :aria-expanded="historyExpanded" @click="historyExpanded = !historyExpanded"><strong>分析记录</strong><small>{{ activeCount ? activeCount + ' 个进行中' : jobs.length + ' 次' }}</small><span aria-hidden="true">{{ historyExpanded ? '▾' : '▸' }}</span></button>
+      <div v-show="historyExpanded" id="workbench-history">
+      <div class="sidebar-heading"><span class="history-meta">历史任务</span><button class="text-button" :disabled="loading" aria-label="刷新任务列表" @click="refresh"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M20 10a8 8 0 1 0 .1 3M20 4v6h-6"/></svg></button></div>
       <button class="text-button sidebar-create" :disabled="!!pending" @click="openNewAnalysis">＋ 新建分析</button>
       <div v-if="activeCount || reviewCount" class="sidebar-counts"><span v-if="activeCount">分析中 {{ activeCount }}</span><span v-if="reviewCount">待审核 {{ reviewCount }}</span></div>
       <div class="task-scope" role="group" aria-label="任务列表范围"><button :aria-pressed="taskListScope === 'recent'" @click="taskListScope = 'recent'">最近视频</button><button :aria-pressed="taskListScope === 'all'" @click="taskListScope = 'all'">全部分析 <span v-if="jobs.length">{{ jobs.length }}</span></button></div>
@@ -499,7 +519,7 @@ onUnmounted(() => { stopped = true; window.removeEventListener('storage', videoS
       <div v-else-if="!visibleJobs.length" class="sidebar-empty">{{ jobs.length ? '没有匹配的任务' : '暂无分析任务' }}
         <button v-if="query || filter !== 'ALL'" class="text-button" @click="query = ''; filter = 'ALL'">清除筛选</button></div>
       <div v-else class="task-list" aria-label="分析任务列表"><button v-for="job in visibleJobs" :key="job.id" class="task-row" :class="{ active: selectedJob?.id === job.id }" :aria-current="selectedJob?.id === job.id ? 'true' : undefined" :disabled="!!pending" @click="openTask(job.id)"><span class="video-tile" aria-hidden="true"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M8 5v14l11-7Z"/></svg></span><span class="task-info"><strong :title="videoSearchText(job.video_id)">{{ videoName(job.video_id) }}</strong><span>第 {{ job.generation }} 次分析 · {{ date(job.created_at) }}</span><span class="task-row-bottom"><span class="status" :class="job.status.toLowerCase()">{{ names[job.status] ?? job.status }}</span><small>#{{ job.id.slice(0, 8) }}</small></span></span></button></div>
-      </div><div class="sidebar-footer"><span>本地工作区</span><span>{{ videos.length }} 个视频素材</span></div>
+      </div></div><div class="sidebar-footer"><span>本地工作区</span><span>{{ videos.length }} 个视频素材</span></div>
     </aside>
     <main class="workbench-main" :inert="compactLayout && mobileTasksOpen ? true : undefined">
       <div class="workspace-toolbar">
@@ -513,7 +533,7 @@ onUnmounted(() => { stopped = true; window.removeEventListener('storage', videoS
         <button id="workbench-tab-agent" role="tab" aria-controls="workbench-pane-agent" :aria-selected="activeTab === 'agent'" :tabindex="activeTab === 'agent' ? 0 : -1" :disabled="!topicToolsAvailable" @click="setTab('agent')"><svg class="workspace-tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M5 4h14a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H9l-6 3V6a2 2 0 0 1 2-2Z"/><path d="M7 9h10M7 13h6"/></svg>视频对话<span v-if="agentEditor?.dirty" class="draft-dot" aria-label="有未提交输入"></span></button>
         <button id="workbench-tab-transcript" role="tab" aria-controls="workbench-pane-transcript" :aria-selected="activeTab === 'transcript'" :tabindex="activeTab === 'transcript' ? 0 : -1" :disabled="!topicToolsAvailable" @click="setTab('transcript')"><svg class="workspace-tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5M7 9h7M7 12h5"/></svg>原句搜索</button>
         <button id="workbench-tab-topics" role="tab" aria-controls="workbench-pane-topics" :aria-selected="activeTab === 'topics'" :tabindex="activeTab === 'topics' ? 0 : -1" :disabled="!toolsAvailable" @click="setTab('topics')"><svg class="workspace-tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M8 4v16M15 4v16"/></svg>{{ toolsAvailable && !topicToolsAvailable ? '片段审核' : '话题切分' }}<span v-if="reviewEditor?.dirty" class="draft-dot" aria-label="有未保存修改"></span></button>
-        <button id="workbench-tab-task" role="tab" aria-controls="workbench-pane-task" :aria-selected="activeTab === 'task'" :tabindex="activeTab === 'task' ? 0 : -1" @click="setTab('task')"><svg class="workspace-tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M5 4h14v16H5zM8 8h8M8 12h8M8 16h5"/></svg>{{ selectedJob ? '任务详情' : '创建分析' }}</button>
+        <button id="workbench-tab-task" role="tab" aria-controls="workbench-pane-task" :aria-selected="activeTab === 'task'" :tabindex="activeTab === 'task' ? 0 : -1" @click="setTab('task')"><svg class="workspace-tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M5 4h14v16H5zM8 8h8M8 12h8M8 16h5"/></svg>{{ selectedJob ? '任务详情' : currentVideo ? '素材工作区' : '导入素材' }}</button>
       </div>
       <div id="workbench-material-actions" class="workspace-material-actions" role="group" aria-label="视频素材操作"><button class="header-upload secondary" aria-label="上传视频" title="上传视频" :disabled="!!pending" @click="chooseUpload"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M12 16V4m-4 4 4-4 4 4M5 15v4a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-4"/></svg><span class="header-upload-label">上传视频</span><span class="header-upload-short">上传</span></button></div>
       </div>
@@ -531,28 +551,23 @@ onUnmounted(() => { stopped = true; window.removeEventListener('storage', videoS
           <ReviewPanel v-else-if="selectedJob?.status === 'REVIEW_READY' && currentVideo" :key="selectedJob.id" ref="reviewEditor" :active="activeTab === 'topics'" :job-id="selectedJob.id" :video-url="currentVideo.content_url" />
         </div>
         <div id="workbench-pane-clips" v-show="activeTab === 'clips'" class="workbench-pane intent-workspace-pane" role="tabpanel" aria-labelledby="workbench-tab-clips">
-          <IntentClipPanel v-if="selectedJob?.status === 'REVIEW_READY' && currentVideo && topicMode" :key="`intent-${selectedJob.id}`" ref="intentEditor" :video-name="currentVideo.original_filename" :active="activeTab === 'clips'" :job-id="selectedJob.id" :video-url="currentVideo.content_url" :video-id="currentVideo.id" :video-hash="currentVideo.content_hash" />
+          <IntentClipPanel v-if="selectedJob?.status === 'REVIEW_READY' && currentVideo && topicMode" :key="`intent-${selectedJob.id}`" ref="intentEditor" :video-name="currentVideo.original_filename" :playheads="sourcePlayheads" @select-range="setTab('transcript', 'range')" :active="activeTab === 'clips'" :job-id="selectedJob.id" :video-url="currentVideo.content_url" :video-id="currentVideo.id" :video-hash="currentVideo.content_hash" />
         </div>
-        <div id="workbench-pane-task" v-show="activeTab === 'task'" class="workbench-pane task-pane" role="tabpanel" aria-labelledby="workbench-tab-task"><SourceStudio :video="currentVideo" :active="activeTab === 'task'" @cover="rememberCover">
+        <div id="workbench-pane-task" v-show="activeTab === 'task'" class="workbench-pane task-pane" role="tabpanel" aria-labelledby="workbench-tab-task"><SourceStudio v-if="currentVideo || selectedJob || videos.length" :video="currentVideo" :active="activeTab === 'task'" :setup-first="!selectedJob" :playheads="sourcePlayheads" @cover="rememberCover">
+          <template v-if="topicToolsAvailable && !newRunSettings" #start>
+            <EditStartPanel :disabled="!!pending" @describe="setTab('clips', 'compose')" @range="setTab('transcript', 'range')" @resume="setTab('clips')" />
+          </template>
           <section class="panel setup-panel">
             <div v-if="selectedJob || videos.length" class="panel-heading"><h2>{{ selectedJob ? '任务详情' : '素材属性' }}</h2><span v-if="selectedJob" class="subtle-number">{{ streamLabels[streamMode] }} · #{{ selectedJob.id.slice(0, 8) }}</span></div>
             <div class="setup-body">
-              <div v-if="loading && !videos.length" class="source-upload-empty" role="status"><p>正在读取视频素材…</p></div>
-              <div v-else-if="!videos.length && !selectedJob" class="source-upload-empty">
-                <h2>从一段视频开始</h2>
-                <p>导入本地 MP4 或公开视频链接。分析完成后，可按话题浏览、查找原句或剪成片段。</p>
-                <div class="source-empty-actions"><button class="primary" :disabled="!!pending" @click="chooseUpload">上传本地视频</button><button class="secondary" :disabled="!!pending" @click="chooseSourceImport">从链接导入</button></div>
-              </div>
-              <template v-else>
                 <label class="field-label" for="source-video">视频来源</label><select id="source-video" v-model="selectedVideoId" :disabled="!!pending" @change="selectVideo"><option value="" disabled>选择视频素材</option><option v-for="video in videos" :key="video.id" :value="video.id">{{ videoSearchName(video.original_filename, videoAliases.names.get(video.id)) }}</option></select>
                 <dl v-if="currentVideo && !selectedJob" class="asset-facts"><dt>文件大小</dt><dd>{{ (currentVideo.size_bytes / 1024 / 1024).toFixed(1) }} MB</dd><dt>入库时间</dt><dd>{{ date(currentVideo.created_at) }}</dd></dl>
-              </template>
               <template v-if="selectedJob">
                 <p class="help" aria-label="画面取证策略">{{ samplingLabel(selectedJob.config) }}</p>
                 <p v-if="selectedJob.resumed_from_job_id" class="help">本次分析继续自任务 #{{ selectedJob.resumed_from_job_id.slice(0, 8) }}。将复用已完成的音频与转写，不新增 ASR 请求；文本分析与预算独立。</p>
                 <div class="detail-status"><span class="status" :class="selectedJob.status.toLowerCase()">{{ names[selectedJob.status] ?? selectedJob.status }}</span><span>{{ completeCount }} / {{ selectedJob.stages.length }} 阶段完成</span></div>
                 <progress v-if="selectedJob.stages.length" class="stage-progress" :value="completeCount" :max="selectedJob.stages.length" aria-label="分析阶段完成进度"></progress>
-                <button v-if="resultsAvailable" class="primary create-button" @click="setTab(topicMode ? 'clips' : 'topics')">{{ topicMode ? '进入按需剪辑' : '打开片段审核' }} →</button>
+                <button v-if="resultsAvailable && !topicMode" class="primary create-button" @click="setTab(topicMode ? 'clips' : 'topics')">打开片段审核 →</button>
                 <ol class="stages"><li v-for="(stage, index) in orderedStages" :key="stage.id" :class="stage.status.toLowerCase()"><span class="step">{{ stage.status === 'SUCCEEDED' ? '✓' : index + 1 }}</span><div><b>{{ stageLabel(stage.stage_type) }}</b><small>{{ names[stage.status] ?? stage.status }}<template v-if="stage.attempt"> · 第 {{ stage.attempt }} 次执行</template></small><TextRequestProgress v-if="stage.stage_type === 'SEGMENT'" :progress="stage.text_progress" :terminal="['SUCCEEDED', 'FAILED', 'CANCELLED', 'SKIPPED'].includes(stage.status)" /><FailureDiagnostic :diagnostic="stage.diagnostic" :error-code="stage.error_code" :attempt="stage.attempt" /></div></li></ol>
                 <div class="budget"><span>已预留模型请求</span><b>文本 {{ selectedJob.budget.text_calls_reserved }}/{{ selectedJob.budget.max_text_calls }} <i>·</i> ASR {{ selectedJob.budget.asr_calls_reserved }}/{{ selectedJob.budget.max_asr_submissions }}</b><small>次数上限，不代表人民币费用</small></div>
 
@@ -569,10 +584,10 @@ onUnmounted(() => { stopped = true; window.removeEventListener('storage', videoS
                 <p class="help">“新建一次分析”会从头处理视频，并重新提交 ASR。</p>
               </template>
               <template v-else-if="videos.length">
-                <div v-if="continuation" class="continue-analysis">
+                <div v-if="continuation && !topicToolsAvailable" class="continue-analysis">
                   <div><h3>{{ continuation.status === 'REVIEW_READY' ? '这段视频已经解析完成' : '这段视频正在分析' }}</h3>
                     <p>第 {{ continuation.generation }} 次分析 · {{ date(continuation.created_at) }}</p></div>
-                  <button class="primary" :disabled="!!pending" @click="openTask(continuation.id)">{{ continuation.status === 'REVIEW_READY' ? (continuation.config?.analysis_mode === 'topics' ? '继续剪辑' : '继续审核') : '查看进度' }} →</button>
+                  <button class="primary" :disabled="!!pending" @click="openTask(continuation.id)">{{ continuation.status === 'REVIEW_READY' ? '继续审核' : '查看进度' }} →</button>
                 </div>
                 <button v-if="continuation" class="text-button new-run-toggle" :aria-expanded="newRunSettings" aria-controls="analysis-new-settings" @click="newRunSettings = !newRunSettings">{{ newRunSettings ? '收起新分析设置' : '重新分析此视频' }}</button>
                 <div v-if="!continuation || newRunSettings" id="analysis-new-settings">
@@ -590,8 +605,20 @@ onUnmounted(() => { stopped = true; window.removeEventListener('storage', videoS
               </template>
             </div>
           </section>
-          <ExecutorStatus :key="selectedJob?.id ?? 'workspace'" :job="selectedJob" />
-        </SourceStudio></div>
+          <details class="executor-disclosure"><summary>执行服务状态</summary><ExecutorStatus :key="selectedJob?.id ?? 'workspace'" :job="selectedJob" /></details>
+        </SourceStudio>
+          <div v-else-if="loading" class="import-stage" role="status">正在读取素材库…</div>
+          <div v-else-if="!online" class="import-stage" role="status"><div class="import-stage-body"><h1>暂时无法读取素材库</h1><button class="secondary" @click="refresh">重新连接</button></div></div>
+          <section v-else class="import-stage" aria-label="导入第一条素材" :class="{ hovering: dragOver }"
+            @dragover.prevent="dragOver = !!$event.dataTransfer?.types.includes('Files')" @dragleave.self="dragOver = false" @drop.prevent="dropVideo">
+            <div class="import-stage-body">
+              <svg viewBox="0 0 48 48" aria-hidden="true"><path d="M7 15V7h10m14 0h10v8M7 33v8h10m14 0h10v-8M24 31V17m-6 6 6-6 6 6"/></svg>
+              <h1>导入第一条视频</h1><p>把 MP4 拖到这里，或粘贴视频链接。</p>
+              <div><button class="primary" :disabled="!!pending" @click="chooseUpload">上传本地视频</button><button class="secondary" :disabled="!!pending" @click="chooseSourceImport">从链接导入</button></div>
+            </div>
+          </section>
+          <details v-if="!selectedJob && !videos.length && online" class="executor-disclosure"><summary>执行服务状态</summary><ExecutorStatus :job="null" /></details>
+        </div>
       </div>
     </main>
   </div>

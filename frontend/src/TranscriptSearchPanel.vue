@@ -3,16 +3,36 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, useId, watch } fro
 import { api } from './api'
 import ManualClipPanel from './ManualClipPanel.vue'
 import { SequencePreview, type SequencePreviewState } from './sequencePreview'
-import { TranscriptSearchWorkspace, transcriptHighlights, transcriptQueryError, transcriptQuote, transcriptTime,
+import { TranscriptSearchWorkspace, sameTranscriptSource, sameTranscriptUtterance, transcriptHighlights, transcriptQueryError, transcriptQuote, transcriptTime,
   type TranscriptOwner, type TranscriptSource, type TranscriptSearchState, type TranscriptUtterance } from './transcriptSearch'
 
 const props = defineProps<{ jobId: string; videoId: string; generation: number; videoHash: string; videoUrl: string; videoName: string; active: boolean }>()
 const componentId = useId()
 const view = ref<'search' | 'manual'>('search'), handoffError = ref('')
+const pickingRange = ref(false)
+const rangeToggle = ref<HTMLButtonElement | null>(null), manualTab = ref<HTMLButtonElement | null>(null)
 const manualEditor = ref<{ dirty: boolean; pending: boolean; unresolved: boolean; message: string;
-  summary: { title: string; start: TranscriptUtterance | null; end: TranscriptUtterance | null; hasRange: boolean; planId: string | null };
-  setBoundary(field: 'start' | 'end', source: TranscriptSource, item: TranscriptUtterance): boolean } | null>(null)
-defineExpose({ dirty: computed(() => !!manualEditor.value?.dirty), pending: computed(() => !!manualEditor.value?.pending) })
+  summary: { title: string; source: TranscriptSource | null; start: TranscriptUtterance | null; end: TranscriptUtterance | null; hasRange: boolean; planId: string | null };
+  setBoundary(field: 'start' | 'end', source: TranscriptSource, item: TranscriptUtterance): boolean; checkRange(): Promise<void> } | null>(null)
+defineExpose({ dirty: computed(() => !!manualEditor.value?.dirty), pending: computed(() => !!manualEditor.value?.pending), openRangeSelection })
+function openRangeSelection() {
+  view.value = 'search'
+  pickingRange.value = true
+  void nextTick(() => { if (props.active && view.value === 'search') rangeToggle.value?.focus() })
+}
+async function reviewRange() {
+  if (!available.value || !orderedRange.value) return
+  view.value = 'manual'
+  await nextTick()
+  if (!props.active || view.value !== 'manual') return
+  manualTab.value?.focus()
+  await manualEditor.value?.checkRange()
+}
+const range = computed(() => manualEditor.value?.summary)
+const orderedRange = computed(() => {
+  const start = range.value?.start, end = range.value?.end
+  return !!start && !!end && start.start_ms <= end.start_ms && start.end_ms <= end.end_ms
+})
 const state = ref<TranscriptSearchState>(), queryDraft = ref(''), pageVisible = ref(!document.hidden)
 const player = ref<HTMLVideoElement | null>(null), playerRegion = ref<HTMLElement | null>(null)
 const previewState = ref<SequencePreviewState | null>(null), playbackError = ref(''), preparingPlayback = ref(false)
@@ -23,6 +43,11 @@ let workspace = createWorkspace(), stopped = false, playbackVersion = 0
 state.value = workspace.state
 const currentState = computed(() => state.value!)
 const loadedPage = computed(() => currentState.value.page)
+const rangeHere = computed(() => !!range.value?.source && !!loadedPage.value && sameTranscriptSource(range.value.source, loadedPage.value.source))
+function inRange(item: TranscriptUtterance) {
+  const start = range.value?.start, end = range.value?.end
+  return rangeHere.value && orderedRange.value && start && end && item.start_ms >= start.start_ms && item.end_ms <= end.end_ms
+}
 const queryError = computed(() => transcriptQueryError(queryDraft.value))
 const usable = computed(() => { void state.value; return workspace.usable() })
 const selectedUsable = computed(() => { void state.value; return workspace.canUseSelection() })
@@ -113,8 +138,15 @@ function copy() {
 }
 function setManualBoundary(field: 'start' | 'end') {
   if (!selectedUsable.value || !currentState.value.page || !currentState.value.selected) return
+  setRowBoundary(field, currentState.value.selected)
+}
+function setRowBoundary(field: 'start' | 'end', item: TranscriptUtterance) {
+  const page = currentState.value.page
+  if (!available.value || !usable.value || !page) return
+  const row = page.items.find(value => value.utterance_id === item.utterance_id)
+  if (!row || !sameTranscriptUtterance(row, item)) return
   stopPlayback(); handoffError.value = ''
-  if (!manualEditor.value?.setBoundary(field, currentState.value.page.source, currentState.value.selected)) handoffError.value = manualEditor.value?.message || '人工片段暂不能接收原句，当前选择与人工草稿均保留。'
+  if (!manualEditor.value?.setBoundary(field, page.source, row)) handoffError.value = manualEditor.value?.message || '人工片段暂不能接收原句，请先核对当前草稿。'
 }
 function viewKey(event: KeyboardEvent) {
   if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return
@@ -139,25 +171,40 @@ onBeforeUnmount(() => { stopped = true; stopPlayback(); workspace.dispose(); doc
 </script>
 
 <template>
-  <section class="panel transcript-search" aria-label="全文原句搜索与回看">
-    <div class="transcript-view-tabs" role="tablist" aria-label="原句与人工剪辑视图" @keydown="viewKey"><button :id="`${componentId}-search-tab`" role="tab" :aria-controls="`${componentId}-search-view`" :aria-selected="view === 'search'" :tabindex="view === 'search' ? 0 : -1" @click="view = 'search'">搜索与回看</button><button :id="`${componentId}-manual-tab`" role="tab" :aria-controls="`${componentId}-manual-view`" :aria-selected="view === 'manual'" :tabindex="view === 'manual' ? 0 : -1" @click="view = 'manual'">人工剪辑<span v-if="manualEditor?.dirty" class="draft-dot" aria-label="人工片段有未提交内容"></span></button></div>
+  <section class="panel transcript-search" :class="{ 'picking-range': pickingRange }" aria-label="全文原句搜索与回看">
+    <div class="transcript-view-tabs" role="tablist" aria-label="原句与人工剪辑视图" @keydown="viewKey"><button :id="`${componentId}-search-tab`" role="tab" :aria-controls="`${componentId}-search-view`" :aria-selected="view === 'search'" :tabindex="view === 'search' ? 0 : -1" @click="view = 'search'">搜索与回看</button><button ref="manualTab" :id="`${componentId}-manual-tab`" role="tab" :aria-controls="`${componentId}-manual-view`" :aria-selected="view === 'manual'" :tabindex="view === 'manual' ? 0 : -1" @click="view = 'manual'">人工剪辑<span v-if="manualEditor?.dirty" class="draft-dot" aria-label="人工片段有未提交内容"></span></button></div>
     <div v-show="view === 'search'" :id="`${componentId}-search-view`" role="tabpanel" :aria-labelledby="`${componentId}-search-tab`">
-    <header class="transcript-heading"><div><h2>原句搜索</h2><p>从已完成转写中直接找文字或时间，无需请求 AI。ASR 原句尚未经人工校对。</p></div><span>当前视频 · {{ videoName }}</span></header>
+    <header class="transcript-heading"><div><h2>{{ pickingRange ? '按原句选片段' : '原句搜索' }}</h2><p>{{ pickingRange ? '在原句旁标记起句和止句，两句之间的原音画会一起保留。' : '按关键词或原片时间找台词，点击原句可查看前后文。' }}</p></div>
+      <button ref="rangeToggle" type="button" class="secondary range-toggle" :aria-pressed="pickingRange" @click="pickingRange = !pickingRange">{{ pickingRange ? '返回原句浏览' : '按原句选片段' }}</button></header>
     <form class="transcript-search-form" @submit.prevent="search"><label :for="`${componentId}-query`">搜索原句或时间<input :id="`${componentId}-query`" v-model="queryDraft" type="search" autocomplete="off" maxlength="200" placeholder="例如 缓存 过期，或 02:30" :disabled="!available" :aria-describedby="`${componentId}-help`"></label><button class="primary" type="submit" :disabled="!available || !!queryError">搜索原句</button></form>
     <p :id="`${componentId}-help`" class="transcript-help">空格分隔的词需同时出现在同一句，匹配原文和显示时间；留空可分页浏览。输入后点击搜索，翻页沿用已提交搜索词。</p>
     <p v-if="queryError" class="transcript-error" role="status">{{ queryError }}</p>
     <p v-if="currentState.pageLoading" class="transcript-read-status" role="status">正在读取原句 · 查询“{{ currentState.requested?.q || '全部原句' }}”…</p>
     <div v-if="currentState.pageError" class="transcript-read-error" role="alert"><p>{{ currentState.pageError }}</p><p v-if="currentState.page">下方仍为上次成功结果，查询“{{ currentState.page.q || '全部原句' }}”，第 {{ currentState.page.offset + 1 }} 项起；本次请求尚未替换它。</p><button class="secondary" :disabled="!available || currentState.pageLoading" @click="pageAction('retry')">重试读取</button><button v-if="currentState.sourceStale" class="secondary" :disabled="!available || currentState.pageLoading" @click="pageAction('reloadSource')">重新核对来源</button></div>
     <p v-if="currentState.page" class="transcript-results-summary">已读取结果：{{ currentState.page.q ? `“${currentState.page.q}”` : '全部原句' }} · 命中 {{ currentState.page.matched_utterances }} / 全部 {{ currentState.page.total_utterances }} 句 · {{ currentState.page.items.length ? `${currentState.page.offset + 1}–${currentState.page.offset + currentState.page.items.length}` : '本页 0' }} 项</p>
+    <div v-if="pickingRange" class="range-selection-bar" aria-label="所选剪辑范围">
+      <div role="status"><span>起句 <b>{{ range?.start ? transcriptTime(range.start.start_ms, true) : '待选择' }}</b></span>
+        <span>止句 <b>{{ range?.end ? transcriptTime(range.end.end_ms, true) : '待选择' }}</b></span>
+        <span v-if="orderedRange && range?.start && range?.end">时长 <b>{{ transcriptTime(range.end.end_ms - range.start.start_ms, true) }}</b></span>
+        <span v-else-if="range?.start && range?.end" class="range-error">止句早于起句</span>
+      </div>
+      <button type="button" class="primary" :disabled="!orderedRange || !!manualEditor?.pending || !!manualEditor?.unresolved" @click="reviewRange">核对所选片段 →</button>
+      <p v-if="handoffError" role="alert" class="range-error">{{ handoffError }}</p>
+    </div>
     <div class="transcript-layout">
       <div class="transcript-results"><p v-if="currentState.page && !currentState.page.items.length" class="transcript-empty">没有匹配原句。可换个关键词、搜索时间，或清空后搜索。</p><p v-else-if="!currentState.page && !currentState.pageLoading && !currentState.pageError" class="transcript-empty">打开当前工作区后读取原句；其他页面的草稿继续保留。</p>
-        <ol aria-label="原句搜索结果"><li v-for="({ item, chunks }, index) in highlighted" :key="item.utterance_id"><button type="button" class="transcript-result" :class="{ selected: currentState.selected?.utterance_id === item.utterance_id }" :disabled="!usable" :aria-label="`选择原句 ${currentState.page!.offset + index + 1} ${transcriptTime(item.start_ms)}`" :aria-pressed="currentState.selected?.utterance_id === item.utterance_id" @click="choose(item)"><span class="transcript-result-time">{{ transcriptTime(item.start_ms) }} → {{ transcriptTime(item.end_ms) }}</span><span class="transcript-result-text"><template v-for="(chunk, chunkIndex) in chunks" :key="chunkIndex"><mark v-if="chunk.hit">{{ chunk.text }}</mark><template v-else>{{ chunk.text }}</template></template></span></button></li></ol>
+        <ol aria-label="原句搜索结果"><li v-for="({ item, chunks }, index) in highlighted" :key="item.utterance_id" :class="{ retained: pickingRange && inRange(item) }"><button type="button" class="transcript-result" :class="{ selected: currentState.selected?.utterance_id === item.utterance_id }" :disabled="!usable" :aria-label="`选择原句 ${currentState.page!.offset + index + 1} ${transcriptTime(item.start_ms)}`" :aria-pressed="currentState.selected?.utterance_id === item.utterance_id" @click="choose(item)"><span class="transcript-result-time">{{ transcriptTime(item.start_ms) }} → {{ transcriptTime(item.end_ms) }}</span><span class="transcript-result-text"><template v-for="(chunk, chunkIndex) in chunks" :key="chunkIndex"><mark v-if="chunk.hit">{{ chunk.text }}</mark><template v-else>{{ chunk.text }}</template></template></span></button>
+          <div v-if="pickingRange" class="row-boundaries">
+            <button v-for="edge in (['start', 'end'] as const)" :key="edge" type="button" :aria-pressed="rangeHere && range?.[edge]?.utterance_id === item.utterance_id"
+              :aria-label="(edge === 'start' ? '起句' : '止句') + ' · ' + transcriptTime(edge === 'start' ? item.start_ms : item.end_ms, true)"
+              :disabled="!usable || !!manualEditor?.pending || !!manualEditor?.unresolved" @click="setRowBoundary(edge, item)">{{ edge === 'start' ? '起句' : '止句' }}</button>
+          </div></li></ol>
         <nav v-if="currentState.page" class="transcript-pagination" aria-label="原句结果分页"><button class="secondary" :disabled="!canGoBack" @click="pageAction('previous')">上一页</button><span>每次最多 20 句；长原句可能减少本页条数。</span><button class="secondary" :disabled="!usable || currentState.page.next_offset === null" @click="pageAction('next')">下一页</button></nav>
       </div>
       <aside ref="playerRegion" class="transcript-reference" aria-label="原句上下文与原视频">
         <h3>原视频回看</h3><video ref="player" :key="sourceKey" :src="available ? videoUrl : undefined" controls preload="metadata" playsinline @loadedmetadata="metadataLoaded" @timeupdate="mediaTimeUpdate" @playing="mediaTimeUpdate" @seeking="manualSeek" @seeked="mediaSeeked" @pause="paused" @ended="mediaEnded" @ratechange="mediaRateChange" @play="guardPlayback" @error="mediaError"></video>
         <div class="transcript-playback-actions"><button class="secondary" :disabled="!selectedUsable" @click="requestPlayback(false)">定位所选原句</button><button class="secondary" :disabled="!contextUsable || preparingPlayback" @click="previewState ? stopPlayback() : requestPlayback(true)">{{ previewState ? '停止上下文预览' : '连续预览前后文' }}</button><button class="text-button" :disabled="!selectedUsable || currentState.copyBusy" @click="copy">{{ currentState.copyBusy ? '正在复制…' : '复制所选原句引用' }}</button></div>
-        <section class="transcript-manual-handoff" aria-label="原句人工范围草稿"><div><button type="button" class="secondary" :disabled="!selectedUsable || !!manualEditor?.pending || !!manualEditor?.unresolved" @click="setManualBoundary('start')">设为人工起句</button><button type="button" class="secondary" :disabled="!selectedUsable || !!manualEditor?.pending || !!manualEditor?.unresolved" @click="setManualBoundary('end')">设为人工止句</button><button type="button" class="text-button" @click="view = 'manual'">查看人工片段</button></div><p v-if="manualEditor?.summary.hasRange">已保留起句 {{ manualEditor.summary.start ? transcriptTime(manualEditor.summary.start.start_ms, true) : '未选择' }} / 止句 {{ manualEditor.summary.end ? transcriptTime(manualEditor.summary.end.end_ms, true) : '未选择' }}。跨页与换词不清范围；尚未保存。</p><p v-else>明确设起止句后，在人工剪辑中核对完整范围、保存、确认并生成 MP4；不请求 AI。</p><p v-if="handoffError" class="transcript-error" role="alert">{{ handoffError }}</p></section>
+        <section v-if="!pickingRange" class="transcript-manual-handoff" aria-label="原句人工范围草稿"><div><button type="button" class="secondary" :disabled="!selectedUsable || !!manualEditor?.pending || !!manualEditor?.unresolved" @click="setManualBoundary('start')">设为人工起句</button><button type="button" class="secondary" :disabled="!selectedUsable || !!manualEditor?.pending || !!manualEditor?.unresolved" @click="setManualBoundary('end')">设为人工止句</button><button type="button" class="text-button" @click="view = 'manual'">查看人工片段</button></div><p v-if="manualEditor?.summary.hasRange">已保留起句 {{ manualEditor.summary.start ? transcriptTime(manualEditor.summary.start.start_ms, true) : '未选择' }} / 止句 {{ manualEditor.summary.end ? transcriptTime(manualEditor.summary.end.end_ms, true) : '未选择' }}。跨页与换词不清范围；尚未保存。</p><p v-else>明确设起止句后，在人工剪辑中核对完整范围、保存、确认并生成 MP4；不请求 AI。</p><p v-if="handoffError" class="transcript-error" role="alert">{{ handoffError }}</p></section>
         <p v-if="preparingPlayback" class="transcript-help" role="status">正在准备原视频定位…</p><p v-if="previewState" class="transcript-help" role="status">连续预览 {{ transcriptTime(previewState.start_ms) }} → {{ transcriptTime(previewState.end_ms) }}；手动操作将停止本次预览。</p><p v-if="playbackError" class="transcript-error" role="status">{{ playbackError }}</p>
         <p v-if="currentState.copyNotice" class="transcript-help" role="status">{{ currentState.copyNotice }}</p><div v-if="currentState.copyError" class="transcript-error" role="status"><p>{{ currentState.copyError }}</p><textarea v-if="currentState.selected" readonly aria-label="所选原句引用文本" :value="transcriptQuote(videoName, currentState.selected)"></textarea></div>
         <p v-if="!currentState.selected" class="transcript-help">选择一条原句查看前后各一句；选择不会自动播放或改动剪辑。</p>
@@ -184,6 +231,21 @@ onBeforeUnmount(() => { stopped = true; stopPlayback(); workspace.dispose(); doc
 .transcript-heading h2 { font-size: 18px; font-weight: 500; margin: 0 0 8px; }
 .transcript-heading p, .transcript-heading > span { font-size: 13px; line-height: 1.7; color: var(--workspace-muted, #675f56); }
 .transcript-heading > span { max-width: 38%; overflow-wrap: anywhere; }
+.range-toggle { flex:none; }
+.range-selection-bar { position:sticky; top:0; z-index:2; display:flex; flex-wrap:wrap; gap:8px 14px; align-items:center; justify-content:space-between; padding:10px 12px; margin:12px 0; border:1px solid var(--workspace-control-border); border-radius:7px; background:var(--workspace-surface); }
+.range-selection-bar > div { display:flex; flex-wrap:wrap; gap:5px 14px; color:var(--workspace-muted); font-size:12px; }
+.range-selection-bar b { font-family:var(--workspace-mono); font-weight:500; color:var(--workspace-text); }
+.range-selection-bar > button { min-height:36px; padding:6px 12px; }
+.picking-range li.retained .transcript-result { border-inline-start:3px solid var(--workspace-accent); background:var(--workspace-accent-soft); }
+.range-error { color:var(--studio-danger); }
+.picking-range .transcript-results li { display:grid; grid-template-columns:minmax(0,1fr) auto; align-items:center; gap:4px; }
+.row-boundaries { display:flex; gap:3px; padding-right:3px; }
+.row-boundaries button { border:1px solid var(--workspace-control-border); border-radius:4px; min-height:32px; padding:4px 7px; background:var(--studio-raised); color:var(--workspace-text); font-size:12px; }
+.row-boundaries button[aria-pressed=true] { color:var(--workspace-accent); background:var(--workspace-accent-soft); border-color:var(--workspace-accent); }
+@media(pointer:coarse) { .row-boundaries button,.range-selection-bar > button { min-height:40px; } }
+@media(max-width:1050px) { .picking-range .transcript-reference { grid-row:auto; } }
+@media(max-width:600px) { .range-toggle { margin-top:7px; } .row-boundaries { flex-direction:column; } }
+@media(max-height:520px) { .range-selection-bar { position:static; } }
 .transcript-search-form { display: flex; align-items: flex-end; gap: 12px; margin-top: 20px; }
 .transcript-search-form label { flex: 1; min-width: 0; font-size: 13px; color: var(--workspace-muted, #675f56); }
 .transcript-search-form input { display: block; width: 100%; margin-top: 8px; padding: 12px; border: 1px solid var(--workspace-border, #e4e0d8); border-radius: 8px; background: var(--workspace-surface, #fff); color: var(--workspace-text, #292621); font: inherit; font-size: 14px; }

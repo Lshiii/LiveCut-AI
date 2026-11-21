@@ -36,7 +36,8 @@ import { intentCanCancel, intentCanConfirm, intentCanExport, intentCanResume, in
   IntentReadScope, IntentResponseError, newestIntentSnapshot, parseIntentSnapshot, refreshIntentEvidence,
   parseResumedIntentSnapshot, type IntentOutput, type IntentResumeReceipt, type IntentSnapshot, type IntentUtterance } from './intentClips'
 
-const props = defineProps<{ jobId: string; videoUrl: string; videoId?: string; videoHash?: string; videoName?: string; active?: boolean }>()
+const props = defineProps<{ jobId: string; videoUrl: string; videoId?: string; videoHash?: string; videoName?: string; playheads?: Map<string, number>; active?: boolean }>()
+const emit = defineEmits<{ selectRange: [] }>()
 const instruction = ref(''), maxCalls = ref<number | string>(6)
 const history = ref(new IntentHistoryPager()), details = ref(new Map<string, IntentSnapshot>()), historyLoading = ref(false)
 const historyScope = new IntentReadScope()
@@ -207,7 +208,11 @@ const rangePickerApplyHandler = computed(() => {
 const names: Record<string, string> = { QUEUED: '等待执行', RUNNING: '正在查找', PLAN_READY: '候选已生成', FAILED: '执行失败', CANCELLED: '已取消',
   FOUND: '已找到证据', NOT_FOUND: '未找到', NEEDS_REVIEW: '需进一步核对', READY: '等待领取', BLOCKED: '等待前序',
   RETRY_WAIT: '等待重试', SUCCEEDED: '已完成', PARTIAL_FAILED: '部分失败', SKIPPED: '已跳过' }
-defineExpose({ dirty: computed(() => dirty.value || !!captionEditor.value?.dirty), pending: computed(() => pending.value || !!captionEditor.value?.pending), prefillInstruction, prefillAnswerClip })
+defineExpose({ dirty: computed(() => dirty.value || !!captionEditor.value?.dirty), pending: computed(() => pending.value || !!captionEditor.value?.pending), prefillInstruction, prefillAnswerClip, openComposer })
+function openComposer() {
+  setView('compose')
+  void nextTick(() => { if (mediaActive('compose')) instructionInput.value?.focus() })
+}
 function prefillInstruction(value: string): boolean {
   if (!canPrefillClipInstruction(value, dirty.value || !!captionEditor.value?.dirty, pending.value || !!captionEditor.value?.pending)) return false
   closeRangePicker(false)
@@ -1122,10 +1127,10 @@ onBeforeUnmount(() => { stopped = true; historyVersion++; historyScope.dispose()
       <DraftBackupPanel kind="intent" :document-id="jobId" :value="backupValue" :blocked="backupBlocked" :assess="assessBackup" @restore="restoreBackup" />
       <div class="intent-views">
         <div v-show="intentView === 'compose'" :id="`intent-page-${jobId}-compose`" class="intent-compose-view studio-compose" role="tabpanel" :aria-labelledby="`intent-view-${jobId}-compose`">
-          <SourceStudio compose :video="{ id: videoId || jobId, content_url: videoUrl, original_filename: videoName || '原视频' }"
+          <SourceStudio compose :playheads="playheads" :video="{ id: videoId || jobId, content_url: videoUrl, original_filename: videoName || '原视频' }"
             :active="active !== false && intentView === 'compose' && !historyOpen && !manualReviewEditor?.opened">
           <div class="studio-brief">
-          <div class="intent-compose-title"><h3>剪辑要求</h3><p>写下要保留的内容，找到候选后可继续调整剪点。</p></div>
+          <div class="intent-compose-title"><h3>剪辑要求</h3><p>描述要保留的内容，或<button type="button" class="text-button switch-to-range" @click="emit('selectRange')">自己按原句选段</button>。</p></div>
           <div v-if="pendingCreate" class="intent-anchor-receipt" role="status"><strong>原提交结果待核对</strong><p>原要求：{{ pendingCreatePayload?.instruction }}</p><p>原预算上限 {{ pendingCreatePayload?.max_text_calls }} 次；{{ pendingCreate.source_answer ? `锚定回答 #${pendingCreate.source_answer.turn_id.slice(0, 8)} · ${pendingCreate.source_answer.utterance_ids.length} 条原句` : '普通文字要求' }}。不会自动换键或退回普通请求。</p><button class="secondary" :disabled="pending || active === false || planDirty || saveNeedsCheck || planRevisionConflict" @click="create(true)">核对原提交</button></div>
           <details v-if="inputAnswerBinding" class="intent-answer-anchor" :open="inputAnswerBinding.utterance_ids.length <= 3"><summary>围绕所选原句剪辑 · 1 个目标 · {{ inputAnswerBinding.utterance_ids.length }} 句</summary><p>来自视频回答 #{{ inputAnswerBinding.turn_id.slice(0, 8) }}<template v-if="answerSelection"> · {{ answerSelection.question }}</template></p><p>这些原句位于视频中的具体位置，将共同组成一个片段。可补充前后解释，所选句会完整保留。初始候选仅核对这些原句及相邻上下文，不代表全文检索。</p><blockquote v-for="citation in answerSelection?.citations ?? []" :key="citation.utterance_id"><strong>原视频 {{ topicTime(citation.start_ms) }} → {{ topicTime(citation.end_ms) }}</strong><p>{{ citation.text }}</p></blockquote><p v-if="!answerSelection">原句标识：{{ inputAnswerBinding.utterance_ids.join('、') }}。核对原提交后显示冻结引用。</p><button class="text-button" :disabled="pending || !!pendingCreate || manualReviewProtected" @click="removeAnswerAnchor">取消绑定，保留文字要求</button></details>
           <div class="intent-compose">

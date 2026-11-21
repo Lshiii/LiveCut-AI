@@ -13,17 +13,21 @@ function button(root: HostNode, text: string) {
   return node
 }
 
+function paperEditor() {
+  const placeholder = { render: () => null }
+  return compileHostComponent(new URL('../PaperCutEditor.vue', import.meta.url), {
+    './paperCut': paperCut, './sequencePreview': preview, './topics': { topicTime },
+    './editTimeline': editTimeline, './CutScrubber.vue': placeholder,
+    './PaperCutBudget.vue': placeholder, './PaperCutSuggestion.vue': placeholder,
+  })
+}
+
 test('range selection skips protected rows; filtering preserves batch selection and the unfiltered page position', async () => {
   const prior = { document: globalThis.document, Document: globalThis.Document }
   class TestDocument extends EventTarget { hidden = false }
   Object.assign(globalThis, { document: new TestDocument(), Document: TestDocument })
   const root = hostNode('root')
-  const placeholder = { render: () => null }
-  const component = compileHostComponent(new URL('../PaperCutEditor.vue', import.meta.url), {
-    './paperCut': paperCut, './sequencePreview': preview, './topics': { topicTime },
-    './editTimeline': editTimeline, './CutScrubber.vue': placeholder,
-    './PaperCutBudget.vue': placeholder, './PaperCutSuggestion.vue': placeholder,
-  })
+  const component = paperEditor()
   const rows = Array.from({ length: 62 }, (_, i) => ({
     utterance: { utterance_id: `u${i}`, start_ms: i * 1000, end_ms: (i + 1) * 1000, text: `sentence[${i}]` },
     evidence: true, anchor: i === 31, partIndex: 0,
@@ -64,6 +68,57 @@ test('range selection skips protected rows; filtering preserves batch selection 
     hostRenderer.render(null, root)
     Object.assign(globalThis, prior)
   }
+})
+
+test('a sentence seeks without selecting or playing; a removed sentence auditions the retained join and can be restored', async () => {
+  const prior = globalThis.document
+  const doc = Object.assign(new EventTarget(), { hidden: false, baseURI: 'http://test/' })
+  Object.assign(globalThis, { document: doc })
+  const root = hostNode('root'), rows = Array.from({ length: 4 }, (_, i) => ({
+    utterance: { utterance_id: 'u' + i, start_ms: 1000 + i * 2000, end_ms: 3000 + i * 2000, text: '原句' + i },
+    partIndex: 0, evidence: true, anchor: i === 2,
+  }))
+  try {
+    hostRenderer.render(h(paperEditor(), { source: { rows, originalDurationMs: 8000 }, context: {}, title: '测试', goal: '',
+      videoUrl: '/source', token: 1, active: true, stale: false }), root)
+    const dialog = allHostNodes(root).find(node => node.type === 'dialog')!
+    dialog.showModal = () => { dialog.open = true }; dialog.close = () => { dialog.open = false }
+    await flushHost()
+    const video = allHostNodes(root).find(node => node.type === 'video')!
+    video.props.onLoadedmetadata({ currentTarget: video })
+    await flushHost()
+    const articles = () => allHostNodes(root).filter(node => node.type === 'article')
+    const sentence = articles()[1]!
+    allHostNodes(sentence).find(node => node.props['aria-label'] === '定位原片 00:03.000')!.props.onClick()
+    await flushHost()
+    assert.equal(video.currentTime, 3)
+    assert.equal(video.playCalls, 0)
+    assert.equal(sentence.props['aria-current'], 'true')
+    assert.equal(allHostNodes(sentence).find(node => node.props.type === 'checkbox')!.props.checked, false)
+    button(sentence, '剪掉此句').props.onClick()
+    await flushHost()
+    button(sentence, '试听剪后衔接').props.onClick()
+    await flushHost()
+    assert.equal(video.currentTime, 1.5)
+    assert.equal(video.playCalls, 1)
+    video.currentTime = 3
+    video.props.onTimeupdate({ type:'timeupdate', currentTarget:video })
+    assert.equal(video.currentTime, 5)
+    video.currentTime = 6.5
+    video.props.onTimeupdate({ type:'timeupdate', currentTarget:video })
+    assert.equal(video.currentTime, 6.499)
+    assert.equal(video.paused, true)
+    button(sentence, '恢复此句').props.onClick()
+    await flushHost()
+    assert.ok(!hostText(sentence).includes('试听剪后衔接'))
+    assert.ok(hostText(articles()[2]!).includes('回答锚句 · 必留'))
+    button(articles()[0]!, '剪掉此句').props.onClick()
+    await flushHost()
+    assert.ok(button(articles()[0]!, '试听新开头'))
+    button(articles()[3]!, '剪掉此句').props.onClick()
+    await flushHost()
+    assert.ok(button(articles()[3]!, '试听新结尾'))
+  } finally { hostRenderer.render(null, root); Object.assign(globalThis, { document:prior }) }
 })
 
 test('selecting a cut stops the previous audition and keeps the same source boundary after an earlier edit', async () => {

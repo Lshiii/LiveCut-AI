@@ -271,6 +271,9 @@
 .workbench-sidebar .brand strong { font-size:21px; letter-spacing:-.6px; }
 .workbench-sidebar .brand strong > span { color:var(--workspace-accent); }
 .library-scroll { flex:1; min-height:0; overflow-y:auto; scrollbar-width:thin; padding:0 2px 12px; }
+.history-expand { display:flex; align-items:center; gap:8px; width:100%; padding:14px 0 10px; margin-top:18px; color:var(--workspace-text); border-top:1px solid var(--workspace-border); background:transparent; text-align:left; }
+.history-expand small { margin-left:auto; }
+.history-expand small,.history-expand span,.history-meta { font-size:12px; color:var(--workspace-muted); }
 .bin-count { padding:1px 6px; border-radius:4px; color:var(--workspace-muted); background:var(--studio-raised); font:11px/1.5 var(--workspace-mono); }
 .bin-actions { display:flex; gap:6px; margin:8px 0; }
 .bin-actions button { flex:1; min-height:34px; }
@@ -315,6 +318,16 @@
 .studio-brief textarea { min-height:100px; }
 .studio-brief .intent-create-row { gap:10px; }
 .studio-brief .intent-create-row .primary { flex:none; white-space:nowrap; }
+.studio-brief .switch-to-range { padding:0 2px; color:var(--workspace-accent); font-size:inherit; }
+.executor-disclosure { color:var(--workspace-muted); border-top:1px solid var(--workspace-border); }
+.executor-disclosure > summary { cursor:pointer; padding:12px 15px; font-size:13px; }
+.import-stage { display:grid; place-content:center; min-height:clamp(300px,67dvh,760px); text-align:center; border:1px dashed var(--workspace-control-border); border-radius:10px; background:var(--workspace-surface); }
+.import-stage.hovering { border-color:var(--workspace-accent); background:var(--workspace-accent-soft); }
+.import-stage-body { padding:28px; }
+.import-stage-body svg { width:46px; height:46px; fill:none; stroke:var(--workspace-accent); stroke-width:2; stroke-linecap:round; stroke-linejoin:round; margin-bottom:15px; }
+.import-stage-body h1 { font-size:clamp(22px,2.5vw,32px); }
+.import-stage-body p { margin:8px 0 20px; color:var(--workspace-muted); }
+.import-stage-body div { display:flex; justify-content:center; flex-wrap:wrap; gap:10px; }
 @media(min-width:1101px) {
   .workbench-shell:not(.sidebar-collapsed) { grid-template-columns:236px minmax(0,1fr); }
 }

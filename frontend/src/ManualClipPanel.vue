@@ -50,8 +50,8 @@ const canEdit = computed(() => available.value && !pending.value && !unresolved.
 const canWrite = computed(() => canEdit.value && !draftError.value && proofUsable.value && (!plan.value || plan.value.revision === plan.value.latest_revision) && draftDirty.value)
 const canConfirm = computed(() => canEdit.value && !!plan.value && !draftDirty.value && accepted.value && plan.value.status === 'DRAFT' && plan.value.revision === plan.value.latest_revision && proofUsable.value)
 const canExport = computed(() => canEdit.value && !!plan.value && !draftDirty.value && plan.value.status === 'CONFIRMED' && proofUsable.value)
-const summary = computed(() => ({ title: title.value, start: start.value, end: end.value, hasRange: !!start.value || !!end.value, planId: plan.value?.id ?? null }))
-defineExpose({ dirty, pending, unresolved, summary, message: error, setBoundary })
+const summary = computed(() => ({ title: title.value, source: source.value, start: start.value, end: end.value, hasRange: !!start.value || !!end.value, planId: plan.value?.id ?? null }))
+defineExpose({ dirty, pending, unresolved, summary, message: error, setBoundary, checkRange })
 function code(value: unknown) { return value && typeof value === 'object' && 'code' in value ? String(value.code) : '' }
 function fail(value: unknown): string {
   const names: Record<string, string> = {

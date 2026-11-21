@@ -264,6 +264,25 @@ test('manual recovering another window original never replaces a different dirty
   } finally { ui.close() }
 })
 
+test('row controls mark endpoints across pages and check the full range without a write', async () => {
+  const ui = await mount(true, undefined, true)
+  try {
+    await ui.click('按原句选片段')
+    const mark = async (edge: string, index: number) => {
+      const buttons = ui.nodes().filter(node => node.type === 'button' && node.props['aria-label']?.startsWith(edge + ' · '))
+      buttons[index]!.props.onClick(); await flushHost()
+    }
+    await mark('起句', 1); await mark('止句', 0)
+    assert.equal(ui.button('核对所选片段 →').props.disabled, true)
+    await ui.click('下一页'); await mark('止句', 1)
+    await ui.click('核对所选片段 →')
+    await settle(() => !ui.button('创建人工剪辑方案').props.disabled)
+    assert.match(hostText(ui.root), /已核对完整范围：3 句/)
+    assert.ok(ui.calls.every(call => call.method === 'GET'))
+    assert.equal(ui.calls.filter(call => call.path.includes('/transcript/range')).length, 1)
+  } finally { ui.close() }
+})
+
 test('real search and manual SFCs hand off explicit endpoints, preserve across paging/query/subview tabs and aggregate task guards', async () => {
   const ui = await mount(true, undefined, true)
   try {

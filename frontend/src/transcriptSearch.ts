@@ -85,7 +85,7 @@ export function parseTranscriptContext(raw: unknown, owner: TranscriptOwner, sou
     || previous && next && previous.utterance_id === next.utterance_id) invalid()
   return Object.freeze({ schema_version: '1.0', data_kind: 'transcript_context', source: checkedSource, center: checked, previous, next })
 }
-function sameTranscriptUtterance(a: TranscriptUtterance, b: TranscriptUtterance) {
+export function sameTranscriptUtterance(a: TranscriptUtterance, b: TranscriptUtterance) {
   return a.utterance_id === b.utterance_id && a.start_ms === b.start_ms && a.end_ms === b.end_ms && a.text === b.text
 }
 export function transcriptPageUrl(owner: TranscriptOwner, request: TranscriptPageRequest): string {

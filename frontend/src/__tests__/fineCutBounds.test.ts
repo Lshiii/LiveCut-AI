@@ -54,7 +54,7 @@ async function mount() {
   await flushHost()
   const find = (match:(n:HostNode)=>boolean) => { const node=allHostNodes(root).find(match); assert.ok(node); return node }
   return {
-    win, get:(name:string)=>find(n=>n.props['aria-label']===name),
+    win, find, get:(name:string)=>find(n=>n.props['aria-label']===name),
     button:(name:string)=>find(n=>n.type==='button' && hostText(n).trim()===name),
     segment:()=>find(n=>n.type==='select' && n.parent?.props.class==='fine-segment'),
     close() { renderer.render(null,root); Object.assign(globalThis,old) },
@@ -130,5 +130,87 @@ test('one undo restores a whole handle drag; an edit to another segment has its 
     assert.equal(ui.segment().props.value,0)
     assert.equal(ui.get('拖动出点').props.value,5000)
     assert.equal(undo.props.disabled,true)
+  } finally { ui.close() }
+})
+
+test('source playhead seeks without trimming, marks exact boundaries, and can lengthen back into discarded media', async () => {
+  const ui = await mount()
+  try {
+    const video = ui.find(n => n.type === 'video')
+    const head = ui.get('本段原片播放头')
+    const mark = (key: string) => ui.find(n => n.props['aria-keyshortcuts'] === key)
+    const seek = async (ms: number) => {
+      head.props.onInput({ target: { valueAsNumber: ms } })
+      await flushHost()
+    }
+    video.props.onLoadedmetadata()
+    await flushHost()
+    await seek(4500)
+    assert.equal(video.currentTime, 4.5)
+    assert.equal(ui.button('撤销上次调整').props.disabled, true)
+    mark('I').props.onClick()
+    await flushHost()
+    assert.equal(ui.get('入点原片时间').props.value, '00:04.500')
+    assert.equal(mark('O').props.disabled, true)
+    await seek(4501)
+    mark('O').props.onClick()
+    await flushHost()
+    assert.equal(ui.get('出点原片时间').props.value, '00:04.501')
+    await seek(5000)
+    assert.equal(video.currentTime, 4.999)
+    assert.equal(mark('I').props.disabled, true)
+    mark('O').props.onClick()
+    await flushHost()
+    assert.equal(ui.get('出点原片时间').props.value, '00:05.000')
+    await seek(4000)
+    const key = (inText: boolean) => {
+      const event = { key:'i', target:{ closest:() => inText ? {} : null }, preventDefault() {} }
+      const listener = ui.get('人工精剪').props.onKeydown
+      for (const callback of Array.isArray(listener) ? listener : [listener]) callback(event)
+    }
+    key(true)
+    await flushHost()
+    assert.equal(ui.get('入点原片时间').props.value, '00:04.500')
+    key(false)
+    await flushHost()
+    assert.equal(ui.get('入点原片时间').props.value, '00:04.000')
+    ui.button('撤销上次调整').props.onClick()
+    await flushHost()
+    assert.equal(ui.get('入点原片时间').props.value, '00:04.500')
+    ui.get('入点原片时间').props.onInput({target:{value:'unfinished'}})
+    await flushHost()
+    assert.equal(head.props.disabled, true)
+    assert.equal(mark('O').props.disabled, true)
+    key(false)
+    assert.equal(ui.get('入点原片时间').props.value, 'unfinished')
+  } finally { ui.close() }
+})
+
+test('marking during playback samples the live source head and follows the active part across an assembled cut', async () => {
+  const ui = await mount()
+  try {
+    const video = ui.find(n => n.type === 'video')
+    video.props.onLoadedmetadata()
+    ui.button('从游标试听').props.onClick()
+    await flushHost()
+    video.currentTime = 5
+    video.props.onTimeupdate({currentTarget:video})
+    await flushHost()
+    assert.equal(ui.segment().props.value, 1)
+    assert.equal(video.currentTime, 10)
+    video.currentTime = 10.25
+    ui.find(n => n.props['aria-keyshortcuts'] === 'O').props.onClick()
+    await flushHost()
+    assert.equal(ui.get('出点原片时间').props.value, '00:10.250')
+    assert.equal(video.paused, true)
+    ui.get('本段原片播放头').props.onInput({target:{valueAsNumber:10500}})
+    ui.button('播放本段原片').props.onClick()
+    await flushHost()
+    assert.equal(video.currentTime, 10.5)
+    video.currentTime = 10.75
+    ui.find(n => n.props['aria-keyshortcuts'] === 'O').props.onClick()
+    await flushHost()
+    assert.equal(video.paused, true)
+    assert.equal(ui.get('出点原片时间').props.value, '00:10.750')
   } finally { ui.close() }
 })

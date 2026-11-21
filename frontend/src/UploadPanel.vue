@@ -26,9 +26,9 @@ const canContinue = computed(() => selected.value !== null && ['paused', 'error'
 const percent = computed(() => Math.min(100, Math.round((view.value.snapshot?.received_bytes ?? view.value.hashedBytes) / Math.max(1, view.value.size) * 100)))
 function bytes(value: number) { return value < 1024 * 1024 ? `${(value / 1024).toFixed(1)} KiB` : `${(value / 1024 / 1024).toFixed(1)} MiB` }
 function chooseFile() { if (!busy.value && props.canStart()) input.value?.click() }
-defineExpose({ chooseFile })
+defineExpose({ chooseFile, uploadFile: run })
 async function run(file: File) {
-  if (!props.canStart() || stopped) return
+  if (busy.value || !props.canStart() || stopped) return
   localError.value = ''
   try {
     validateUploadFile(file); selected.value = file; emit('started')
