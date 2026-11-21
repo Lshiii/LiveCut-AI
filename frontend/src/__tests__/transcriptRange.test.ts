@@ -23,6 +23,14 @@ test('selection maps inclusive original source order to new exact boundary value
     { start_utterance_id: 'z9', end_utterance_id: 'z9', start_ms: 0, end_ms: 1000 })
 })
 
+test('editing a boundary protects its answer citations and leaves other parts independently editable', () => {
+  const { output, utterances, duration } = fixture()
+  const protectedIds = ['z9', 'u3']
+  assert.match(validateTranscriptRange(output, 0, 'u2', 'a1', utterances, duration, protectedIds).error, /引用的原句/)
+  assert.ok(validateTranscriptRange(output, 0, 'z9', 'a1', utterances, duration, protectedIds).part)
+  assert.ok(validateTranscriptRange(output, 1, 'u3', 'u3', utterances, duration, protectedIds).part)
+})
+
 test('NOT_FOUND, unknown statuses and invalid part indexes cannot be edited', () => {
   const { output, utterances, duration } = fixture()
   for (const status of ['NOT_FOUND', 'UNKNOWN', '', null]) {

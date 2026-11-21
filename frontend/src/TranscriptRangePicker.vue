@@ -11,6 +11,7 @@ const props = withDefaults(defineProps<{
   utterances: IntentUtterance[]
   durationMs: number
   videoUrl?: string
+  protectedIds?: readonly string[]
   active?: boolean
   stale?: boolean
   initialTimeMs?: number
@@ -29,7 +30,7 @@ const start = computed(() => sources.value.get(startId.value)), end = computed((
 const excluded = computed(() => new Map(props.output.excluded.map(value => [value.utterance_id, value.reason])))
 const indexes = computed(() => filterTranscriptIndexes(props.utterances, query.value))
 const shown = computed(() => transcriptPage(indexes.value, page.value, 20))
-const selection = computed(() => validateTranscriptRange(props.output, props.partIndex, startId.value, endId.value, props.utterances, props.durationMs))
+const selection = computed(() => validateTranscriptRange(props.output, props.partIndex, startId.value, endId.value, props.utterances, props.durationMs, props.protectedIds))
 const canApply = computed(() => props.active && !props.stale && !!selection.value.part && !selection.value.error)
 const boundary = computed(() => activeField.value === 'start' ? start.value : end.value)
 function adjacent(offset: number) {
@@ -38,7 +39,7 @@ function adjacent(offset: number) {
   if (!row) return
   const first = activeField.value === 'start' ? row.utterance_id : startId.value
   const last = activeField.value === 'end' ? row.utterance_id : endId.value
-  if (validateTranscriptRange(props.output, props.partIndex, first, last, props.utterances, props.durationMs).part) return row
+  if (validateTranscriptRange(props.output, props.partIndex, first, last, props.utterances, props.durationMs, props.protectedIds).part) return row
 }
 const earlier = computed(() => adjacent(-1)), later = computed(() => adjacent(1))
 function move(row: IntentUtterance | undefined) {
@@ -130,7 +131,7 @@ onBeforeUnmount(() => { stopped = true; dialog.value?.close() })
     <div ref="list" class="range-picker-list" aria-label="可选原句列表">
       <p v-if="!shown.indexes.length" class="range-picker-empty">{{ utterances.length ? '没有找到匹配原句。可换个关键词、搜索时间，或清空搜索。' : '当前没有可用转写原句，请关闭后重新读取方案。' }}</p>
       <article v-for="index in shown.indexes" :id="rowId(index)" :key="utterances[index]!.utterance_id" class="range-candidate" :class="{ boundary: isBoundary(utterances[index]!.utterance_id), retained: inRange(index), excluded: excluded.has(utterances[index]!.utterance_id) }">
-        <label class="range-candidate-choice"><input type="radio" :name="`${pickerId}-${activeField}`" :checked="utterances[index]!.utterance_id === (activeField === 'start' ? startId : endId)" :disabled="stale || excluded.has(utterances[index]!.utterance_id)" :aria-label="`${activeField === 'start' ? '选择起句' : '选择止句'} ${topicTime(utterances[index]!.start_ms)} ${utterances[index]!.text}`" @change="choose(index)"><span class="range-candidate-content"><span class="range-candidate-meta"><span>{{ topicTime(utterances[index]!.start_ms) }} → {{ topicTime(utterances[index]!.end_ms) }}</span><strong v-if="utterances[index]!.utterance_id === startId">起句</strong><strong v-if="utterances[index]!.utterance_id === endId">止句</strong><em v-if="excluded.has(utterances[index]!.utterance_id)">已排除</em></span><span class="range-candidate-text">{{ utterances[index]!.text }}</span></span></label>
+        <label class="range-candidate-choice"><input type="radio" :name="`${pickerId}-${activeField}`" :checked="utterances[index]!.utterance_id === (activeField === 'start' ? startId : endId)" :disabled="stale || excluded.has(utterances[index]!.utterance_id)" :aria-label="`${activeField === 'start' ? '选择起句' : '选择止句'} ${topicTime(utterances[index]!.start_ms)} ${utterances[index]!.text}`" @change="choose(index)"><span class="range-candidate-content"><span class="range-candidate-meta"><span>{{ topicTime(utterances[index]!.start_ms) }} → {{ topicTime(utterances[index]!.end_ms) }}</span><strong v-if="utterances[index]!.utterance_id === startId">起句</strong><strong v-if="utterances[index]!.utterance_id === endId">止句</strong><strong v-if="protectedIds?.includes(utterances[index]!.utterance_id)">回答必留</strong><em v-if="excluded.has(utterances[index]!.utterance_id)">已排除</em></span><span class="range-candidate-text">{{ utterances[index]!.text }}</span></span></label>
         <p v-if="excluded.has(utterances[index]!.utterance_id)" class="range-excluded-reason">{{ excluded.get(utterances[index]!.utterance_id) }}</p>
         <details v-if="index > 0 || index + 1 < utterances.length" class="range-candidate-context"><summary>查看前后原句</summary><div v-if="index > 0"><strong>前一句 · {{ topicTime(utterances[index - 1]!.start_ms) }}</strong><p>{{ utterances[index - 1]!.text }}</p></div><div v-if="index + 1 < utterances.length"><strong>后一句 · {{ topicTime(utterances[index + 1]!.start_ms) }}</strong><p>{{ utterances[index + 1]!.text }}</p></div></details>
       </article>

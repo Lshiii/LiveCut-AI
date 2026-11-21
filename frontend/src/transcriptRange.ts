@@ -9,7 +9,7 @@ const invalid = (error: string): RangeResult => ({ part: null, error })
 
 /** A local boundary edit only; status, exclusions, evidence and permissions stay with the caller. */
 export function validateTranscriptRange(output: IntentOutput, partIndex: number, startId: string, endId: string,
-  utterances: IntentUtterance[], durationMs: number): RangeResult {
+  utterances: IntentUtterance[], durationMs: number, protectedIds: readonly string[] = []): RangeResult {
   if (!output || !['FOUND', 'NEEDS_REVIEW'].includes(output.status) || !Array.isArray(output.parts)) return invalid('当前目标不能调整原句区间。')
   if (!Number.isSafeInteger(partIndex) || partIndex < 0 || partIndex >= output.parts.length) return invalid('要调整的保留区间已变化，请重新选择。')
   if (!Array.isArray(utterances) || !utterances.length || !milliseconds(durationMs) || !durationMs) return invalid('原句来源或时间无效，请重新读取后再试。')
@@ -30,6 +30,13 @@ export function validateTranscriptRange(output: IntentOutput, partIndex: number,
   const start = source.get(startId), end = source.get(endId)
   if (!start || !end) return invalid('请选择有效的起始原句和结束原句。')
   if (start.index > end.index) return invalid('结束原句不能早于起始原句。')
+  const original = output.parts[partIndex]
+  const originalStart = original && source.get(original.start_utterance_id), originalEnd = original && source.get(original.end_utterance_id)
+  if (originalStart && originalEnd && protectedIds.some(id => {
+    const row = source.get(id)
+    return row && row.index >= originalStart.index && row.index <= originalEnd.index
+      && (row.index < start.index || row.index > end.index)
+  })) return invalid('此区间需保留回答引用的原句，请把该句包含在起止范围内。')
   function containsExcluded(first: number, last: number) {
     for (let index = first; index <= last; index++) if (excluded.has(utterances[index]!.utterance_id)) return true
     return false
