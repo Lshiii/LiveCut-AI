@@ -98,3 +98,30 @@
   .range-picker-list { height: 180px; min-height: 180px; }
   .range-picker-footer { max-height: none; overflow: visible; }
 }
+.transcript-range-picker { width: min(1060px, calc(100vw - 24px)); color: var(--workspace-text); font-family: var(--workspace-font); }
+.range-edit-body { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(210px, 30%) minmax(0, 1fr); }
+.range-controls { padding: 14px; background: var(--workspace-canvas); overflow: auto; border-right: 1px solid var(--workspace-border); }
+.range-controls .range-picker-boundaries { grid-template-columns: minmax(0, 1fr); padding: 0; margin-top: 10px; gap: 6px; }
+.range-boundary-summary { background: white; }
+.range-nudge { display: flex; align-items: center; flex-wrap: wrap; gap: 5px; margin-top: 8px; }
+.range-nudge > span { color: var(--workspace-muted); font-size: 12px; margin-right: auto; }
+.range-nudge .range-button { min-height: 32px; padding: 4px 8px; }
+.range-transcript { min-height: 0; min-width: 0; display: flex; flex-direction: column; }
+.range-button.primary { background: var(--workspace-accent); border-color: var(--workspace-accent); }
+.range-picker-footer { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.range-picker-footer > p { margin: 0; }
+@media (max-width: 700px) {
+  .transcript-range-picker { width: calc(100vw - 12px); height: calc(100dvh - 12px); }
+  .range-edit-body { display: flex; flex-direction: column; }
+  .range-controls { flex: none; padding: 7px 12px; border: 0; border-bottom: 1px solid var(--workspace-border); }
+  .range-controls .range-picker-boundaries { grid-template-columns: repeat(2,minmax(0,1fr)); margin-top: 6px; }
+  .range-nudge { margin-top: 5px; }
+  .range-transcript { flex: 1; }
+  .range-picker-footer { display: block; }
+}
+@media (max-height: 500px) {
+  .transcript-range-picker[open] { display: block; overflow-y: auto; }
+  .range-controls { overflow: visible; }
+  .range-picker-list { flex: auto; height: auto; max-height: 48dvh; min-height: 130px; }
+  .range-picker-footer { position: sticky; bottom: 0; max-height: none; }
+}
